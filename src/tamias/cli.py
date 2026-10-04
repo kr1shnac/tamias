@@ -252,7 +252,8 @@ def report(db_path: str, prices_path: str) -> None:
         if realised_count > 0:
             line1 = (
                 f"realised saving (rows the proxy actually rewrote): "
-                f"{_money(realised_saved)} ({ESTIMATE_LABEL}"
+                f"{_money(realised_saved)} over {realised_count} rows "
+                f"({ESTIMATE_LABEL}"
             )
             if realised_unpriced and realised_count > realised_unpriced:
                 line1 += f"; {realised_unpriced} of {realised_count} not priced"
