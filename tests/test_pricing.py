@@ -141,17 +141,31 @@ def test_the_shipped_openrouter_simulated_sheet_is_simulated_with_invented_price
 
     Its numbers are made up on purpose: if they ever read as 0, the file stops
     being a rehearsal and becomes a claim that the models are free.
+
+    It is keyed by the real OpenRouter model ids, quoted because of the `/` and
+    `:`.  Keying by the real ids is what makes the rehearsal usable: the ids a
+    live session logs are then the ids this sheet has invented rates for, so a
+    report over a real log finds prices instead of UNKNOWN.
     """
     root = Path(__file__).resolve().parents[1]
     sheet = load_price_sheet(root / "prices.openrouter-sim.toml")
+    ultra = "nvidia/nemotron-3-ultra-550b-a55b:free"
+    lightning = "nvidia/nemotron-3.5-lightning:free"
     assert sheet.simulated is True
-    assert sheet.get("strong") == ModelPrice(
+    assert set(sheet.models) == {ultra, lightning}
+    assert sheet.get(ultra) == ModelPrice(
         input=3.0, output=15.0, cached_input=0.30, cache_write=0.0, cache_write_1h=0.0
     )
-    assert sheet.get("cheap") == ModelPrice(
+    assert sheet.get(lightning) == ModelPrice(
         input=0.25, output=1.25, cached_input=0.03, cache_write=0.0, cache_write_1h=0.0
     )
 
     usage = Usage(10_000, 2_000, 0, None)
-    assert compute_cost("strong", usage, sheet).usd == pytest.approx(0.06)
-    assert compute_cost("cheap", usage, sheet).usd < compute_cost("strong", usage, sheet).usd
+    assert compute_cost(ultra, usage, sheet).usd == pytest.approx(0.06)
+    assert compute_cost(lightning, usage, sheet).usd < compute_cost(ultra, usage, sheet).usd
+
+    # OpenAI-shaped usage reports no cache-write count.  cache_write = 0 keeps
+    # that from making the rehearsal UNKNOWN.
+    for model in (ultra, lightning):
+        assert sheet.get(model).cache_write == 0
+        assert compute_cost(model, usage, sheet).usd is not None

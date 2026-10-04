@@ -127,12 +127,11 @@ have. A real `0` is a price you stated; a missing rate is one you do not know,
 and tamias keeps those apart. See [When cost is
 UNKNOWN](OPENCODE.md#when-cost-is-unknown).
 
-`prices.openrouter-sim.toml` is the same three models with **invented** prices
-(3.00/15.00 for the ultra model, 0.25/1.25 for lightning) under the keys
-`strong` and `cheap`, so you can rehearse what a report would look like if the
-strong model were not free. It carries `simulated = true`, which stamps
-SIMULATED PRICES, NOT REAL SAVINGS on every amount. Its numbers are made up and
-must never be quoted as what these models cost.
+`prices.openrouter-sim.toml` prices those same models at **invented** rates
+(3.00/15.00 for the ultra model, 0.25/1.25 for lightning) under the real model
+ids, quoted, so a rehearsal can price a real log. It carries `simulated = true`,
+which stamps SIMULATED PRICES, NOT REAL SAVINGS on every amount. Its numbers are
+made up and must never be quoted as what these models cost.
 
 ## 5. Run the live check
 
