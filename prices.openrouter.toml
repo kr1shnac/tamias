@@ -1,0 +1,41 @@
+# Price sheet for OpenRouter free models, as served on 2026-10-04.
+#
+# Every rate is USD per 1,000,000 tokens.  These three models are published by
+# OpenRouter with the `:free` suffix, which means the input and output tokens
+# are billed at zero.  So every rate below is a real 0, not a missing rate, and
+# a request against them is priced rather than left UNKNOWN.
+#
+# `cache_write = 0` matters more than it looks.  OpenRouter is reached through
+# an OpenAI-style chat-completions upstream, whose `usage` object carries no
+# cache-write count, so `cache_write_tokens` is always UNKNOWN for a request
+# that comes through tamias.  A nonzero `cache_write` here would make the cost
+# of every such request UNKNOWN; a real 0 lets it be priced.
+#
+# Model ids contain `/` and `:`, so the table names are quoted: TOML bare keys
+# allow only letters, digits, `_` and `-`.
+#
+# Verify the ids and their pricing before trusting this file:
+#   curl -s https://openrouter.ai/api/v1/models | jq -r '.data[].id'
+
+date = "2026-10-04"
+
+# The expensive-on-paper model an agent session starts on.
+["nvidia/nemotron-3-ultra-550b-a55b:free"]
+input = 0.0
+output = 0.0
+cached_input = 0.0
+cache_write = 0.0
+
+# The cheaper model mechanical tool work would be switched to.
+["nvidia/nemotron-3.5-lightning:free"]
+input = 0.0
+output = 0.0
+cached_input = 0.0
+cache_write = 0.0
+
+# A third free model, kept so a report has more than two rows to compare.
+["poolside/laguna-s-2.1:free"]
+input = 0.0
+output = 0.0
+cached_input = 0.0
+cache_write = 0.0

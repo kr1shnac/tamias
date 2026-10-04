@@ -1,0 +1,37 @@
+# SIMULATED price sheet for OpenRouter-shaped traffic.  THESE PRICES ARE INVENTED,
+# NOT REAL.  The models below are real free OpenRouter models and really do cost
+# $0.00, so nothing here should ever be read as what they cost.
+#
+# The point of this file is to rehearse a report against the *shape* of
+# OpenRouter traffic while seeing what the arithmetic would say if the strong
+# model were not free.  Every number below is made up:
+#   strong = 3.0 / 15.0 / 0.30   invented, not Nemotron's price
+#   cheap  = 0.25 / 1.25 / 0.03  invented, not Nemotron's price
+# Neither figure comes from OpenRouter or NVIDIA.  `simulated = true` below is
+# what stamps SIMULATED PRICES, NOT REAL SAVINGS onto every amount `tamias
+# report` prints, so an invented number cannot be mistaken for a bill.
+#
+# For what these models actually cost, use `prices.openrouter.toml`, where every
+# rate is a real 0.
+#
+# The keys are `strong` and `cheap` because that is the pair the router reasons
+# about.  To drive this sheet with the real OpenRouter model ids, rename the two
+# tables below to "nvidia/nemotron-3-ultra-550b-a55b:free" and
+# "nvidia/nemotron-3.5-lightning:free" (quoted, because of the `/` and `:`).
+
+simulated = true
+date = "2026-10-04"
+
+# The expensive model an agent session starts on.
+[strong]
+input = 3.0
+output = 15.0
+cached_input = 0.30
+cache_write = 0.0
+
+# The cheaper model mechanical tool work would be switched to.
+[cheap]
+input = 0.25
+output = 1.25
+cached_input = 0.03
+cache_write = 0.0

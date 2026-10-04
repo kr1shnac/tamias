@@ -15,8 +15,11 @@ tamias forwards the body byte-for-byte and a stream that never asked for usage
 cannot have any.  A non-NULL count there would mean the proxy had injected
 ``stream_options`` the agent never asked for.
 
-The API key is read from the ``ZEN_API_KEY`` environment variable and is never
-printed: every line of output passes through a redactor first.
+The API key is read from an environment variable and is never printed: every
+line of output passes through a redactor first.  The variable is ``ZEN_API_KEY``
+by default; ``--api-key-env NAME`` reads a different one, which is how the same
+script is pointed at OpenRouter (``--api-key-env OPENROUTER_API_KEY``) without
+editing it.  Only the variable's *name* is ever printed.
 
 With ``--mock`` no socket is opened and no key is needed.  The mock upstream the
 test suite uses (``tests/mock_upstream.py``) and the real proxy app are wired
@@ -75,6 +78,7 @@ TABLE_COLUMNS = (
 )
 
 _SECRET = ""
+_KEY_ENV = KEY_ENV
 
 
 def _safe(text: str) -> str:
@@ -353,8 +357,8 @@ def evaluate(rows: list[dict[str, Any]], db: Path, outcomes: list[Outcome]) -> b
         keyed = [index for index, row in enumerate(rows, start=1) if _SECRET in _row_text(row)]
         checks.check(
             not keyed and _SECRET.encode() not in blob,
-            f"no logged row or page contains the {KEY_ENV} value",
-            f"the {KEY_ENV} value is present in the log; stop using this database",
+            f"no logged row or page contains the {_KEY_ENV} value",
+            f"the {_KEY_ENV} value is present in the log; stop using this database",
         )
 
     return checks.report()
@@ -381,7 +385,7 @@ def header(proxy: str, model: str, db: Path, mock: bool) -> None:
     say(f"  model   {model}")
     say(f"  db      {db}" + ("  (temporary)" if mock else ""))
     say(f"  prompt  {PROMPT!r}  x3  session {SESSION_ID}")
-    say(f"  key     {'in-process, none needed' if mock else f'{KEY_ENV} set, never printed'}")
+    say(f"  key     {'in-process, none needed' if mock else f'${_KEY_ENV} set, never printed'}")
 
 
 def finish(db: Path, outcomes: list[Outcome]) -> int:
@@ -478,7 +482,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="live_check.py",
         description=(
             "Send three requests through a running tamias proxy and check what it logged. "
-            f"The API key is read from ${KEY_ENV} and never printed."
+            f"The API key is read from ${KEY_ENV} (override with --api-key-env) and is "
+            "never printed."
         ),
     )
     parser.add_argument(
@@ -497,12 +502,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run against the tests' mock upstream in-process, with no key and no socket",
     )
+    parser.add_argument(
+        "--api-key-env",
+        default=KEY_ENV,
+        metavar="NAME",
+        help=(
+            "environment variable holding the API key (default: %(default)s). "
+            "Use OPENROUTER_API_KEY for an OpenRouter upstream. Only the name is printed."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _SECRET
+    global _SECRET, _KEY_ENV
     args = build_parser().parse_args(argv)
+    _KEY_ENV = args.api_key_env
 
     if args.mock:
         with tempfile.TemporaryDirectory(prefix="tamias-live-check-") as name:
@@ -517,9 +532,9 @@ def main(argv: list[str] | None = None) -> int:
                 say("RESULT: FAIL")
                 return 1
 
-    _SECRET = os.environ.get(KEY_ENV, "").strip()
+    _SECRET = os.environ.get(_KEY_ENV, "").strip()
     if not _SECRET:
-        say(f"{KEY_ENV} is not set; export the Zen API key, or use --mock.")
+        say(f"{_KEY_ENV} is not set; export the API key, or use --mock.")
         return 2
     db = Path(args.db or DEFAULT_DB)
     if not db.is_file():

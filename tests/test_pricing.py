@@ -11,7 +11,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from tamias.pricing import compute_cost, load_price_sheet  # noqa: E402
+from tamias.pricing import ModelPrice, compute_cost, load_price_sheet  # noqa: E402
 from tamias.types import Usage  # noqa: E402
 
 
@@ -110,3 +110,48 @@ def test_openai_style_usage_prices_against_the_simulated_sheet():
     for model in ("strong", "cheap"):
         assert sheet.get(model).cache_write == 0
         assert compute_cost(model, openai_shaped, sheet).usd is not None
+
+
+def test_the_shipped_openrouter_sheet_prices_its_free_models_at_zero():
+    """OpenRouter's free models bill at zero, so every rate is a real 0.
+
+    The ids contain '/' and ':', so the tables are quoted; loading the sheet is
+    what proves the quoted keys survive.  cache_write = 0 is load-bearing:
+    OpenRouter is an OpenAI-style upstream that reports no cache-write count.
+    """
+    root = Path(__file__).resolve().parents[1]
+    sheet = load_price_sheet(root / "prices.openrouter.toml")
+    assert sheet.simulated is False
+    assert set(sheet.models) == {
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "poolside/laguna-s-2.1:free",
+    }
+
+    for model in sheet.models:
+        price = sheet.get(model)
+        assert (price.input, price.output, price.cached_input) == (0.0, 0.0, 0.0)
+        assert price.cache_write == 0
+        # A free model costs exactly nothing even with no usage reported at all.
+        assert compute_cost(model, Usage(None, None, None, None), sheet).usd == 0.0
+
+
+def test_the_shipped_openrouter_simulated_sheet_is_simulated_with_invented_prices():
+    """The simulated OpenRouter sheet must label itself, and must not be free.
+
+    Its numbers are made up on purpose: if they ever read as 0, the file stops
+    being a rehearsal and becomes a claim that the models are free.
+    """
+    root = Path(__file__).resolve().parents[1]
+    sheet = load_price_sheet(root / "prices.openrouter-sim.toml")
+    assert sheet.simulated is True
+    assert sheet.get("strong") == ModelPrice(
+        input=3.0, output=15.0, cached_input=0.30, cache_write=0.0, cache_write_1h=0.0
+    )
+    assert sheet.get("cheap") == ModelPrice(
+        input=0.25, output=1.25, cached_input=0.03, cache_write=0.0, cache_write_1h=0.0
+    )
+
+    usage = Usage(10_000, 2_000, 0, None)
+    assert compute_cost("strong", usage, sheet).usd == pytest.approx(0.06)
+    assert compute_cost("cheap", usage, sheet).usd < compute_cost("strong", usage, sheet).usd
