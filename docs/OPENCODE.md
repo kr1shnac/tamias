@@ -79,17 +79,19 @@ date = "2026-10-04"   # the date these rates were published
 input = 1.74
 output = 3.48
 cached_input = 0.145
-cache_write = 3.75
+cache_write = 0
 
 [deepseek-v4-flash]
 input = 0.14
 output = 0.28
 cached_input = 0.028
-cache_write = 3.75
+cache_write = 0
 ```
 
-Zen does not publish a cache-write rate for most models, so `cache_write` above
-is a placeholder — see [Known limitation](#known-limitation-cost-will-always-be-unknown).
+Set `cache_write = 0` for these models. Zen does not publish a cache-write rate
+for most models and does not report cache writes in `usage`, so a nonzero
+`cache_write` would leave every request UNKNOWN — see
+[When cost is UNKNOWN](#when-cost-is-unknown).
 
 ## 4. Point OpenCode at the proxy
 
@@ -213,17 +215,20 @@ Zen's own list of what is live is at `https://opencode.ai/zen/v1/models`; the
 table above reflects the docs page as of the date above and Zen adds and retires
 models often.
 
-## Known limitation: cost will always be UNKNOWN
+## When cost is UNKNOWN
 
-`tamias report` will print `total cost: UNKNOWN` for **every** request, and the
-saving estimate will be `$0.00 … not priced`.
+Cost is UNKNOWN — never guessed as zero — when a field needed to price the
+request is missing. Against Zen the likely causes are:
 
-This is not a configuration mistake. The OpenAI chat-completions `usage` object
-reports `prompt_tokens`, `completion_tokens` and `prompt_tokens_details.cached_tokens`,
-but no cache-write count. `tamias.proxy.to_usage` therefore always sets
-`cache_write_tokens=None`, and `pricing.compute_cost` treats an unknown needed
-field as making the whole cost unknown rather than guessing zero. So `cost_usd`
-is forbidden ("unknown is NEVER treated as 0").
+- the model is not in your price sheet (check the id matches exactly);
+- the request was streamed and the client did not send
+  `stream_options.include_usage`, so Zen's usage chunk was never requested;
+- Zen did not report `prompt_tokens_details.cached_tokens` while your sheet
+  prices `cached_input` differently from `input`;
+- your sheet sets a nonzero `cache_write` but Zen reports no cache writes.
+
+Fix the sheet or the request; there is no configuration that makes a missing
+number appear. `?` in a report means exactly that.
 
 ## Troubleshooting
 

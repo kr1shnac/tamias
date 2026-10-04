@@ -78,3 +78,20 @@ cache_write=0.0
     c = compute_cost("strong", Usage(1_000_000, 0, 2_000_000, 0), sheet)
     assert c.usd is None
     assert "inconsistent" in c.formula
+
+
+def test_openai_style_usage_prices_against_the_example_sheet():
+    """An unreported cache-write count must not make a cost UNKNOWN by itself.
+
+    proxy.to_usage always sets cache_write_tokens=None for the OpenAI
+    chat-completions path, so the shipped example sheet gives those models
+    cache_write = 0 and their requests still get a number.
+    """
+    sheet = load_price_sheet(Path(__file__).resolve().parents[1] / "prices.example.toml")
+
+    for model in ("gpt-4o", "oa"):
+        assert sheet.get(model).cache_write == 0
+
+    c = compute_cost("gpt-4o", Usage(10_000, 2_000, 4_000, None), sheet)
+    assert c.usd is not None
+    assert c.usd == pytest.approx(0.0492)

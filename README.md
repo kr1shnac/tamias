@@ -49,17 +49,17 @@ Read this section before trusting any number tamias prints.
   `tamias report` prints a line labelled `estimated saving`, which is arithmetic
   over logged token counts and the price sheet, not a measurement. It ignores
   cache-rebuild cost, latency effects and quality regressions, and today it
-  evaluates to `$0.00` for the reason in the next point. Treat it as a
-  placeholder for a number that does not exist yet.
-- **Cost is UNKNOWN for most OpenAI-compatible upstreams.** The OpenAI
-  chat-completions `usage` object reports `prompt_tokens`, `completion_tokens`
-  and `prompt_tokens_details.cached_tokens`, but **no cache-write count**. tamias
-  therefore always has `cache_write_tokens = UNKNOWN`, and because a cache-write
-  rate is needed to price a request, the cost of every such request is UNKNOWN.
-  Against a real OpenAI-style provider, expect `total cost: UNKNOWN` on every
-  line of your report. This is a gap in the provider's `usage` schema, not a
-  configuration mistake, and guessing zero is forbidden by the project's
-  contract.
+  evaluates to `$0.00` for want of any priced request to subtract from (see the
+  next point). Treat it as a placeholder for a number that does not exist yet.
+- **Cost is UNKNOWN (never guessed as zero)** when a field needed to price the
+  request is missing. Typical cases: the model is not in your price sheet; the
+  provider returned no usage (for streaming requests the client must ask for it
+  with `stream_options.include_usage`); the provider does not report cached
+  tokens while your sheet prices cached input differently from normal input; or
+  your sheet gives a model a nonzero cache-write price but the provider reports
+  no cache writes. OpenAI-style APIs report no cache writes, so set
+  `cache_write = 0` for those models in your price sheet and their requests are
+  priced normally.
 - **Active routing is implemented but not validated end to end.**
   `--router-mode active` does rewrite `model` on a SWITCH decision, and there is
   a unit test for it, but it has never been exercised against a real provider.

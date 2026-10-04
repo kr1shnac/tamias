@@ -39,9 +39,9 @@ First pre-alpha. Not published to PyPI. Expect breakage.
 
 ### Known limitations
 
-- Cost is UNKNOWN for every request against an OpenAI-style upstream: the
-  chat-completions `usage` object carries no cache-write count, and a
-  cache-write rate is needed to price a request. Guessing zero is forbidden.
+- Cost is UNKNOWN (never guessed as zero) when a field needed to price the
+  request is missing; OpenAI-style APIs report no cache writes, so give those
+  models `cache_write = 0` in the price sheet and their requests are priced.
 - No savings have been measured. The `estimated saving` line in `tamias report`
   is arithmetic over logged token counts, ignores cache-rebuild cost, and is not
   a measurement.
