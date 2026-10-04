@@ -17,9 +17,11 @@ date = "2026-10-04"
 input = 3.0
 output = 15.0
 cached_input = 0.30
+cache_write = 0.0
 
 # The cheaper model mechanical tool work would be switched to.
 [cheap]
 input = 0.25
 output = 1.25
 cached_input = 0.03
+cache_write = 0.0

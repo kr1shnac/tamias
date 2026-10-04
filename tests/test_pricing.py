@@ -95,3 +95,18 @@ def test_openai_style_usage_prices_against_the_example_sheet():
     c = compute_cost("gpt-4o", Usage(10_000, 2_000, 4_000, None), sheet)
     assert c.usd is not None
     assert c.usd == pytest.approx(0.0492)
+
+
+def test_openai_style_usage_prices_against_the_simulated_sheet():
+    """The simulated sheet prices OpenAI-shaped traffic too.
+
+    It gives its models cache_write = 0 for the same reason the example sheet
+    does, and simulated = true changes no arithmetic.
+    """
+    sheet = load_price_sheet(Path(__file__).resolve().parents[1] / "prices.simulated.toml")
+    assert sheet.simulated is True
+
+    openai_shaped = Usage(10_000, 2_000, 4_000, None)
+    for model in ("strong", "cheap"):
+        assert sheet.get(model).cache_write == 0
+        assert compute_cost(model, openai_shaped, sheet).usd is not None
