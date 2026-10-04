@@ -6,14 +6,19 @@ same one-line prompt, so the three rows they leave behind differ only in how
 usage was requested:
 
 1. buffered (non-streaming) — the upstream reports usage in the JSON body;
-2. streaming with no ``stream_options`` — the upstream sends no usage chunk;
-3. streaming with ``stream_options.include_usage = true`` — the upstream sends
-   a trailing usage chunk.
+2. streaming with no ``stream_options`` — the upstream owes us nothing;
+3. streaming with ``stream_options.include_usage = true`` — the upstream is asked
+   for a trailing usage chunk.
 
-Probe 2 is the interesting one: its row *must* have NULL token counts, because
-tamias forwards the body byte-for-byte and a stream that never asked for usage
-cannot have any.  A non-NULL count there would mean the proxy had injected
-``stream_options`` the agent never asked for.
+Probe 2 is the interesting one, and what it now checks is deliberately narrower
+than "the row must have NULL token counts".  That stronger claim held only for
+an upstream that honours OpenAI's opt-in, and OpenRouter does not: it has sent a
+usage chunk on a stream that never asked for one.  So probe 2 asserts only what
+tamias is actually responsible for — HTTP 200, a stream that ends with ``[DONE]``,
+and one row logged with status 200 — and *reports* whether the upstream volunteered
+usage instead of failing on it.  Whether the proxy injected ``stream_options`` is
+settled by the byte-identical body tests in ``tests/test_proxy.py``, not by what a
+third party chooses to send.
 
 The API key is read from an environment variable and is never printed: every
 line of output passes through a redactor first.  The variable is ``ZEN_API_KEY``
@@ -263,6 +268,15 @@ def _has_tokens(row: dict[str, Any]) -> bool:
     return row.get("input_tokens") is not None and row.get("output_tokens") is not None
 
 
+def _logged_ok(row: dict[str, Any]) -> bool:
+    """Whether the row was logged as a success.
+
+    ``status`` is stored as TEXT, so a row that logged cleanly holds ``"200"``.
+    Accept the int too, so this keeps working if that ever changes.
+    """
+    return row.get("status") in (200, "200")
+
+
 class Checks:
     """Collects PASS/FAIL lines and remembers whether anything failed."""
 
@@ -329,14 +343,20 @@ def evaluate(rows: list[dict[str, Any]], db: Path, outcomes: list[Outcome]) -> b
 
         if len(rows) >= 2:
             row = rows[1]
-            blank = not _has_tokens(row)
+            stream = outcomes[1]
+            unmet = []
+            if stream.status != 200:
+                unmet.append(f"it came back HTTP {stream.status}")
+            if not stream.done:
+                unmet.append("the stream did not end with [DONE]")
+            if not _logged_ok(row):
+                unmet.append(f"the logged row says status {row.get('status')!r}")
             checks.check(
-                blank,
-                f"request 2 ({NO_OPTIONS}) logged NULL token counts, "
-                "as expected: usage was never requested",
-                f"request 2 ({NO_OPTIONS}) logged token counts ({_tokens(row)}) although "
-                "the body carried no stream_options, so the proxy added stream_options "
-                "the agent did not ask for",
+                not unmet,
+                f"request 2 ({NO_OPTIONS}) came back HTTP 200, ended with [DONE] and "
+                "logged one row with status 200; whether that row carries token counts "
+                "is the upstream's choice, not the proxy's",
+                f"request 2 ({NO_OPTIONS}) {'; '.join(unmet)}",
             )
 
     leaked = [index for index, row in enumerate(rows, start=1) if PROMPT in _row_text(row)]
@@ -377,6 +397,10 @@ def print_outcomes(outcomes: list[Outcome]) -> None:
         if outcome.error:
             detail += f"  ERROR {outcome.error}"
         say(f"  {outcome.label:<30} {detail}")
+
+    volunteered = "yes" if outcomes[1].saw_usage else "no"
+    say(f"  provider volunteered usage on a stream that did not ask for it: {volunteered}")
+    say("  proxy never injects stream_options; this is verified by the byte-identical tests")
 
 
 def header(proxy: str, model: str, db: Path, mock: bool) -> None:

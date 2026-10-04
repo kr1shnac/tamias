@@ -11,15 +11,26 @@ and differ only in how usage was requested:
 | # | request | what the upstream is asked for |
 | --- | --- | --- |
 | 1 | buffered | usage in the JSON body |
-| 2 | streaming, **no** `stream_options` | no usage: the upstream sends no usage chunk |
+| 2 | streaming, **no** `stream_options` | nothing: the upstream owes us no usage chunk |
 | 3 | streaming, `stream_options.include_usage = true` | a trailing usage chunk |
 
-Request 2 is the one that matters. tamias forwards the body byte-for-byte, so a
-stream that never asked for usage cannot come back with any. **Its row must have
-NULL token counts.** A number there would mean the proxy had injected
-`stream_options` the agent never asked for — a contract violation, and one that
-would change what the upstream bills for. Requests 1 and 3 must both have token
-counts, because both asked for usage.
+Request 2 is the one that matters, but what it proves has to be stated
+carefully. tamias forwards the body byte-for-byte and never adds
+`stream_options` of its own, and that is settled by the byte-identical body
+tests in `tests/test_proxy.py`. What the *upstream* then sends is not tamias's
+business: OpenAI omits usage from a stream that did not opt in, but OpenRouter
+has been observed to send a usage chunk on exactly such a stream. So request 2 is
+judged only on what the proxy owes you — HTTP 200, a stream that ends with
+`[DONE]`, and one row logged with status 200 — and the script then *reports*,
+in one line, whether the upstream volunteered usage:
+
+```
+  provider volunteered usage on a stream that did not ask for it: yes
+```
+
+That line is `no` against the mock upstream, which honours the opt-in, and `yes`
+against OpenRouter. Neither value is a failure. Requests 1 and 3 must still have
+token counts, because both asked for usage.
 
 ## 1. Offline first: `--mock`
 
@@ -47,6 +58,8 @@ requests
   1 buffered                     HTTP 200  buffered JSON  usage=yes
   2 stream, no stream_options    HTTP 200  SSE  frames=4  usage=no  done=yes
   3 stream, include_usage=true   HTTP 200  SSE  frames=5  usage=yes  done=yes
+  provider volunteered usage on a stream that did not ask for it: no
+  proxy never injects stream_options; this is verified by the byte-identical tests
 
 logged rows in /tmp/tamias-live-check-bkrylov4/requests.db (newest 3, oldest first)
   #  model_requested  input  output  cached  cost   decision  session_id
@@ -61,7 +74,7 @@ checks
   PASS  3 rows logged, one per request
   PASS  request 1 (buffered) logged token counts: input=11 output=7
   PASS  request 3 (stream, include_usage=true) logged token counts: input=11 output=7
-  PASS  request 2 (stream, no stream_options) logged NULL token counts, as expected: usage was never requested
+  PASS  request 2 (stream, no stream_options) came back HTTP 200, ended with [DONE] and logged one row with status 200; whether that row carries token counts is the upstream's choice, not the proxy's
   PASS  no logged row contains the prompt text 'Reply with the word ok'
   PASS  no page of /tmp/tamias-live-check-bkrylov4/requests.db contains the prompt text either
 
@@ -138,7 +151,7 @@ python scripts/live_check.py \
 | all 3 requests returned HTTP 200 | the proxy, or Zen, rejected the request. The rest of the log is then not judged, because the rows on screen cannot be this run's rows. |
 | 3 rows logged, one per request | a request that completed without being logged, or a log written to a different file than `--db` points at. |
 | request 1 and request 3 logged token counts | Zen answered without a usage object. The request worked; the token counts are unavailable, and cost built on them is `?`. |
-| request 2 logged NULL token counts | the proxy added `stream_options` the agent did not send. Do not trust any of the streaming numbers until this is explained. |
+| request 2 returned HTTP 200, ended with `[DONE]` and logged one row with status 200 | the proxy or the upstream broke the stream, or the row was not written. This is deliberately narrower than "no token counts": an upstream that volunteers usage has not broken anything. |
 | no row contains the prompt text | the log is not metadata-only. This is the check that matters most for a proxy that sees your whole conversation. |
 | no page of the database contains the prompt text | stronger than the row check: it scans every byte of the file, so text cannot hide in a deleted row or an unused page. |
 | no row or page contains the `ZEN_API_KEY` value | a header leaked into the log. Delete the database. |
