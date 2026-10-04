@@ -22,8 +22,14 @@ SHEET_DATE = "2026-01-05"
 SIMULATED_SHEET = Path(__file__).resolve().parents[1] / "prices.openrouter-sim.toml"
 
 
-def _log(db: str, usage: Usage, cost: float | None, action: str,
-         model_used: str = "gpt-4o", model_requested: str = "gpt-4o") -> None:
+def _log(
+    db: str,
+    usage: Usage,
+    cost: float | None,
+    action: str,
+    model_used: str = "gpt-4o",
+    model_requested: str = "gpt-4o",
+) -> None:
     store = Store(db)
     store.log_request(
         ts="2026-01-05T00:00:00Z",
@@ -41,6 +47,7 @@ def _log(db: str, usage: Usage, cost: float | None, action: str,
 
 def _run(capsys, db: str, prices: str):
     from tamias.cli import main
+
     code = main(["report", "--db", db, "--prices", prices])
     return code, capsys.readouterr().out
 
@@ -117,28 +124,52 @@ def test_active_shape_two_rewritten(tmp_path, capsys):
     """
     db = str(tmp_path / "log.db")
     # Row 5: rewritten with counts
-    _log(db, Usage(input_tokens=7_946, output_tokens=46, cached_input_tokens=0, cache_write_tokens=None),
-         None, "SWITCH",
-         model_used="nvidia/nemotron-3.5-lightning:free",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+    _log(
+        db,
+        Usage(input_tokens=7_946, output_tokens=46, cached_input_tokens=0, cache_write_tokens=None),
+        None,
+        "SWITCH",
+        model_used="nvidia/nemotron-3.5-lightning:free",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
     # Row 6: stay on requested model
-    _log(db, Usage(input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None),
-         None, "STAY",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+    _log(
+        db,
+        Usage(input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None),
+        None,
+        "STAY",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
     # Row 7: stay on requested model
-    _log(db, Usage(input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None),
-         None, "STAY",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+    _log(
+        db,
+        Usage(input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None),
+        None,
+        "STAY",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
     # Row 8: rewritten with counts
-    _log(db, Usage(input_tokens=8_434, output_tokens=53, cached_input_tokens=6_528, cache_write_tokens=None),
-         None, "SWITCH",
-         model_used="nvidia/nemotron-3.5-lightning:free",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+    _log(
+        db,
+        Usage(
+            input_tokens=8_434, output_tokens=53, cached_input_tokens=6_528, cache_write_tokens=None
+        ),
+        None,
+        "SWITCH",
+        model_used="nvidia/nemotron-3.5-lightning:free",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
     # Rows 1-4: stay on requested model
     for _ in range(4):
-        _log(db, Usage(input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None),
-             None, "STAY",
-             model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+        _log(
+            db,
+            Usage(
+                input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None
+            ),
+            None,
+            "STAY",
+            model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+        )
 
     prices = write_prices(tmp_path, SIMULATED_TABLE)
     code, out = _run(capsys, db, prices)
@@ -146,11 +177,12 @@ def test_active_shape_two_rewritten(tmp_path, capsys):
     assert code == 0
     assert "requests: 8" in out
     # The realised saving line must be present
-    realised_lines = [l for l in out.splitlines()
-                      if l.startswith("realised saving")]
-    assert len(realised_lines) == 1, (
-        f"expected exactly 1 realised saving line, got:\n{out}"
-    )
+    realised_lines = [
+        realised_line
+        for realised_line in out.splitlines()
+        if realised_line.startswith("realised saving")
+    ]
+    assert len(realised_lines) == 1, f"expected exactly 1 realised saving line, got:\n{out}"
     line = realised_lines[0]
     assert "over 2 rows" in line, f"expected 'over 2 rows' in:\n{line}"
     # Within 1e-6 tolerance
@@ -175,15 +207,16 @@ def test_shadow_no_rewritten(tmp_path, capsys):
 
     assert code == 0
     # No realised saving line when nothing was rewritten
-    assert not any(l.startswith("realised saving") for l in out.splitlines()), (
-        f"expected no realised saving line, got:\n{out}"
-    )
+    assert not any(
+        realised_line.startswith("realised saving") for realised_line in out.splitlines()
+    ), f"expected no realised saving line, got:\n{out}"
     # Estimated saving line still present
-    estimated_lines = [l for l in out.splitlines()
-                       if l.startswith("estimated saving")]
-    assert len(estimated_lines) >= 1, (
-        f"expected at least 1 estimated saving line, got:\n{out}"
-    )
+    estimated_lines = [
+        estimated_line
+        for estimated_line in out.splitlines()
+        if estimated_line.startswith("estimated saving")
+    ]
+    assert len(estimated_lines) >= 1, f"expected at least 1 estimated saving line, got:\n{out}"
 
 
 def test_unpriced_rewritten_two_rows(tmp_path, capsys):
@@ -194,26 +227,37 @@ def test_unpriced_rewritten_two_rows(tmp_path, capsys):
     """
     db = str(tmp_path / "log.db")
     # Two rows rewritten, but no token counts
-    _log(db, Usage(input_tokens=None, output_tokens=None,
-                     cached_input_tokens=None, cache_write_tokens=None),
-         None, "SWITCH",
-         model_used="nvidia/nemotron-3.5-lightning:free",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
-    _log(db, Usage(input_tokens=None, output_tokens=None,
-                     cached_input_tokens=None, cache_write_tokens=None),
-         None, "SWITCH",
-         model_used="nvidia/nemotron-3.5-lightning:free",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+    _log(
+        db,
+        Usage(
+            input_tokens=None, output_tokens=None, cached_input_tokens=None, cache_write_tokens=None
+        ),
+        None,
+        "SWITCH",
+        model_used="nvidia/nemotron-3.5-lightning:free",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
+    _log(
+        db,
+        Usage(
+            input_tokens=None, output_tokens=None, cached_input_tokens=None, cache_write_tokens=None
+        ),
+        None,
+        "SWITCH",
+        model_used="nvidia/nemotron-3.5-lightning:free",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
 
     prices = write_prices(tmp_path, SIMULATED_TABLE)
     code, out = _run(capsys, db, prices)
 
     assert code == 0
-    realised_lines = [l for l in out.splitlines()
-                      if l.startswith("realised saving")]
-    assert len(realised_lines) == 1, (
-        f"expected exactly 1 realised saving line, got:\n{out}"
-    )
+    realised_lines = [
+        realised_line
+        for realised_line in out.splitlines()
+        if realised_line.startswith("realised saving")
+    ]
+    assert len(realised_lines) == 1, f"expected exactly 1 realised saving line, got:\n{out}"
     line = realised_lines[0]
     # When all rewritten rows are unpriced, just "UNKNOWN over 2 rows"
     assert "UNKNOWN over 2 rows" in line, f"expected 'UNKNOWN over 2 rows' in:\n{line}"
@@ -227,36 +271,50 @@ def test_one_priced_one_unpriced(tmp_path, capsys):
     """
     db = str(tmp_path / "log.db")
     # Row with counts and pricing (cached_input_tokens=0 so sheet rates apply)
-    _log(db, Usage(input_tokens=1_000, output_tokens=50,
-                     cached_input_tokens=0, cache_write_tokens=None),
-         None, "SWITCH",
-         model_used="nvidia/nemotron-3.5-lightning:free",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+    _log(
+        db,
+        Usage(input_tokens=1_000, output_tokens=50, cached_input_tokens=0, cache_write_tokens=None),
+        None,
+        "SWITCH",
+        model_used="nvidia/nemotron-3.5-lightning:free",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
     # Row without counts (unpriced)
-    _log(db, Usage(input_tokens=None, output_tokens=None,
-                     cached_input_tokens=None, cache_write_tokens=None),
-         None, "SWITCH",
-         model_used="nvidia/nemotron-3.5-lightning:free",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+    _log(
+        db,
+        Usage(
+            input_tokens=None, output_tokens=None, cached_input_tokens=None, cache_write_tokens=None
+        ),
+        None,
+        "SWITCH",
+        model_used="nvidia/nemotron-3.5-lightning:free",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
 
     prices = write_prices(tmp_path, SIMULATED_TABLE)
     code, out = _run(capsys, db, prices)
 
     assert code == 0
-    realised_lines = [l for l in out.splitlines()
-                      if l.startswith("realised saving")]
-    assert len(realised_lines) == 1, (
-        f"expected exactly 1 realised saving line, got:\n{out}"
-    )
+    realised_lines = [
+        realised_line
+        for realised_line in out.splitlines()
+        if realised_line.startswith("realised saving")
+    ]
+    assert len(realised_lines) == 1, f"expected exactly 1 realised saving line, got:\n{out}"
     line = realised_lines[0]
     # The dollar amount should be present from the priced row
     val = _money_realised(line)
-    assert val is not None and val > 0, f"expected positive dollar amount in realised line, got {val!r}:\n{line}"
+    assert val is not None and val > 0, (
+        f"expected positive dollar amount in realised line, got {val!r}:\n{line}"
+    )
     # Should contain "over {realised_count} rows" since that's the code's wording
     import re
+
     m = re.search(r"over (\d+) rows", line)
     assert m is not None, f"expected 'over N rows' in realised line, got:\n{line}"
-    assert m.group(1) == str(1), f"expected 'over 1 rows' in realised line (1 priced row), got:\n{line}"
+    assert m.group(1) == str(1), (
+        f"expected 'over 1 rows' in realised line (1 priced row), got:\n{line}"
+    )
 
 
 def test_rewritten_model_not_in_sheet(tmp_path, capsys):
@@ -265,24 +323,32 @@ def test_rewritten_model_not_in_sheet(tmp_path, capsys):
     Counted as not priced, never as 0.
     """
     db = str(tmp_path / "log.db")
-    _log(db, Usage(input_tokens=1_000, output_tokens=50,
-                     cached_input_tokens=None, cache_write_tokens=None),
-         None, "SWITCH",
-         model_used="nonexistent-model-that-does-not-exist",
-         model_requested="nvidia/nemotron-3-ultra-550b-a55b:free")
+    _log(
+        db,
+        Usage(
+            input_tokens=1_000, output_tokens=50, cached_input_tokens=None, cache_write_tokens=None
+        ),
+        None,
+        "SWITCH",
+        model_used="nonexistent-model-that-does-not-exist",
+        model_requested="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
 
     prices = write_prices(tmp_path, SIMULATED_TABLE)
     code, out = _run(capsys, db, prices)
 
     assert code == 0
-    realised_lines = [l for l in out.splitlines()
-                      if l.startswith("realised saving")]
-    assert len(realised_lines) == 1, (
-        f"expected exactly 1 realised saving line, got:\n{out}"
-    )
+    realised_lines = [
+        realised_line
+        for realised_line in out.splitlines()
+        if realised_line.startswith("realised saving")
+    ]
+    assert len(realised_lines) == 1, f"expected exactly 1 realised saving line, got:\n{out}"
     line = realised_lines[0]
     # Model not in sheet → not priced → UNKNOWN caveat, never $0.00
     assert "UNKNOWN" in line, f"expected 'UNKNOWN' in realised line, got:\n{line}"
     # Dollar amount should be 0 or absent (model unpriced)
     val = _money_realised(line)
-    assert val == 0.0 or val is None, f"expected 0.0 or no dollar amount when model unpriced, got {val!r}:\n{line}"
+    assert val == 0.0 or val is None, (
+        f"expected 0.0 or no dollar amount when model unpriced, got {val!r}:\n{line}"
+    )
