@@ -282,6 +282,7 @@ def build_serve_app(
     min_gap: int = 3,
     inject_usage: bool = False,
     transport: Any | None = None,
+    effort_style: str = "openrouter",
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
@@ -308,6 +309,7 @@ def build_serve_app(
         config=config,
         inject_usage=inject_usage,
         transport=transport,
+        effort_style=effort_style,
     )
     app.state.store = store
     return app
@@ -330,6 +332,7 @@ def serve(args: argparse.Namespace) -> int:
         strong_model=args.strong_model,
         min_gap=args.min_gap,
         inject_usage=args.inject_usage,
+        effort_style=args.effort_style,
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -377,6 +380,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ROUTER_MODES,
         default="shadow",
         help="shadow records the routing decision, active also applies it (default: shadow)",
+    )
+    serve_parser.add_argument(
+        "--effort-policy",
+        choices=("off", "easy-low"),
+        default="off",
+        help="enable reasoning-effort switching (default: off)",
+    )
+    serve_parser.add_argument(
+        "--effort-style",
+        choices=("openrouter", "openai"),
+        default="openrouter",
+        help="effort style for OpenRouter or OpenAI compatibility (default: openrouter)",
     )
     serve_parser.add_argument(
         "--cheap-model",

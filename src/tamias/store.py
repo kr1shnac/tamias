@@ -35,6 +35,9 @@ COLUMNS = (
     "decision_action",
     "decision_target_model",
     "decision_reason",
+    "effort_requested",
+    "effort_used",
+    "decision_target_effort",
 )
 
 _CREATE_TABLE = f"""
@@ -54,7 +57,10 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     status TEXT NOT NULL,
     decision_action TEXT NOT NULL,
     decision_target_model TEXT,
-    decision_reason TEXT NOT NULL
+    decision_reason TEXT NOT NULL,
+    effort_requested TEXT,
+    effort_used TEXT,
+    decision_target_effort TEXT
 )
 """
 
@@ -93,6 +99,9 @@ class Store:
         latency_ms: int | None,
         status: str,
         decision: Decision,
+        effort_requested: str | None = None,
+        effort_used: str | None = None,
+        decision_target_effort: str | None = None,
     ) -> int:
         """Append one request and return its row id.
 
@@ -116,6 +125,9 @@ class Store:
             decision.action,
             decision.target_model,
             decision.reason,
+            effort_requested,
+            effort_used,
+            decision_target_effort,
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)

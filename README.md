@@ -236,6 +236,7 @@ in-process ASGI transports.
 - [CONTRACT.md](CONTRACT.md) — the behavioural contract this implementation is
   held to.
 - [docs/OPENCODE.md](docs/OPENCODE.md) — OpenCode setup in full.
+- [docs/EFFORT.md](docs/EFFORT.md) — optional reasoning-effort switching (off by default).
 - [CHANGELOG.md](CHANGELOG.md)
 
 ## License

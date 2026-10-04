@@ -240,4 +240,7 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "decision_action",
         "decision_target_model",
         "decision_reason",
+        "effort_requested",
+        "effort_used",
+        "decision_target_effort",
     )

@@ -6,7 +6,7 @@ decision) and active mode (which rewrites ``body["model"]``) therefore always
 agree on what the decision was.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from tamias.types import Decision, SessionState
@@ -27,6 +27,7 @@ class RouterConfig:
     cheap_model: str = ""
     strong_model: str = ""
     min_gap: int = 3
+    effort_policy: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "easy_tools", frozenset(self.easy_tools))
@@ -95,6 +96,10 @@ def decide(
     3. a trailing ``tool`` message from an easy tool, with enough requests
        since the last switch -> SWITCH to ``cheap_model``;
     4. anything else -> STAY.
+
+    After the existing model decision, ``target_effort`` is set per the
+    ``effort_policy`` rules (``high`` for planning/error, ``low`` for easy
+    tools, ``None`` otherwise) only when ``config.effort_policy`` is true.
     """
     messages = body.get("messages")
     if not isinstance(messages, list):
@@ -107,29 +112,57 @@ def decide(
 
     # Rule 1: the user is talking; nothing about the last turn is routable.
     if role == "user":
-        return _stay("user turn: planning")
+        decision = _stay("user turn: planning")
 
-    if role == "tool":
+    elif role == "tool":
         # Rule 2: a failed tool call is exactly what needs the strong model.
         text = _text_of(last.get("content"))
         if any(marker in text for marker in ERROR_MARKERS):
-            return _stay("tool error: needs strong model")
-
-        # Rule 3: cheap mechanical work.
-        tool = _tool_name(messages, last)
-        if tool in config.easy_tools:
-            # Hysteresis: while we are already on the cheap model the gap since
-            # the last switch is zero, so we stay put until it grows again.
-            gap = 0 if state.current_model == config.cheap_model else state.request_index
-            if gap >= config.min_gap:
-                return Decision(
-                    action="SWITCH",
-                    target_model=config.cheap_model,
-                    reason=f"easy tool: {tool}",
-                )
-            return _stay(f"hysteresis: {gap} of {config.min_gap} requests since last switch")
+            decision = _stay("tool error: needs strong model")
+        else:
+            # Rule 3: cheap mechanical work.
+            tool = _tool_name(messages, last)
+            if tool in config.easy_tools:
+                # Hysteresis: while we are already on the cheap model the gap since
+                # the last switch is zero, so we stay put until it grows again.
+                gap = 0 if state.current_model == config.cheap_model else state.request_index
+                if gap >= config.min_gap:
+                    decision = Decision(
+                        action="SWITCH",
+                        target_model=config.cheap_model,
+                        target_effort="low" if config.effort_policy else None,
+                        reason=f"easy tool: {tool}",
+                    )
+                else:
+                    decision = _stay(f"hysteresis: {gap} of {config.min_gap} requests since last switch")
+            else:
+                decision = _stay(f"no rule matched: keep {requested_model}")
 
     # Rule 4: default.
-    if isinstance(requested_model, str) and requested_model:
-        return _stay(f"no rule matched: keep {requested_model}")
-    return _stay("no rule matched")
+    else:
+        if isinstance(requested_model, str) and requested_model:
+            decision = _stay(f"no rule matched: keep {requested_model}")
+        else:
+            decision = _stay("no rule matched")
+
+    # Post-rules: set target_effort when effort_policy is enabled.
+    if config.effort_policy and decision.target_effort is None:
+        # Re-evaluate last role for effort (rules are independent of the STAY/SWITCH
+        # branching above; we just need the last message role/tool info).
+        messages = body.get("messages")
+        if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
+            last = messages[-1]
+        role = last.get("role")
+        if role == "user":
+            decision = replace(decision, target_effort="high")
+        elif role == "tool":
+            text = _text_of(last.get("content"))
+            if any(marker in text for marker in ERROR_MARKERS):
+                decision = replace(decision, target_effort="high")
+            else:
+                tool = _tool_name(messages, last)
+                if tool in config.easy_tools:
+                    decision = replace(decision, target_effort="low")
+                # else: target_effort stays None
+
+    return decision

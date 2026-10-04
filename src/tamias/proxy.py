@@ -44,6 +44,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import anthropic_adapter, pricing, router
+from tamias.effort import apply_effort
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
@@ -289,6 +290,7 @@ def create_app(
     inject_usage: bool = False,
     config: RouterConfig | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    effort_style: str = "openrouter",
 ) -> FastAPI:
     base = upstream_url.rstrip("/")
     client = httpx.AsyncClient(timeout=None, transport=transport)
@@ -302,6 +304,8 @@ def create_app(
             "to make shadow-mode savings meaningful.",
             router_mode,
         )
+
+    app.state.effort_style = effort_style
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -350,7 +354,10 @@ def create_app(
 
         Shadow mode returns ``raw`` unchanged: the decision is recorded, never
         applied.  Only ``router_mode == "active"`` may rewrite ``model``, and only
-        the opt-in ``inject_usage`` may add ``stream_options``.
+        the opt-in ``inject_usage`` may add ``stream_options``.  When
+        ``decision.target_effort`` is set (and ``router_mode == "active"``), the
+        body is re-encoded with the reasoning-effort field added, mimicking the
+        OpenRouter/OpenAI reasoning parameter.
         """
         if (
             router_mode == "active"
@@ -359,6 +366,9 @@ def create_app(
             and decision.target_model != body.get("model")
         ):
             body = {**body, "model": decision.target_model}
+            raw = json.dumps(body).encode()
+        if decision.target_effort is not None and router_mode == "active":
+            body = apply_effort(body, decision.target_effort, style=app.state.effort_style)
             raw = json.dumps(body).encode()
         if inject_usage and body.get("stream"):
             raw = with_usage_included(body)
@@ -378,6 +388,9 @@ def create_app(
         started: float,
         status: int,
         decision: Decision,
+        effort_requested: str | None = None,
+        effort_used: str | None = None,
+        decision_target_effort: str | None = None,
     ) -> None:
         cost = pricing.compute_cost(model_used, usage, sheet)
         store.log_request(
@@ -390,6 +403,9 @@ def create_app(
             round((time.perf_counter() - started) * 1000.0),
             str(status),
             decision,
+            effort_requested=effort_requested,
+            effort_used=effort_used,
+            decision_target_effort=decision_target_effort,
         )
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
@@ -412,6 +428,16 @@ def create_app(
         session_id = derive_session_id(dict(request.headers.items()), body, _SALT)
         model_requested = _model_name(body.get("model"))
         streaming = bool(body.get("stream"))
+
+        # Extract effort requested from the client's body, if any.
+        effort_requested: str | None = None
+        if body.get("reasoning") is not None:
+            r = body["reasoning"]
+            if isinstance(r, dict):
+                effort_requested = r.get("effort") or body.get("reasoning_effort")
+        if effort_requested is None:
+            effort_requested = body.get("reasoning_effort")
+
         decision = plan(session_id, body, model_requested)
 
         outgoing = client.build_request(
@@ -439,6 +465,9 @@ def create_app(
                 started,
                 upstream.status_code,
                 decision,
+                effort_requested=effort_requested,
+                effort_used=None,
+                decision_target_effort=decision.target_effort,
             )
             advance(session_id, model_used)
             return Response(

@@ -52,6 +52,7 @@ class Decision:
     action: Literal["STAY", "SWITCH"]
     target_model: str | None
     reason: str
+    target_effort: str | None = None
     persisted_only: bool = False
 
 
