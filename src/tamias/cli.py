@@ -122,6 +122,16 @@ def _usage(row: dict[str, Any]) -> Usage:
     )
 
 
+def _has_counts(row: dict[str, Any]) -> bool:
+    """Whether the row logged the token counts a cost could be built from.
+
+    Input and output are the two counts every rate needs.  A row missing either
+    has no arithmetic behind it, so it can contribute to a total only as
+    UNKNOWN — never as zero, and never as an assumed number.
+    """
+    return _count(row, "input_tokens") is not None and _count(row, "output_tokens") is not None
+
+
 def _cheap_model(sheet: PriceSheet) -> str | None:
     """The model a switched request is assumed to have been able to use.
 
@@ -170,8 +180,11 @@ def report(db_path: str, prices_path: str) -> None:
     switched = 0
     saved = 0.0
     unpriced = 0
+    with_counts = 0
 
     for row in rows:
+        if _has_counts(row):
+            with_counts += 1
         cost = _stored_cost(row)
         if cost is None:
             unknown_costs += 1
@@ -198,11 +211,22 @@ def report(db_path: str, prices_path: str) -> None:
         print(f"total cost: {_money(known_total)}{suffix}")
     print(f"requests shadow would have switched: {switched}")
 
-    line = f"estimated saving: {_money(saved)} ({ESTIMATE_LABEL}"
-    if unpriced:
-        line += f"; {unpriced} of {switched} switched requests not priced"
-    line += f"){suffix}"
-    print(line)
+    # A saving is arithmetic over token counts.  If nothing was switched the
+    # saving is a definite zero, but if something was switched and not one row
+    # logged counts then the saving is unknown -- and `$0.00` would read as
+    # "the switch would have saved nothing", which is a claim about money rather
+    # than about missing data.  A partly-known log gets the number plus the
+    # count it rests on, so a subset is never quoted as the whole session.
+    if switched and not with_counts:
+        print(f"estimated saving: UNKNOWN (0 of {len(rows)} requests have token counts){suffix}")
+    else:
+        line = f"estimated saving: {_money(saved)} ({ESTIMATE_LABEL}"
+        if with_counts < len(rows):
+            line += f"; based on {with_counts} of {len(rows)} requests with token counts"
+        if unpriced:
+            line += f"; {unpriced} of {switched} switched requests not priced"
+        line += f"){suffix}"
+        print(line)
     print(f"cheap model assumed: {cheap or 'unknown'}")
     print(f"price sheet: {prices_path} ({sheet.date})")
 
@@ -216,11 +240,15 @@ def build_serve_app(
     cheap_model: str = "",
     strong_model: str = "",
     min_gap: int = 3,
+    inject_usage: bool = False,
+    transport: Any | None = None,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
     Kept separate from :func:`serve` so the wiring (price sheet, sqlite log,
-    router config) can be exercised without binding a port.
+    router config) can be exercised without binding a port.  ``transport`` is the
+    httpx transport the upstream is reached through; ``serve`` leaves it as
+    ``None`` for a real socket, and a test passes the suite's in-process one.
     """
     from tamias import proxy
 
@@ -232,7 +260,15 @@ def build_serve_app(
         strong_model=strong_model,
         min_gap=min_gap,
     )
-    app = proxy.create_app(upstream, store, sheet, router_mode, config=config)
+    app = proxy.create_app(
+        upstream,
+        store,
+        sheet,
+        router_mode,
+        config=config,
+        inject_usage=inject_usage,
+        transport=transport,
+    )
     app.state.store = store
     return app
 
@@ -253,6 +289,7 @@ def serve(args: argparse.Namespace) -> int:
         cheap_model=args.cheap_model,
         strong_model=args.strong_model,
         min_gap=args.min_gap,
+        inject_usage=args.inject_usage,
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -260,6 +297,13 @@ def serve(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     print(f"tamias serve: request log {args.db}, prices {args.prices}", file=sys.stderr)
+    if args.inject_usage:
+        print(
+            "tamias serve: --inject-usage is ON: streaming requests are re-encoded "
+            "with stream_options.include_usage=true, which adds a final chunk "
+            "carrying usage and empty choices",
+            file=sys.stderr,
+        )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     store: Store | None = getattr(app.state, "store", None)
     if store is not None:
@@ -308,6 +352,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="requests that must pass after the last switch before switching again",
+    )
+    serve_parser.add_argument(
+        "--inject-usage",
+        action="store_true",
+        help="ask the upstream for a usage chunk on streaming requests even when "
+        "the client did not (default: off, which forwards the body byte-for-byte). "
+        "Adds one final chunk with usage and empty choices",
     )
     serve_parser.add_argument("--verbose", action="store_true", help="log every proxy event")
 

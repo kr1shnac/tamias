@@ -75,7 +75,7 @@ and forwarded every request on the strong model.
 | requests shadow would have switched (SWITCH) | 3 |
 | STAY | 5 |
 | rows where `model_used` != `model_requested` | 0 |
-| rows with token counts | 0 of 8 |
+| rows with token counts | 8 of 8 |
 | rows with `cost_usd` = 0.0 | 8 of 8 |
 | non-200 statuses | 0 |
 
@@ -139,13 +139,14 @@ body, a message, a completion or a header.
 
 ## What could not be verified
 
-- **Real per-token arithmetic.** Every row from the agent carries NULL token
-  counts: opencode's streaming path did not request usage, so nothing observed
-  here prices a non-zero rate. Only the all-zero path is verified live. The
-  invented rates in `prices.openrouter-sim.toml` have never been checked against
-  a real bill.
+- **Real per-token arithmetic.** The agent's rows *do* carry token counts — 8 of 8
+  in shadow mode, 7 of 8 in active mode, the first being a request that logged
+  none. What has never been checked is those counts priced against a **non-zero**
+  rate: every rate in `prices.openrouter.toml` is a real 0, so only the free path
+  is verified against a live upstream. The invented rates in
+  `prices.openrouter-sim.toml` have never been checked against a real bill.
 - **The stage 3 saving figure.** `$0.069811` is arithmetic over invented prices
-  applied to NULL counts. It is a rehearsal of the report's shape, not a
+  applied to real token counts. It is a rehearsal of the report's shape, not a
   measurement, and it should never be quoted as money saved.
 - **Attribution of the successful edit.** Active mode switched 2 of 8 requests,
   the task passed, but a metadata-only log cannot attribute the passing edit to

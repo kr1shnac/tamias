@@ -108,12 +108,13 @@ def log(
     cost: float | None,
     action: str,
     model_used: str = "gpt-4o",
+    model_requested: str = "gpt-4o",
 ) -> None:
     store = Store(db)
     store.log_request(
         ts="2026-01-05T00:00:00Z",
         session_id="s1",
-        model_requested="gpt-4o",
+        model_requested=model_requested,
         model_used=model_used,
         usage=usage,
         cost=CostBreakdown(
@@ -252,6 +253,103 @@ def test_report_flags_switched_requests_whose_model_is_not_in_the_sheet(
     assert "requests shadow would have switched: 1" in out
     assert "1 of 1 switched requests not priced" in out
     assert "estimated saving: $0.00" in out
+
+
+ULTRA = "nvidia/nemotron-3-ultra-550b-a55b:free"
+LIGHTNING = "nvidia/nemotron-3.5-lightning:free"
+
+# The shipped simulated OpenRouter sheet, the one the live evidence runs used.
+SIMULATED_OPENROUTER_SHEET = Path(__file__).resolve().parents[1] / "prices.openrouter-sim.toml"
+
+# An eight-request session whose rows carry no token counts at all, which is what
+# a log looks like when every request was streamed and nothing ever asked for
+# usage.  Three of the eight were recorded as SWITCH.
+NO_COUNTS = Usage(
+    input_tokens=None, output_tokens=None, cached_input_tokens=None, cache_write_tokens=None
+)
+
+
+def test_report_saving_is_unknown_when_no_request_has_token_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No counts means no saving can be computed, and $0.00 would be a lie.
+
+    A report that cannot price a single switched request has no business printing
+    a dollar amount: $0.00 reads as "the switch would have saved nothing", which
+    is a claim about money, not about missing data.  UNKNOWN is the honest
+    answer, and it has to say how much of the log was unpriceable.
+    """
+    db = str(tmp_path / "log.db")
+    for index in range(8):
+        action = "SWITCH" if index in (4, 5, 7) else "STAY"
+        log(db, NO_COUNTS, 0.0, action, model_used=ULTRA, model_requested=ULTRA)
+
+    code, out = run(capsys, db, str(SIMULATED_OPENROUTER_SHEET))
+
+    assert code == 0
+    assert "requests: 8" in out
+    assert "requests shadow would have switched: 3" in out
+    line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
+    assert line == (
+        "estimated saving: UNKNOWN (0 of 8 requests have token counts)"
+        "  [SIMULATED PRICES, NOT REAL SAVINGS]"
+    )
+    # No dollar figure for the saving at all.
+    assert "estimated saving: $" not in out
+
+
+def test_report_saving_covers_only_the_requests_that_have_token_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A partly-known log is summed over the known rows and says so.
+
+    Seven of the eight rows carry counts, so a number is computable, but it is a
+    number about seven requests and must not be quoted as a whole-session figure.
+    """
+    db = str(tmp_path / "log.db")
+    counted = Usage(
+        input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None
+    )
+    # uncached 7935*3.0 + 0*0.30 + output 49*15.0 = 24540  -> 0.02454
+    # on lightning: 7935*0.25 + 0*0.03 + 49*1.25      =  2045  -> 0.002045
+    one_saving = 0.02454 - 0.002045
+
+    log(db, counted, 0.0, "STAY", model_used=ULTRA, model_requested=ULTRA)
+    log(db, counted, 0.0, "SWITCH", model_used=ULTRA, model_requested=ULTRA)
+    log(db, counted, 0.0, "SWITCH", model_used=ULTRA, model_requested=ULTRA)
+    log(db, NO_COUNTS, 0.0, "STAY", model_used=ULTRA, model_requested=ULTRA)
+    log(db, counted, 0.0, "STAY", model_used=ULTRA, model_requested=ULTRA)
+    log(db, counted, 0.0, "STAY", model_used=ULTRA, model_requested=ULTRA)
+    log(db, counted, 0.0, "STAY", model_used=ULTRA, model_requested=ULTRA)
+    log(db, NO_COUNTS, 0.0, "SWITCH", model_used=ULTRA, model_requested=ULTRA)
+
+    code, out = run(capsys, db, str(SIMULATED_OPENROUTER_SHEET))
+
+    assert code == 0
+    assert "requests: 8" in out
+    assert "requests shadow would have switched: 3" in out
+    line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
+    assert "estimated saving: UNKNOWN" not in line
+    assert money(out, "estimated saving") == pytest.approx(2 * one_saving, abs=1e-6)
+    assert "based on 6 of 8 requests with token counts" in line
+    # The unpriceable switched row is still called out, and counted, not hidden.
+    assert "1 of 3 switched requests not priced" in line
+
+
+def test_report_saving_is_not_labelled_partial_when_every_row_has_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The "based on k of n" caveat only appears when k < n, so it stays meaningful."""
+    db = str(tmp_path / "log.db")
+    counted = Usage(
+        input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None
+    )
+    log(db, counted, 0.0, "SWITCH", model_used=ULTRA, model_requested=ULTRA)
+    log(db, counted, 0.0, "STAY", model_used=ULTRA, model_requested=ULTRA)
+    _, out = run(capsys, db, str(SIMULATED_OPENROUTER_SHEET))
+    line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
+    assert "based on" not in line
+    assert "UNKNOWN" not in line
 
 
 def test_report_estimate_matches_the_proxys_own_arithmetic(

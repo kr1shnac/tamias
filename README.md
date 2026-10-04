@@ -186,7 +186,27 @@ independent of the money arithmetic above.
 | `tamias report` | Summarise request count, cost, shadow decisions and the estimate. |
 
 Useful `serve` flags: `--router-mode {shadow,active,off}`, `--cheap-model`,
-`--strong-model`, `--min-gap`, `--host`, `--port`, `--verbose`.
+`--strong-model`, `--min-gap`, `--inject-usage`, `--host`, `--port`,
+`--verbose`.
+
+### `--inject-usage` is off by default
+
+By default the proxy forwards every request body byte-for-byte, streaming ones
+included, and a streamed request that did not ask for usage gets none — so its
+token counts are UNKNOWN and its cost is UNKNOWN. That is the honest answer, but
+it makes the log much less useful, because a whole agent session often streams
+and never opts in.
+
+`--inject-usage` turns that around. When it is on, and only then, the proxy
+re-encodes a **streaming** request body to set
+`stream_options.include_usage = true`, keeping any other `stream_options` keys the
+client sent and every other field untouched. The upstream then appends **one
+final chunk** carrying a `usage` object and an **empty `choices` array**.
+
+Turn it on when you want a cost for every streamed request and you would rather
+ask the upstream for the counts than accept UNKNOWN. Leave it off when you need
+the forwarded bytes to be provably identical to what the client sent, or when a
+client of yours might trip over a chunk whose `choices` is empty.
 
 ## Privacy
 

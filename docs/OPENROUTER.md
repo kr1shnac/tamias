@@ -163,6 +163,46 @@ have no fixed target; and a saving computed between two requests would be
 dividing by two unrelated models. Pin explicit ids — the `:free` suffix on a
 named model, as in `prices.openrouter.toml`.
 
+## Streaming and usage: `--inject-usage`
+
+OpenCode streams, and its requests do not carry
+`stream_options.include_usage`. So does tamias: the default is to forward the
+body byte-for-byte, which means a streamed request gets no usage chunk, its token
+counts are UNKNOWN, and `tamias report` prints `estimated saving: UNKNOWN (0 of
+n requests have token counts)` rather than a number.
+
+OpenRouter muddies this. It has been observed sending a usage chunk on a stream
+that never opted in, so some of your rows may carry counts and some may not,
+with nothing in the request to predict which. That is the upstream's choice, not
+something tamias did.
+
+Pass `--inject-usage` to stop guessing:
+
+```sh
+tamias serve \
+  --upstream https://openrouter.ai/api \
+  --prices prices.openrouter.toml \
+  --db /tmp/or.db \
+  --port 8000 \
+  --inject-usage
+```
+
+**It is off by default, and off means byte-for-byte.** With the flag on, and only
+then, a streaming request body is re-encoded to set
+`stream_options.include_usage = true`. Any other `stream_options` key the client
+sent is kept, and every other field — `model`, `messages`, `temperature`, `seed` —
+is untouched. A non-streaming request is not modified at all.
+
+Turn it on when you want a cost for every streamed request and would rather ask
+for the counts than accept UNKNOWN. Leave it off when the forwarded bytes have to
+be provably what the client sent.
+
+**The cost is one extra chunk.** The upstream appends a final chunk carrying a
+`usage` object and an **empty `choices` array**, after all the content chunks.
+Clients that read chunks in order are fine; a client that assumes every chunk has
+a choice is not. OpenCode's `@ai-sdk/openai-compatible` path handles it — that is
+verified, see `docs/live-evidence.md`.
+
 ## Rate limits
 
 Free models are the most rate-limited thing on OpenRouter, and limits are per

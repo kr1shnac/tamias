@@ -329,6 +329,8 @@ def test_serve_defaults_to_shadow_mode_on_port_8000() -> None:
     assert args.router_mode == "shadow"
     assert args.port == 8000
     assert args.upstream == UPSTREAM_URL
+    # Off unless asked for: the default forwards every body byte-for-byte.
+    assert args.inject_usage is False
 
 
 def test_serve_accepts_the_documented_flags() -> None:
@@ -351,12 +353,14 @@ def test_serve_accepts_the_documented_flags() -> None:
             STRONG,
             "--min-gap",
             "5",
+            "--inject-usage",
         ]
     )
     assert args.port == 9123
     assert args.cheap_model == CHEAP
     assert args.strong_model == STRONG
     assert args.min_gap == 5
+    assert args.inject_usage is True
 
 
 def test_serve_rejects_an_unknown_router_mode() -> None:
@@ -399,3 +403,135 @@ def test_serve_wires_the_router_config_into_the_app(db_path: Path, prices_path: 
 def test_serve_fails_cleanly_on_a_missing_price_sheet(db_path: Path) -> None:
     with pytest.raises(OSError):
         cli.build_serve_app(UPSTREAM_URL, str(db_path / "nope.toml"), str(db_path))
+
+
+# --- --inject-usage, end to end through `tamias serve`'s own app builder ------
+
+
+def _sse_frames(content: bytes) -> list[dict[str, Any]]:
+    """Parse an SSE body the mock upstream produced, in order."""
+    frames = []
+    for line in content.split(b"\n"):
+        line = line.strip()
+        if not line.startswith(b"data:") or b"[DONE]" in line:
+            continue
+        decoded = json.loads(line[len(b"data:") :])
+        if isinstance(decoded, dict):
+            frames.append(decoded)
+    return frames
+
+
+async def _stream_once(
+    db_path: Path, prices_path: Path, inject_usage: bool, body: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Send one streaming request through a `serve`-built app; return frames + echoed body."""
+    raw = json.dumps(body, separators=(",", ":")).encode()
+    app = cli.build_serve_app(
+        UPSTREAM_URL,
+        str(prices_path),
+        str(db_path),
+        "shadow",
+        cheap_model=CHEAP,
+        strong_model=STRONG,
+        min_gap=MIN_GAP,
+        inject_usage=inject_usage,
+        transport=StreamingASGITransport(create_mock_upstream()),
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=StreamingASGITransport(app), base_url=PROXY_URL, timeout=None
+        ) as client:
+            response = await client.post(
+                CHAT_PATH,
+                content=raw,
+                headers={"content-type": "application/json", "x-tamias-session": SESSION},
+            )
+        assert response.status_code == 200, response.text
+        frames = _sse_frames(response.content)
+        echoed = base64.b64decode(frames[0]["echo"]["raw_body_b64"])
+        return frames, {"sent": raw, "echoed": echoed}
+    finally:
+        app.state.store.close()
+
+
+async def test_serve_without_inject_usage_forwards_the_stream_body_byte_identical(
+    tmp_path: Path, db_path: Path, prices_path: Path
+) -> None:
+    """Off by default: not one byte of a streaming body is touched."""
+    _frames, bodies = await _stream_once(
+        db_path, prices_path, False, {"model": STRONG, "messages": [], "stream": True}
+    )
+    assert bodies["echoed"] == bodies["sent"]
+    assert b"stream_options" not in bodies["echoed"]
+
+
+async def test_serve_with_inject_usage_changes_only_stream_options(
+    tmp_path: Path, db_path: Path, prices_path: Path
+) -> None:
+    """On: the only difference is stream_options.include_usage.
+
+    Every other key the client sent -- model, messages, temperature, seed -- has to
+    survive untouched, so the flag cannot quietly alter what the model is asked.
+    """
+    _frames, bodies = await _stream_once(
+        db_path,
+        prices_path,
+        True,
+        {
+            "model": STRONG,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "temperature": 0.9,
+            "seed": 7,
+        },
+    )
+    sent = json.loads(bodies["sent"])
+    echoed = json.loads(bodies["echoed"])
+    assert echoed["stream_options"] == {"include_usage": True}
+    for key in ("model", "messages", "temperature", "seed", "stream"):
+        assert echoed[key] == sent[key], f"{key} was altered"
+    # Nothing beyond stream_options was added either.
+    assert set(echoed) == set(sent) | {"stream_options"}
+
+
+async def test_serve_with_inject_usage_keeps_stream_options_the_client_sent(
+    tmp_path: Path, db_path: Path, prices_path: Path
+) -> None:
+    """A client that already sent stream_options keeps its other keys."""
+    _frames, bodies = await _stream_once(
+        db_path,
+        prices_path,
+        True,
+        {
+            "model": STRONG,
+            "messages": [],
+            "stream": True,
+            "stream_options": {"other_setting": "keep-me"},
+        },
+    )
+    echoed = json.loads(bodies["echoed"])
+    assert echoed["stream_options"] == {"other_setting": "keep-me", "include_usage": True}
+
+
+async def test_serve_with_inject_usage_client_still_gets_a_valid_stream(
+    tmp_path: Path, db_path: Path, prices_path: Path
+) -> None:
+    """The client sees a normal stream plus one final usage chunk.
+
+    The extra chunk is the whole point and also the whole risk: it carries usage
+    and an *empty* choices array, so a client that assumes every chunk has a
+    choice could trip over it.  It arrives after all the content, and the proxy
+    relays it verbatim.
+    """
+    frames, _bodies = await _stream_once(
+        db_path, prices_path, True, {"model": STRONG, "messages": [], "stream": True}
+    )
+    content_frames = [f for f in frames if f.get("choices")]
+    usage_frames = [f for f in frames if f.get("usage")]
+    assert usage_frames, "no usage chunk reached the client"
+    assert len(usage_frames) == 1
+    assert usage_frames[0]["choices"] == []
+    assert usage_frames[0]["usage"]["prompt_tokens"] == 11
+    # The usage chunk is last, so a client reading in order sees content first.
+    assert frames[-1] is usage_frames[0]
+    assert content_frames, "the content chunks went missing"
