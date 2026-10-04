@@ -200,8 +200,18 @@ be provably what the client sent.
 **The cost is one extra chunk.** The upstream appends a final chunk carrying a
 `usage` object and an **empty `choices` array**, after all the content chunks.
 Clients that read chunks in order are fine; a client that assumes every chunk has
-a choice is not. OpenCode's `@ai-sdk/openai-compatible` path handles it — that is
-verified, see `docs/live-evidence.md`.
+a choice is not. OpenCode's `@ai-sdk/openai-compatible` path handles it: two
+`opencode run` sessions with the flag on, in shadow and in active mode, ran to
+completion with all rows HTTP 200 and the task fixed in both — verified live, see
+"Stages 6 and 7" in `docs/live-evidence.md`.
+
+**But coverage still will not be total.** Because the usage chunk is last, a
+client that stops reading once it has what it needs leaves nothing to log. In a
+shadow run with the flag on, 8 of 11 rows carried counts and 3 were NULL: every
+NULL row finished in under 600 ms and every counted row took over 2.3 s. A
+controlled probe confirmed the cause — read to `[DONE]` and the row is priced;
+break after two frames and it is NULL. Expect UNKNOWN or a `based on k of n`
+caveat from `tamias report` on agent traffic even with this flag on.
 
 ## Rate limits
 

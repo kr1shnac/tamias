@@ -203,10 +203,16 @@ re-encodes a **streaming** request body to set
 client sent and every other field untouched. The upstream then appends **one
 final chunk** carrying a `usage` object and an **empty `choices` array**.
 
-Turn it on when you want a cost for every streamed request and you would rather
-ask the upstream for the counts than accept UNKNOWN. Leave it off when you need
-the forwarded bytes to be provably identical to what the client sent, or when a
-client of yours might trip over a chunk whose `choices` is empty.
+Turn it on when you want a cost for as many streamed requests as you can get and
+you would rather ask the upstream for the counts than accept UNKNOWN. It still
+will not be every one: the usage chunk arrives last, so a client that stops
+reading as soon as it has what it needs leaves nothing to log, and those rows stay
+NULL. Leave it off when you need the forwarded bytes to be provably identical to
+what the client sent, or when a client of yours might trip over a chunk whose
+`choices` is empty.
+
+OpenCode's `@ai-sdk/openai-compatible` provider handles the empty-`choices` chunk;
+that was checked against the live API, see `docs/live-evidence.md`.
 
 ## Privacy
 
