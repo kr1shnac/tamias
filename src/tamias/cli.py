@@ -182,6 +182,10 @@ def report(db_path: str, prices_path: str) -> None:
     unpriced = 0
     with_counts = 0
 
+    realised_saved = 0.0
+    realised_count = 0
+    realised_unpriced = 0
+
     for row in rows:
         if _has_counts(row):
             with_counts += 1
@@ -191,13 +195,25 @@ def report(db_path: str, prices_path: str) -> None:
         else:
             known_total += cost
         if not _would_switch(row):
-            continue
-        switched += 1
-        delta = _saving(row, sheet, cheap)
-        if delta is None:
-            unpriced += 1
+            pass
         else:
-            saved += delta
+            switched += 1
+            delta = _saving(row, sheet, cheap)
+            if delta is None:
+                unpriced += 1
+            else:
+                saved += delta
+
+        model_used = _pick(row, MODEL_USED_COLUMNS)
+        if model_used is not None and model_used != row["model_requested"]:
+            usage = _usage(row)
+            cost_requested = compute_cost(row["model_requested"], usage, sheet).usd
+            cost_used = compute_cost(model_used, usage, sheet).usd
+            if cost_requested is not None and cost_used is not None:
+                realised_saved += max(0.0, cost_requested - cost_used)
+                realised_count += 1
+            else:
+                realised_unpriced += 1
 
     suffix = _cost_suffix(sheet)
     print(f"requests: {len(rows)}")
@@ -215,7 +231,7 @@ def report(db_path: str, prices_path: str) -> None:
     # saving is a definite zero, but if something was switched and not one row
     # logged counts then the saving is unknown -- and `$0.00` would read as
     # "the switch would have saved nothing", which is a claim about money rather
-    # than about missing data.  A partly-known log gets the number plus the
+    # than about missing data. A partly-known log gets the number plus the
     # count it rests on, so a subset is never quoted as the whole session.
     if switched and not with_counts:
         print(f"estimated saving: UNKNOWN (0 of {len(rows)} requests have token counts){suffix}")
@@ -227,6 +243,29 @@ def report(db_path: str, prices_path: str) -> None:
             line += f"; {unpriced} of {switched} switched requests not priced"
         line += f"){suffix}"
         print(line)
+
+    # --- realised saving (rows the proxy actually rewrote) ---
+    # Rows where model_used differs from model_requested: the proxy actually
+    # rewrote the request to a cheaper model. Baseline = cost of model_requested
+    # on the row's own usage; effective model = model_used.
+    if realised_count > 0 or realised_unpriced > 0:
+        if realised_count > 0:
+            line1 = (
+                f"realised saving (rows the proxy actually rewrote): "
+                f"{_money(realised_saved)} ({ESTIMATE_LABEL}"
+            )
+            if realised_unpriced and realised_count > realised_unpriced:
+                line1 += f"; {realised_unpriced} of {realised_count} not priced"
+            line1 += f"){suffix}"
+        else:
+            line1 = (
+                f"realised saving: UNKNOWN over {realised_unpriced + realised_count} "
+                f"rows ({ESTIMATE_LABEL}){suffix}"
+            )
+    else:
+        line1 = ""
+
+    print(line1)
     print(f"cheap model assumed: {cheap or 'unknown'}")
     print(f"price sheet: {prices_path} ({sheet.date})")
 
