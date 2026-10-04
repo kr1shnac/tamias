@@ -1,0 +1,25 @@
+# SIMULATED price sheet for tamias.  These rates are invented, not published.
+#
+# `simulated = true` is what you set when you want to see what the arithmetic
+# would say before you have real numbers, or when you are rehearsing a report
+# with a shape you do not have data for.  It changes no arithmetic: every cost
+# is computed exactly as it would be from a real sheet.  It only makes
+# `tamias report` stamp SIMULATED PRICES, NOT REAL SAVINGS on every line that
+# quotes an amount, so an invented number cannot be mistaken for a bill.
+#
+# Do not ship this file as your production price sheet.
+
+simulated = true
+date = "2026-10-04"
+
+# The expensive model an agent session starts on.
+[strong]
+input = 3.0
+output = 15.0
+cached_input = 0.30
+
+# The cheaper model mechanical tool work would be switched to.
+[cheap]
+input = 0.25
+output = 1.25
+cached_input = 0.03

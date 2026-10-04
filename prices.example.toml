@@ -1,0 +1,42 @@
+# Example price sheet for tamias.
+#
+# Every rate is USD per 1,000,000 tokens, as published by the provider on
+# `date` below.  A rate of 0 means the model really is free.  A rate left out
+# entirely means the rate is UNKNOWN: the cost of a request that needs that
+# rate is then unknown too, and is never guessed at.
+
+date = "2026-10-04"
+
+# A priced model with a prompt cache.
+[gpt-4o]
+input = 3.0
+output = 15.0
+cached_input = 0.3
+cache_write = 3.75
+# cache_write_1h optional (defaults to cache_write if omitted)
+
+# A local model that costs nothing, e.g. served on localhost.
+[free-model]
+input = 0.0
+output = 0.0
+cached_input = 0.0
+cache_write = 0.0# Example with split cache writes
+[split-example]
+input = 1.0
+output = 5.0
+cached_input = 0.1
+cache_write = 2.0
+cache_write_1h = 4.0
+
+[strong]
+input = 3.0
+output = 15.0
+cached_input = 0.30
+cache_write = 3.75
+cache_write_1h = 6.0
+
+[oa]
+input = 1.0
+output = 4.0
+cached_input = 0.25
+cache_write = 0
