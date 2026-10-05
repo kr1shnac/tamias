@@ -809,8 +809,16 @@ tbody tr.new td { animation: flash 900ms ease-out; }
       : "no requests logged yet");
 
     show(el.cardRouted, money(report.actual_total));
+    var routedProv = "";
+    if (report.simulated) {
+      routedProv = " (SIMULATED prices)";
+    } else if (report.provenance_unknown > 0) {
+      routedProv = " (provenance unknown)";
+    } else if (report.price_sheets && report.price_sheets.length) {
+      routedProv = " (list prices from " + report.price_sheets.join(", ") + ")";
+    }
     put(el.cardRoutedNote, report.n_priced
-      ? "over " + report.n_priced + " priced requests"
+      ? "over " + report.n_priced + " priced requests" + routedProv
       : "no priced requests");
 
     show(el.cardBaseline, money(report.baseline_total));

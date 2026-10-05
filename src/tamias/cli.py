@@ -199,6 +199,12 @@ def report(db_path: str, prices_path: str) -> None:
     unpriced = 0
     with_counts = 0
 
+    free_count = sum(
+        1
+        for row in rows
+        if isinstance(row.get("model_requested"), str) and row["model_requested"].endswith(":free")
+    )
+
     realised_saved = 0.0
     realised_count = 0
     realised_unpriced = 0
@@ -251,14 +257,53 @@ def report(db_path: str, prices_path: str) -> None:
         if _stored_simulated(row) is None or _stored_price_sheet(row) is None
     )
     print(f"requests: {len(rows)}")
+    # Determine provenance qualifier for total cost
+    stored_rows_simulated = any(flag is True for flag in stored_flags)
+    is_legacy = unknown_provenance > 0 or (
+        bool(priced_rows) and all(flag is None for flag in stored_flags)
+    )
     if unknown_costs:
-        print(
-            f"total cost: UNKNOWN "
-            f"(known part: {_money(known_total)}; "
-            f"{unknown_costs} of {len(rows)} requests have unknown cost){suffix}"
-        )
+        if stored_rows_simulated:
+            print(
+                f"total cost: UNKNOWN "
+                f"(known part: {_money(known_total)}; "
+                f"{unknown_costs} of {len(rows)} requests have unknown cost) "
+                f"(computed, not billed; SIMULATED prices)"
+            )
+        elif is_legacy:
+            print(
+                f"total cost: UNKNOWN "
+                f"(known part: {_money(known_total)}; "
+                f"{unknown_costs} of {len(rows)} requests have unknown cost) "
+                f"(computed, not billed; price provenance unknown)"
+            )
+        else:
+            stored_sheet_str = ", ".join(stored_sheets) if stored_sheets else str(prices_path)
+            print(
+                f"total cost: UNKNOWN "
+                f"(known part: {_money(known_total)}; "
+                f"{unknown_costs} of {len(rows)} requests have unknown cost) "
+                f"(computed, not billed; list prices from {stored_sheet_str})"
+            )
     else:
-        print(f"total cost: {_money(known_total)}{suffix}")
+        if stored_rows_simulated:
+            print(f"total cost (computed, not billed; SIMULATED prices): {_money(known_total)}")
+        elif is_legacy:
+            print(
+                "total cost (computed, not billed; price provenance unknown): "
+                f"{_money(known_total)}"
+            )
+        else:
+            stored_sheet_str = ", ".join(stored_sheets) if stored_sheets else str(prices_path)
+            print(
+                "total cost (computed, not billed; list prices from "
+                f"{stored_sheet_str}): {_money(known_total)}"
+            )
+    if free_count > 0:
+        print(
+            f"free-model rows: {free_count} of {len(rows)}; "
+            "real billed cost for those is $0, so dollar figures above are hypothetical"
+        )
     print(f"requests shadow would have switched: {switched}")
 
     reconciled: list[tuple[float, float]] = []
@@ -300,7 +345,17 @@ def report(db_path: str, prices_path: str) -> None:
     # "the switch would have saved nothing", which is a claim about money rather
     # than about missing data. A partly-known log gets the number plus the
     # count it rests on, so a subset is never quoted as the whole session.
-    if switched and not with_counts:
+    bases_differ = (
+        (stored_rows_simulated or unknown_provenance > 0 or is_legacy)
+        and stored_sheets
+        and str(prices_path) not in stored_sheets
+    )
+    if bases_differ:
+        print(
+            "estimated saving: UNKNOWN "
+            "(stored costs and the --prices sheet use different price bases)"
+        )
+    elif switched and not with_counts:
         print(f"estimated saving: UNKNOWN (0 of {len(rows)} requests have token counts){suffix}")
     else:
         line = f"estimated saving: {_money(saved)} ({ESTIMATE_LABEL}"
@@ -315,7 +370,12 @@ def report(db_path: str, prices_path: str) -> None:
     # Rows where model_used differs from model_requested: the proxy actually
     # rewrote the request to a cheaper model. Baseline = cost of model_requested
     # on the row's own usage; effective model = model_used.
-    if realised_count > 0 or realised_unpriced > 0:
+    if bases_differ:
+        line1 = (
+            "realised saving: UNKNOWN "
+            "(stored costs and the --prices sheet use different price bases)"
+        )
+    elif realised_count > 0 or realised_unpriced > 0:
         if realised_count > 0:
             line1 = (
                 f"realised saving (rows the proxy actually rewrote): "
@@ -335,7 +395,10 @@ def report(db_path: str, prices_path: str) -> None:
 
     print(line1)
     print(f"cheap model assumed: {cheap or 'unknown'}")
-    print(f"price sheet: {prices_path} ({sheet.date})")
+    print(
+        "sheet passed on the command line (used only for savings estimates): "
+        f"{prices_path} ({sheet.date})"
+    )
 
 
 def build_serve_app(
