@@ -61,6 +61,7 @@ class FakeStore:
         latency_ms: int | None,
         status: str,
         decision: Decision,
+        **provenance: Any,
     ) -> int:
         self.rows.append(
             {
@@ -73,6 +74,7 @@ class FakeStore:
                 "latency_ms": latency_ms,
                 "status": status,
                 "decision": decision,
+                **provenance,
             }
         )
         return len(self.rows)

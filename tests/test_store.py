@@ -59,6 +59,8 @@ def log(
         latency_ms,
         "200",
         decision,
+        price_sheet=SHEET_DATE,
+        price_simulated=False,
     )
 
 
@@ -211,6 +213,7 @@ def test_schema_has_no_column_for_request_or_response_text(store: Store) -> None
         "model_requested",
         "model_used",
         "price_sheet_date",
+        "price_sheet",
         "status",
         "decision_action",
         "decision_reason",
@@ -235,9 +238,49 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "cache_write_tokens",
         "cost_usd",
         "price_sheet_date",
+        "price_sheet",
+        "price_simulated",
         "latency_ms",
         "status",
         "decision_action",
         "decision_target_model",
         "decision_reason",
     )
+
+
+def test_price_provenance_is_persisted_with_the_number(store: Store) -> None:
+    """A number carries the sheet identity that produced it."""
+    log(store)
+
+    (row,) = store.rows()
+    assert row["price_sheet"] == SHEET_DATE
+    assert row["price_simulated"] == 0
+
+
+def test_provider_cost_is_nullable_and_persisted(store: Store) -> None:
+    log(store, usage=Usage(1_000, 200, 200, 0, provider_cost_usd=0.0025))
+
+    (row,) = store.rows()
+    assert row["provider_cost_usd"] == 0.0025
+
+
+def test_reopening_an_old_schema_adds_nullable_audit_columns(tmp_path: Path) -> None:
+    path = tmp_path / "old.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE requests (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, "
+            "session_id TEXT NOT NULL, "
+            "model_requested TEXT NOT NULL, model_used TEXT NOT NULL, input_tokens INTEGER, "
+            "output_tokens INTEGER, cached_input_tokens INTEGER, cache_write_tokens INTEGER, "
+            "cost_usd REAL, price_sheet_date TEXT NOT NULL, latency_ms INTEGER, "
+            "status TEXT NOT NULL, decision_action TEXT NOT NULL, "
+            "decision_target_model TEXT, decision_reason TEXT NOT NULL)"
+        )
+
+    opened = Store(path)
+    try:
+        columns = {row[1] for row in opened._conn.execute("PRAGMA table_info(requests)")}
+    finally:
+        opened.close()
+
+    assert {"price_sheet", "price_simulated"} <= columns

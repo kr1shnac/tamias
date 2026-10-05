@@ -30,6 +30,9 @@ COLUMNS = (
     "cache_write_tokens",
     "cost_usd",
     "price_sheet_date",
+    "price_sheet",
+    "price_simulated",
+    "provider_cost_usd",
     "latency_ms",
     "status",
     "decision_action",
@@ -50,6 +53,9 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     cache_write_tokens INTEGER,
     cost_usd REAL,
     price_sheet_date TEXT NOT NULL,
+    price_sheet TEXT,
+    price_simulated INTEGER,
+    provider_cost_usd REAL,
     latency_ms INTEGER,
     status TEXT NOT NULL,
     decision_action TEXT NOT NULL,
@@ -80,7 +86,19 @@ class Store:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.execute(_CREATE_TABLE)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add nullable audit fields to logs created by older tamias versions."""
+        present = {str(row[1]) for row in self._conn.execute(f"PRAGMA table_info({TABLE})")}
+        for name, definition in (
+            ("price_sheet", "TEXT"),
+            ("price_simulated", "INTEGER"),
+            ("provider_cost_usd", "REAL"),
+        ):
+            if name not in present:
+                self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
 
     def log_request(
         self,
@@ -93,6 +111,9 @@ class Store:
         latency_ms: int | None,
         status: str,
         decision: Decision,
+        *,
+        price_sheet: str | None = None,
+        price_simulated: bool | None = None,
     ) -> int:
         """Append one request and return its row id.
 
@@ -111,6 +132,9 @@ class Store:
             usage.cache_write_tokens,
             cost.usd,
             cost.price_sheet_date,
+            price_sheet,
+            price_simulated,
+            usage.provider_cost_usd,
             latency_ms,
             status,
             decision.action,

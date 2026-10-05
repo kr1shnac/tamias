@@ -396,6 +396,57 @@ def test_report_fails_cleanly_on_missing_price_sheet(
     assert err.startswith("tamias report:")
 
 
+def test_report_uses_row_provenance_not_the_requested_sheet(tmp_path, capsys) -> None:
+    """A simulated number stays labelled when report receives another sheet."""
+    db = tmp_path / "simulated.db"
+    store = Store(db)
+    try:
+        store.log_request(
+            "2026-10-04T00:00:00Z",
+            "session",
+            "gpt-4o",
+            "gpt-4o",
+            Usage(10, 10, 0, 0),
+            CostBreakdown(usd=0.123, formula="test", price_sheet_date=SHEET_DATE),
+            1,
+            "200",
+            Decision("STAY", None, "test"),
+            price_sheet="simulated-prices.toml",
+            price_simulated=True,
+        )
+    finally:
+        store.close()
+
+    code, out = run(
+        capsys, str(db), str(Path(__file__).resolve().parents[1] / "prices.openrouter.toml")
+    )
+
+    assert code == 0
+    assert "SIMULATED PRICES, NOT REAL SAVINGS" in out
+    assert "WARNING" in out
+    assert "simulated-prices.toml" in out
+
+
+def test_report_reconciles_computed_and_provider_cost(tmp_path, capsys) -> None:
+    db = tmp_path / "provider-cost.db"
+    store = Store(db)
+    try:
+        store.log_request(
+            "2026-10-04T00:00:00Z", "session", "gpt-4o", "gpt-4o",
+            Usage(10, 10, 0, 0, provider_cost_usd=0.10),
+            CostBreakdown(usd=0.12, formula="test", price_sheet_date=SHEET_DATE),
+            1, "200", Decision("STAY", None, "test"),
+        )
+    finally:
+        store.close()
+
+    code, out = run(capsys, str(db), write_prices(tmp_path))
+
+    assert code == 0
+    assert "computed vs billed: $0.120000 vs $0.100000" in out
+    assert "difference: $0.020000" in out
+
+
 def test_report_fails_cleanly_on_a_sheet_without_a_date(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

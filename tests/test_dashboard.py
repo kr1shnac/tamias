@@ -117,6 +117,8 @@ def _log(
         latency_ms=latency_ms,
         status="200",
         decision=decision,
+        price_sheet=sheet.source,
+        price_simulated=sheet.simulated,
     )
 
 
@@ -390,6 +392,61 @@ def test_old_schema_row_is_still_priced(tmp_path: Path, sheet) -> None:
     row = build_rows(_old_schema_db(tmp_path / "old.db"), sheet)[0]
     assert row["priced"] is True
     assert row["saved"] == pytest.approx(0.022484, abs=1e-6)
+
+
+def test_stored_provenance_controls_the_dashboard_banner(tmp_path: Path, sheet) -> None:
+    """A row priced with a simulated sheet remains simulated when displayed."""
+    db = tmp_path / "stored-provenance.db"
+    opened = Store(db)
+    try:
+        _log(
+            opened,
+            ts="2026-10-04T00:00:00Z",
+            model_requested=STRONG,
+            model_used=STRONG,
+            usage=Usage(10, 2, 0, 0),
+            latency_ms=1,
+            decision=_stay(),
+            sheet=sheet,
+        )
+    finally:
+        opened.close()
+
+    report = summary(build_rows(db, sheet), simulated=False)
+    assert report["simulated"] is True
+    assert report["price_sheets"] == [str(sheet.source)]
+    assert report["provenance_unknown"] == 0
+
+
+def test_summary_reconciles_provider_cost_on_rows_with_both_values() -> None:
+    rows = [
+        {
+            "priced": True,
+            "actual_cost": 0.12,
+            "baseline_cost": 0.12,
+            "switched": False,
+            "provider_cost_usd": 0.10,
+        }
+    ]
+    report = summary(rows)
+    assert report["provider_billed_total"] == pytest.approx(0.10)
+    assert report["provider_difference"] == pytest.approx(0.02)
+
+
+def test_summary_warns_when_requested_sheet_differs_from_stored() -> None:
+    rows = [
+        {
+            "priced": True,
+            "actual_cost": 0.12,
+            "baseline_cost": 0.12,
+            "switched": False,
+            "price_sheet": "stored.toml",
+            "price_simulated": False,
+        }
+    ]
+    report = summary(rows, requested_price_sheet="requested.toml")
+    assert "WARNING" in report["price_sheet_warning"]
+    assert "stored.toml" in report["price_sheet_warning"]
 
 
 # --- (d) reading leaves the file alone -----------------------------------
