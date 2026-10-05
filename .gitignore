@@ -10,3 +10,4 @@ dist/
 live_check.db
 *.db
 *.db-journal
+demo/runs/
