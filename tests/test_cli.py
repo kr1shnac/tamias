@@ -150,8 +150,15 @@ def test_report_counts_requests_and_totals_known_costs(
     code, out = run(capsys, db, write_prices(tmp_path))
     assert code == 0
     assert "requests: 3" in out
-    assert "UNKNOWN" not in out
+    # Every cost here is known, so the total is a number rather than UNKNOWN.
+    # UNKNOWN is still the honest word on the lines whose data is genuinely
+    # missing: these rows predate provenance, and no provider ever reported a
+    # billed cost for them.
+    total = next(x for x in out.splitlines() if x.startswith("total cost:"))
+    assert "UNKNOWN" not in total
     assert money(out, "total cost") == pytest.approx(BIG_ON_STRONG + 2 * SMALL_ON_STRONG)
+    assert "billed: UNKNOWN (3 of 3 rows)" in out
+    assert "price provenance: provenance unknown (3 of 3 priced rows)" in out
 
 
 def test_report_prints_unknown_when_any_cost_is_missing(
@@ -432,10 +439,15 @@ def test_report_reconciles_computed_and_provider_cost(tmp_path, capsys) -> None:
     store = Store(db)
     try:
         store.log_request(
-            "2026-10-04T00:00:00Z", "session", "gpt-4o", "gpt-4o",
+            "2026-10-04T00:00:00Z",
+            "session",
+            "gpt-4o",
+            "gpt-4o",
             Usage(10, 10, 0, 0, provider_cost_usd=0.10),
             CostBreakdown(usd=0.12, formula="test", price_sheet_date=SHEET_DATE),
-            1, "200", Decision("STAY", None, "test"),
+            1,
+            "200",
+            Decision("STAY", None, "test"),
         )
     finally:
         store.close()

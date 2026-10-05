@@ -742,8 +742,14 @@ def test_the_page_survives_an_empty_database(tmp_path: Path, sheet_path: Path) -
     assert report["saving_pct"] is None
 
 
-def test_the_simulated_flag_appears_only_for_a_simulated_sheet(tmp_path: Path) -> None:
-    """A real sheet must not be able to raise a banner it has not earned."""
+def test_a_real_sheet_cannot_hide_a_banner_the_stored_rows_earned(tmp_path: Path) -> None:
+    """The banner follows the rows, not the sheet the dashboard is pointed at.
+
+    The amounts on the page were priced when the rows were written, so the flag
+    that labels them is the one stored beside each row.  Handing the page a real
+    sheet afterwards changes what it re-prices with; it does not relabel a
+    simulated number that is already sitting in the log.
+    """
     sim = tmp_path / "prices-sim.toml"
     sim.write_text(PRICES, encoding="utf-8")
     real = tmp_path / "prices-real.toml"
@@ -751,10 +757,68 @@ def test_the_simulated_flag_appears_only_for_a_simulated_sheet(tmp_path: Path) -
     db = _active_db(tmp_path / "active.db", load_price_sheet(sim))
 
     with TestClient(create_dashboard_app(db, sim)) as client:
-        assert client.get("/api/summary").json()["simulated"] is True
+        simulated_sheet = client.get("/api/summary").json()
 
     with TestClient(create_dashboard_app(db, real)) as client:
-        assert "simulated" not in client.get("/api/summary").json()
+        real_sheet = client.get("/api/summary").json()
+
+    assert simulated_sheet["simulated"] is True
+    assert real_sheet["simulated"] is True, "a real sheet hid a simulated stored number"
+    # The rows still say which sheet priced them, and the mismatch is called out.
+    assert real_sheet["price_sheets"] == [str(sim)]
+    assert "prices-sim.toml" in real_sheet["price_sheet_warning"]
+    assert real_sheet["provenance_unknown"] == 0
+
+
+def test_a_simulated_sheet_cannot_raise_a_banner_the_rows_have_not_earned(
+    tmp_path: Path,
+) -> None:
+    """The other direction: the sheet argument cannot fabricate a banner either.
+
+    Rows written with a real sheet recorded that they were, so the page's own
+    arithmetic being an illustration is no reason to call their stored numbers
+    simulated.  A banner that appears here would be tamias warning about money it
+    has already proven is real.
+    """
+    sim = tmp_path / "prices-sim.toml"
+    sim.write_text(PRICES, encoding="utf-8")
+    real = tmp_path / "prices-real.toml"
+    real.write_text(REAL_PRICES, encoding="utf-8")
+    db = _active_db(tmp_path / "active.db", load_price_sheet(real))
+
+    with TestClient(create_dashboard_app(db, real)) as client:
+        real_sheet = client.get("/api/summary").json()
+
+    with TestClient(create_dashboard_app(db, sim)) as client:
+        simulated_sheet = client.get("/api/summary").json()
+
+    assert "simulated" not in real_sheet
+    assert "simulated" not in simulated_sheet, "the sheet argument faked the banner"
+    assert simulated_sheet["price_sheets"] == [str(real)]
+    assert simulated_sheet["provenance_unknown"] == 0
+    assert "WARNING" in simulated_sheet["price_sheet_warning"]
+
+
+def test_a_legacy_row_is_reported_as_provenance_unknown(tmp_path: Path, sheet) -> None:
+    """A row with no stored flag cannot be attributed to any sheet.
+
+    It was written before provenance existed, so the honest summary is "unknown",
+    not a borrowed sheet name -- and, with a real sheet in hand, no banner.
+    """
+    rows = build_rows(_old_schema_db(tmp_path / "old.db"), sheet)
+
+    report = summary(rows, simulated=False)
+
+    assert report["n_priced"] == 1
+    assert report["provenance_unknown"] == 1
+    assert report["price_sheets"] == []
+    assert "simulated" not in report
+    assert "price_sheet_warning" not in report
+
+    # The one legacy case that still raises it: when the stored rows cannot say
+    # anything at all, a sheet that declares itself simulated is labelled as the
+    # clearly marked fallback it is.
+    assert summary(rows, simulated=True)["simulated"] is True
 
 
 def test_live_polling_and_replay_controls_are_offered(tmp_path: Path, sheet_path: Path) -> None:

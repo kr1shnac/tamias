@@ -173,28 +173,98 @@ def row_text(row: Any) -> str:
 # --- the schema cannot hold text ---------------------------------------------
 
 
+# The pinned schema, in order.  The three audit columns Steps 1-2 added are
+# appended at the end rather than slotted into the middle, because that is the
+# only place ALTER TABLE can put them: a fresh table and a migrated one must
+# declare the same order.
+EXPECTED_COLUMNS = (
+    "ts",
+    "session_id",
+    "model_requested",
+    "model_used",
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_write_tokens",
+    "cost_usd",
+    "price_sheet_date",
+    "latency_ms",
+    "status",
+    "decision_action",
+    "decision_target_model",
+    "decision_reason",
+    "price_sheet",
+    "price_simulated",
+    "provider_cost_usd",
+)
+
+# Every column whose declared SQL type can hold text, and the single thing allowed
+# to write it.  This is an allow-list, so a text column that is not justified here
+# fails the test rather than being added quietly.  Nothing in it may be written
+# from a request body, a response body or a header.
+TEXT_COLUMN_ALLOW_LIST = {
+    "ts": "the clock: datetime.now(UTC), formatted by the proxy",
+    "session_id": (
+        "a salted digest of the credential and the first messages, or the "
+        "client's explicit x-tamias-session id; never the digest's inputs"
+    ),
+    "model_requested": "the request body's `model` field, or the literal 'unknown'",
+    "model_used": "the response's `model` field, or the requested one when absent",
+    "price_sheet_date": "the `date` key of the price sheet, i.e. configuration",
+    "status": "the upstream status code rendered as a string",
+    "decision_action": "the router's own STAY or SWITCH",
+    "decision_target_model": "the configured cheap model",
+    "decision_reason": (
+        "a literal the router builds, or a tool name that already matched "
+        "RouterConfig.easy_tools, i.e. configuration"
+    ),
+    # price_sheet is the one column Steps 1-2 added that holds caller-supplied
+    # text, and the only reason the allow-list above needed one: it is the id of
+    # the price sheet the number came from.  Its value is written from
+    # configuration alone -- proxy.record() passes `sheet.source`, the --prices
+    # path the operator started the proxy with -- and never from a request or a
+    # response.  test_request_text_never_lands_in_any_column is what holds it to
+    # that: a prompt lands in no column at all, this one included.
+    "price_sheet": "configuration: the --prices sheet path (store.Store log_request keyword)",
+}
+
+TEXT_TYPES = ("CHAR", "CLOB", "TEXT")
+
+
+def declared_text_columns() -> set[str]:
+    """The columns of a fresh log whose declared type could hold arbitrary text."""
+    opened = Store(":memory:")
+    try:
+        return {
+            str(info[1])
+            for info in opened._conn.execute("PRAGMA table_info(requests)")
+            if any(kind in str(info[2]).upper() for kind in TEXT_TYPES)
+        }
+    finally:
+        opened.close()
+
+
 def test_request_log_schema_has_no_column_that_could_hold_text() -> None:
     """Pin the schema: if a column ever appears to hold prose, this test fails.
 
     Cheap to check and impossible to satisfy by accident, so it is the first line
     of defence against "we only started storing the prompt last week".
+
+    Two pins, because the schema is now two promises.  The column list and its
+    order are pinned outright, and every column whose declared type can hold text
+    is on the allow-list above with the one thing allowed to write it -- so a new
+    text column has to be justified rather than slipped in.
     """
-    assert store.COLUMNS == (
-        "ts",
-        "session_id",
-        "model_requested",
-        "model_used",
-        "input_tokens",
-        "output_tokens",
-        "cached_input_tokens",
-        "cache_write_tokens",
-        "cost_usd",
-        "price_sheet_date",
-        "latency_ms",
-        "status",
-        "decision_action",
-        "decision_target_model",
-        "decision_reason",
+    assert store.COLUMNS == EXPECTED_COLUMNS
+
+    text_capable = declared_text_columns()
+    unjustified = sorted(text_capable - set(TEXT_COLUMN_ALLOW_LIST))
+    assert not unjustified, (
+        f"{', '.join(unjustified)} can hold text and nothing is allowed to write them"
+    )
+    misdescribed = sorted(set(TEXT_COLUMN_ALLOW_LIST) - text_capable)
+    assert not misdescribed, (
+        f"{', '.join(misdescribed)} are allow-listed as text but no longer hold it"
     )
 
 
@@ -235,6 +305,37 @@ async def test_stored_row_carries_counts_instead_of_text(db_path: Path, prices_p
     assert row["output_tokens"] == USAGE["completion_tokens"]
     assert row["cached_input_tokens"] == USAGE["prompt_tokens_details"]["cached_tokens"]
     assert row["decision_action"] == "STAY"
+
+
+async def test_request_text_never_lands_in_any_column(db_path: Path, prices_path: Path) -> None:
+    """A prompt lands in no column at all, not even the ones allowed to hold text.
+
+    ``price_sheet`` is on the schema allow-list because it holds a sheet id, so
+    this is the test that earns it that place: its value comes from
+    configuration, and every column of the stored row is checked by name rather
+    than taken on trust.  The trailing assertions keep it honest -- the row has to
+    exist and be worth having, so the check cannot pass because nothing was
+    written at all.
+    """
+    app, request_log = build_proxy(db_path, prices_path)
+    await send_secret_request(app, text="SECRET-PROMPT")
+    rows = request_log.rows()
+    request_log.close()
+
+    assert len(rows) == 1, "the request was not logged, so nothing was proven"
+    row = rows[0]
+    for name, value in zip(row.keys(), row, strict=True):
+        assert "SECRET-PROMPT" not in str(value), f"SECRET-PROMPT reached column {name!r}"
+    assert b"SECRET-PROMPT" not in db_bytes(db_path), "the prompt is in the file somewhere"
+
+    # The row is metadata, not a gap: counts are there...
+    assert row["input_tokens"] == USAGE["prompt_tokens"]
+    assert row["output_tokens"] == USAGE["completion_tokens"]
+    assert row["decision_action"] == "STAY"
+    # ...and the one text column allowed here holds the configured sheet, not the
+    # conversation.
+    assert row["price_sheet"] == str(prices_path)
+    assert row["price_simulated"] == 0
 
 
 async def test_authorization_header_is_never_stored(db_path: Path, prices_path: Path) -> None:

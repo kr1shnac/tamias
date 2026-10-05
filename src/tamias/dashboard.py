@@ -256,9 +256,7 @@ def summary(
         }
     )
     report["provenance_unknown"] = sum(
-        1
-        for row in priced_rows
-        if row.get("price_simulated") is None or not row.get("price_sheet")
+        1 for row in priced_rows if row.get("price_simulated") is None or not row.get("price_sheet")
     )
     if report["price_sheets"] and requested_price_sheet not in report["price_sheets"]:
         report["price_sheet_warning"] = (

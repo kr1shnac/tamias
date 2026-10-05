@@ -227,6 +227,9 @@ def test_columns_are_the_documented_set(store: Store) -> None:
     (row,) = store.rows()
 
     assert tuple(row.keys()) == ("id", *COLUMNS)
+    # The three provenance/cost columns are appended, not slotted into the middle:
+    # ALTER TABLE can only add at the end, so this order is the one an existing
+    # log has too.
     assert COLUMNS == (
         "ts",
         "session_id",
@@ -238,13 +241,14 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "cache_write_tokens",
         "cost_usd",
         "price_sheet_date",
-        "price_sheet",
-        "price_simulated",
         "latency_ms",
         "status",
         "decision_action",
         "decision_target_model",
         "decision_reason",
+        "price_sheet",
+        "price_simulated",
+        "provider_cost_usd",
     )
 
 
