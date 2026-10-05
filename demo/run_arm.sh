@@ -209,7 +209,7 @@ fi
 # routed: active applies it, and --inject-usage asks the upstream for token
 # counts on streams the client did not ask for.
 if [ "$ARM" = "baseline" ]; then
-	SERVE_ARGS=(--router-mode shadow)
+	SERVE_ARGS=(--router-mode shadow --inject-usage)
 else
 	SERVE_ARGS=(
 		--router-mode active
