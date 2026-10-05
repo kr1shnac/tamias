@@ -97,6 +97,9 @@ class RequestLog(Protocol):
         latency_ms: int | None,
         status: str,
         decision: Decision,
+        *,
+        price_sheet: str | None = None,
+        price_simulated: bool | None = None,
     ) -> int: ...
 
 
@@ -385,6 +388,8 @@ def register_routes(
             round((time.perf_counter() - started) * 1000.0),
             str(status),
             decision,
+            price_sheet=sheet.source,
+            price_simulated=sheet.simulated,
         )
 
     async def _stream_messages(

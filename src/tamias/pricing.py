@@ -37,6 +37,7 @@ class PriceSheet:
     date: str
     models: dict[str, ModelPrice]
     simulated: bool = False
+    source: str | None = None
 
     def get(self, model: str) -> ModelPrice | None:
         return self.models.get(model)
@@ -57,7 +58,7 @@ def load_price_sheet(path: str | Path) -> PriceSheet:
         )
 
     models = {model: _parse_model(source, model, table) for model, table in document.items()}
-    return PriceSheet(date=date, models=models, simulated=simulated)
+    return PriceSheet(date=date, models=models, simulated=simulated, source=str(source))
 
 
 def _parse_model(source: Path, model: str, table: Any) -> ModelPrice:
@@ -104,6 +105,22 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
     cached_p = price.cached_input
     cw_p = price.cache_write
     cw1h_p = price.cache_write_1h if price.cache_write_1h is not None else price.cache_write
+
+    # Input and output are present on every completion.  An unquoted base rate
+    # is unknown, not a zero-dollar rate; short-circuit before the free-model
+    # shortcut or arithmetic's ``or 0`` defaults can disguise that absence.
+    missing_rates = []
+    if input_p is None:
+        missing_rates.append("input_rate")
+    if output_p is None:
+        missing_rates.append("output_rate")
+    if missing_rates:
+        expr = _build_expr(usage, input_p, output_p, cached_p, cw_p, cw1h_p)
+        return CostBreakdown(
+            usd=None,
+            formula=f"{expr}; unknown: {', '.join(missing_rates)}",
+            price_sheet_date=sheet.date,
+        )
 
     # Rule 0 is model missing (done). Rule 1: if every price is 0
     all_prices = [input_p, output_p, cached_p, cw_p, cw1h_p]

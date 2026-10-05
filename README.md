@@ -169,6 +169,7 @@ Against an OpenAI-style upstream, expect this shape — note `UNKNOWN`:
 requests: 412
 total cost: UNKNOWN (known part: $0.00; 412 of 412 requests have unknown cost)
 requests shadow would have switched: 96
+price provenance: provenance unknown (0 of 0 priced rows)
 estimated saving: $0.00 (estimate; ignores cache rebuild cost; not measured; 96 of 96 switched requests not priced)
 cheap model assumed: deepseek-v4-flash
 price sheet: prices.toml (2026-10-04)

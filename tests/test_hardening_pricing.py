@@ -357,10 +357,6 @@ def test_cost_does_not_fall_when_output_grows() -> None:
 # --- rates that were never quoted --------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-3: a model with an unquoted rate is billed as if that rate were zero",
-)
 @pytest.mark.parametrize(
     "rates,usage",
     [

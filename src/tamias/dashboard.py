@@ -55,6 +55,9 @@ COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("output_tokens", ("output_tokens",)),
     ("cached_input_tokens", ("cached_input_tokens",)),
     ("cache_write_tokens", ("cache_write_tokens",)),
+    ("price_sheet", ("price_sheet",)),
+    ("price_simulated", ("price_simulated",)),
+    ("provider_cost_usd", ("provider_cost_usd",)),
     ("latency_ms", ("latency_ms",)),
     ("status", ("status",)),
     ("decision_target_model", ("decision_target_model",)),
@@ -163,6 +166,10 @@ def _price(row: dict[str, Any], sheet: PriceSheet) -> dict[str, Any]:
         isinstance(requested, str) and isinstance(used, str) and requested != used
     )
     row["priced"] = priced
+    simulated = row.get("price_simulated")
+    row["price_simulated"] = (
+        True if simulated in (1, True) else False if simulated in (0, False) else None
+    )
     return row
 
 
@@ -170,6 +177,7 @@ def summary(
     rows: list[dict[str, Any]],
     simulated: bool = False,
     compare_rows: list[dict[str, Any]] | None = None,
+    requested_price_sheet: str | None = None,
 ) -> dict[str, Any]:
     """Headline numbers and the two cumulative series the chart draws.
 
@@ -215,12 +223,47 @@ def summary(
         "cumulative_baseline": cumulative_baseline,
     }
 
-    # The simulated flag is the sheet's own claim that its rates are invented.
-    # It rides with the numbers rather than sitting in a corner of the page, and
-    # it is omitted entirely when the sheet makes no such claim, so a real sheet
-    # can never inherit a banner it did not earn.
-    if simulated:
+    reconciled = [
+        (row["actual_cost"], float(row["provider_cost_usd"]))
+        for row in rows
+        if row["priced"]
+        and isinstance(row.get("provider_cost_usd"), int | float)
+        and not isinstance(row.get("provider_cost_usd"), bool)
+    ]
+    report["provider_rows"] = len(reconciled)
+    report["provider_missing"] = n_requests - len(reconciled)
+    if len(reconciled) == n_requests and reconciled:
+        provider_computed = sum(computed for computed, _billed in reconciled)
+        provider_billed = sum(billed for _computed, billed in reconciled)
+        report["provider_computed_total"] = provider_computed
+        report["provider_billed_total"] = provider_billed
+        report["provider_difference"] = provider_computed - provider_billed
+
+    priced_rows = [row for row in rows if row["priced"]]
+    stored_simulated = [row.get("price_simulated") for row in priced_rows]
+    # A legacy log has no provenance.  Its current sheet remains a clearly
+    # labelled fallback, while new logs always use their own stored flag.
+    row_simulated = any(value is True for value in stored_simulated) or (
+        bool(priced_rows) and all(value is None for value in stored_simulated) and simulated
+    )
+    if row_simulated:
         report["simulated"] = True
+    report["price_sheets"] = sorted(
+        {
+            value
+            for row in priced_rows
+            if isinstance((value := row.get("price_sheet")), str) and value
+        }
+    )
+    report["provenance_unknown"] = sum(
+        1 for row in priced_rows if row.get("price_simulated") is None or not row.get("price_sheet")
+    )
+    if report["price_sheets"] and requested_price_sheet not in report["price_sheets"]:
+        report["price_sheet_warning"] = (
+            f"WARNING: requested price sheet {requested_price_sheet} differs from "
+            "stored price sheet "
+            f"{', '.join(report['price_sheets'])}"
+        )
 
     if compare_rows is not None:
         compare_priced = sum(1 for row in compare_rows if row["priced"])
@@ -749,9 +792,20 @@ tbody tr.new td { animation: flash 900ms ease-out; }
     var simulated = report.simulated === true;
     el.banner.hidden = !simulated;
 
+    var billing = report.provider_billed_total === undefined
+      ? "; billed: UNKNOWN (" + report.provider_missing + " of " + report.n_requests + ")"
+      : "; computed vs billed: " + money(report.provider_computed_total) + " vs " +
+        money(report.provider_billed_total) + "; difference: " + money(report.provider_difference);
+    var warning = report.price_sheet_warning ? "; " + report.price_sheet_warning : "";
+    var provenance = report.provenance_unknown
+      ? "; provenance unknown for " + report.provenance_unknown + " priced rows"
+      : report.price_sheets && report.price_sheets.length
+        ? "; prices stored from " + report.price_sheets.join(", ")
+        : "; provenance unknown";
     put(el.subtitle, report.n_requests
       ? report.n_requests + (report.n_requests === 1 ? " request logged, " : " requests logged, ") +
-        report.n_priced + " priced, " + report.n_unpriced + " not priced"
+        report.n_priced + " priced, " + report.n_unpriced + " not priced" +
+        provenance + billing + warning
       : "no requests logged yet");
 
     show(el.cardRouted, money(report.actual_total));
@@ -972,6 +1026,7 @@ def create_dashboard_app(
             build_rows(db_path, sheet),
             simulated=sheet.simulated,
             compare_rows=compare_rows,
+            requested_price_sheet=str(prices_path),
         )
 
     @app.get("/api/rows", include_in_schema=False)

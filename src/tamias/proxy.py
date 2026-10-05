@@ -97,6 +97,9 @@ class RequestLog(Protocol):
         latency_ms: int | None,
         status: str,
         decision: Decision,
+        *,
+        price_sheet: str | None = None,
+        price_simulated: bool | None = None,
     ) -> int: ...
 
 
@@ -111,11 +114,17 @@ def to_usage(raw: Any) -> Usage:
         )
     details = raw.get("prompt_tokens_details")
     cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    provider_cost = raw.get("cost")
     return Usage(
         input_tokens=raw.get("prompt_tokens"),
         output_tokens=raw.get("completion_tokens"),
         cached_input_tokens=cached,
         cache_write_tokens=None,
+        provider_cost_usd=(
+            float(provider_cost)
+            if isinstance(provider_cost, int | float) and not isinstance(provider_cost, bool)
+            else None
+        ),
     )
 
 
@@ -133,6 +142,14 @@ def with_usage_included(body: dict[str, Any]) -> bytes:
     updated = dict(options) if isinstance(options, dict) else {}
     updated["include_usage"] = True
     return json.dumps({**body, "stream_options": updated}).encode()
+
+
+def with_usage_cost_included(body: dict[str, Any]) -> bytes:
+    """Re-encode a request asking OpenRouter to include usage and cost."""
+    usage = body.get("usage")
+    updated = dict(usage) if isinstance(usage, dict) else {}
+    updated["include"] = True
+    return json.dumps({**body, "usage": updated}).encode()
 
 
 def sse_payload(line: bytes) -> dict[str, Any] | None:
@@ -287,6 +304,7 @@ def create_app(
     router_mode: str = "shadow",
     *,
     inject_usage: bool = False,
+    request_usage_cost: bool = False,
     config: RouterConfig | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
@@ -315,6 +333,7 @@ def create_app(
     app.state.router_mode = router_mode
     app.state.router_config = routing
     app.state.inject_usage = inject_usage
+    app.state.request_usage_cost = request_usage_cost
     app.state.sessions = table
 
     def plan(session_id: str, body: dict[str, Any], model: str) -> Decision:
@@ -360,6 +379,9 @@ def create_app(
         ):
             body = {**body, "model": decision.target_model}
             raw = json.dumps(body).encode()
+        if request_usage_cost:
+            raw = with_usage_cost_included(body)
+            body = json.loads(raw)
         if inject_usage and body.get("stream"):
             raw = with_usage_included(body)
         return raw
@@ -390,6 +412,8 @@ def create_app(
             round((time.perf_counter() - started) * 1000.0),
             str(status),
             decision,
+            price_sheet=sheet.source,
+            price_simulated=sheet.simulated,
         )
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
@@ -423,7 +447,24 @@ def create_app(
         started = time.perf_counter()
 
         if not streaming:
-            upstream = await client.send(outgoing)
+            try:
+                upstream = await client.send(outgoing)
+            except httpx.HTTPError:
+                model_used = model_requested
+                record(
+                    session_id,
+                    model_requested,
+                    model_used,
+                    Usage(None, None, None, None),
+                    started,
+                    500,
+                    decision,
+                )
+                advance(session_id, model_used)
+                return JSONResponse(
+                    {"error": {"message": "upstream connection failed", "type": "upstream_error"}},
+                    status_code=502,
+                )
             payload: Any = None
             try:
                 payload = upstream.json()

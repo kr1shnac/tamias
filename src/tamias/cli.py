@@ -33,6 +33,8 @@ SIMULATED_LABEL = "SIMULATED PRICES, NOT REAL SAVINGS"
 # little tolerance for a renamed table or column.
 REQUEST_TABLES = ("requests",)
 COST_COLUMNS = ("cost_usd", "cost", "usd")
+PRICE_SHEET_COLUMNS = ("price_sheet",)
+PRICE_SIMULATED_COLUMNS = ("price_simulated",)
 DECISION_COLUMNS = ("decision_action", "decision")
 MODEL_USED_COLUMNS = ("model_used", "model")
 
@@ -43,7 +45,7 @@ def _money(value: float) -> str:
     return f"${value:.6f}" if abs(value) < 1 else f"${value:.4f}"
 
 
-def _cost_suffix(sheet: PriceSheet) -> str:
+def _cost_suffix(simulated: bool) -> str:
     """The simulated-prices banner, on every line that quotes an amount.
 
     A sheet that declares ``simulated = true`` is making its rates up, so an
@@ -51,7 +53,7 @@ def _cost_suffix(sheet: PriceSheet) -> str:
     with the figure rather than being printed once at the top, so a line copied
     out of the report on its own still says which kind of number it is.
     """
-    return f"  [{SIMULATED_LABEL}]" if sheet.simulated else ""
+    return f"  [{SIMULATED_LABEL}]" if simulated else ""
 
 
 def _pick(row: dict[str, Any], names: tuple[str, ...]) -> Any:
@@ -94,6 +96,21 @@ def _stored_cost(row: dict[str, Any]) -> float | None:
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         return None
     return float(raw)
+
+
+def _stored_simulated(row: dict[str, Any]) -> bool | None:
+    """Whether this row's stored number was made with simulated prices."""
+    raw = _pick(row, PRICE_SIMULATED_COLUMNS)
+    if raw in (0, False):
+        return False
+    if raw in (1, True):
+        return True
+    return None
+
+
+def _stored_price_sheet(row: dict[str, Any]) -> str | None:
+    raw = _pick(row, PRICE_SHEET_COLUMNS)
+    return raw if isinstance(raw, str) and raw else None
 
 
 def _would_switch(row: dict[str, Any]) -> bool:
@@ -215,7 +232,24 @@ def report(db_path: str, prices_path: str) -> None:
             else:
                 realised_unpriced += 1
 
-    suffix = _cost_suffix(sheet)
+    priced_rows = [row for row in rows if _stored_cost(row) is not None]
+    stored_flags = [_stored_simulated(row) for row in priced_rows]
+    # Logs written before provenance existed cannot prove which sheet priced a
+    # number.  Preserve the legacy simulated warning when the only available
+    # information is a simulated report sheet, while also printing the explicit
+    # ``provenance unknown`` line below.
+    simulated = any(flag is True for flag in stored_flags) or (
+        bool(priced_rows) and all(flag is None for flag in stored_flags) and sheet.simulated
+    )
+    suffix = _cost_suffix(simulated)
+    stored_sheets = sorted(
+        {sheet_name for row in priced_rows if (sheet_name := _stored_price_sheet(row))}
+    )
+    unknown_provenance = sum(
+        1
+        for row in priced_rows
+        if _stored_simulated(row) is None or _stored_price_sheet(row) is None
+    )
     print(f"requests: {len(rows)}")
     if unknown_costs:
         print(
@@ -226,6 +260,39 @@ def report(db_path: str, prices_path: str) -> None:
     else:
         print(f"total cost: {_money(known_total)}{suffix}")
     print(f"requests shadow would have switched: {switched}")
+
+    reconciled: list[tuple[float, float]] = []
+    for row in rows:
+        computed = _stored_cost(row)
+        billed = row.get("provider_cost_usd")
+        if (
+            computed is not None
+            and isinstance(billed, int | float)
+            and not isinstance(billed, bool)
+        ):
+            reconciled.append((computed, float(billed)))
+    if len(reconciled) == len(rows) and reconciled:
+        computed_total = sum(computed for computed, _billed in reconciled)
+        billed_total = sum(billed for _computed, billed in reconciled)
+        print(
+            f"computed vs billed: {_money(computed_total)} vs {_money(billed_total)}; "
+            f"difference: {_money(computed_total - billed_total)}{suffix}"
+        )
+    else:
+        print(f"billed: UNKNOWN ({len(rows) - len(reconciled)} of {len(rows)} rows){suffix}")
+
+    if unknown_provenance:
+        print(
+            f"price provenance: provenance unknown "
+            f"({unknown_provenance} of {len(priced_rows)} priced rows)"
+        )
+    elif stored_sheets:
+        print(f"price provenance: {', '.join(stored_sheets)}")
+    if stored_sheets and str(prices_path) not in stored_sheets:
+        print(
+            f"WARNING: requested price sheet {prices_path} differs from stored price sheet "
+            f"{', '.join(stored_sheets)}"
+        )
 
     # A saving is arithmetic over token counts.  If nothing was switched the
     # saving is a definite zero, but if something was switched and not one row
@@ -281,6 +348,7 @@ def build_serve_app(
     strong_model: str = "",
     min_gap: int = 3,
     inject_usage: bool = False,
+    request_usage_cost: bool = False,
     transport: Any | None = None,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
@@ -307,6 +375,7 @@ def build_serve_app(
         router_mode,
         config=config,
         inject_usage=inject_usage,
+        request_usage_cost=request_usage_cost,
         transport=transport,
     )
     app.state.store = store
@@ -330,6 +399,7 @@ def serve(args: argparse.Namespace) -> int:
         strong_model=args.strong_model,
         min_gap=args.min_gap,
         inject_usage=args.inject_usage,
+        request_usage_cost=args.request_usage_cost,
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -342,6 +412,11 @@ def serve(args: argparse.Namespace) -> int:
             "tamias serve: --inject-usage is ON: streaming requests are re-encoded "
             "with stream_options.include_usage=true, which adds a final chunk "
             "carrying usage and empty choices",
+            file=sys.stderr,
+        )
+    if args.request_usage_cost:
+        print(
+            "tamias serve: --request-usage-cost is ON: requests include usage.include=true",
             file=sys.stderr,
         )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
@@ -399,6 +474,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="ask the upstream for a usage chunk on streaming requests even when "
         "the client did not (default: off, which forwards the body byte-for-byte). "
         "Adds one final chunk with usage and empty choices",
+    )
+    serve_parser.add_argument(
+        "--request-usage-cost",
+        action="store_true",
+        help="ask OpenRouter to include usage and provider-reported cost "
+        "(default: off; off forwards the body byte-for-byte)",
     )
     serve_parser.add_argument("--verbose", action="store_true", help="log every proxy event")
 

@@ -1,8 +1,10 @@
 """SQLite log of one row per proxied request.
 
 Only metadata is stored: token counts, cost, latency, status and the routing
-decision.  No prompt or response text is ever accepted by this module, and the
-schema has no column that could hold it.
+decision.  No prompt or response text is ever accepted by this module.  The one
+column that holds caller-supplied text, ``price_sheet``, is written from
+configuration alone -- the path of the price sheet the row was priced with -- and
+never from a request or a response.
 
 UNKNOWN token counts, costs and latencies are stored as SQL NULL.  They are
 never coerced to 0, so "the upstream did not say" stays distinguishable from
@@ -19,6 +21,10 @@ __all__ = ["Store", "COLUMNS"]
 
 TABLE = "requests"
 
+# A new column is appended at the end, never inserted in the middle: an existing
+# log gets it from ALTER TABLE, which can only add at the end, so a fresh
+# CREATE TABLE has to declare the same order or `SELECT *` would return the same
+# log's columns in two different sequences depending on how old the file is.
 COLUMNS = (
     "ts",
     "session_id",
@@ -35,6 +41,9 @@ COLUMNS = (
     "decision_action",
     "decision_target_model",
     "decision_reason",
+    "price_sheet",
+    "price_simulated",
+    "provider_cost_usd",
 )
 
 _CREATE_TABLE = f"""
@@ -54,7 +63,10 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     status TEXT NOT NULL,
     decision_action TEXT NOT NULL,
     decision_target_model TEXT,
-    decision_reason TEXT NOT NULL
+    decision_reason TEXT NOT NULL,
+    price_sheet TEXT,
+    price_simulated INTEGER,
+    provider_cost_usd REAL
 )
 """
 
@@ -80,7 +92,19 @@ class Store:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.execute(_CREATE_TABLE)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add nullable audit fields to logs created by older tamias versions."""
+        present = {str(row[1]) for row in self._conn.execute(f"PRAGMA table_info({TABLE})")}
+        for name, definition in (
+            ("price_sheet", "TEXT"),
+            ("price_simulated", "INTEGER"),
+            ("provider_cost_usd", "REAL"),
+        ):
+            if name not in present:
+                self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
 
     def log_request(
         self,
@@ -93,6 +117,9 @@ class Store:
         latency_ms: int | None,
         status: str,
         decision: Decision,
+        *,
+        price_sheet: str | None = None,
+        price_simulated: bool | None = None,
     ) -> int:
         """Append one request and return its row id.
 
@@ -116,6 +143,9 @@ class Store:
             decision.action,
             decision.target_model,
             decision.reason,
+            price_sheet,
+            price_simulated,
+            usage.provider_cost_usd,
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)

@@ -150,8 +150,15 @@ def test_report_counts_requests_and_totals_known_costs(
     code, out = run(capsys, db, write_prices(tmp_path))
     assert code == 0
     assert "requests: 3" in out
-    assert "UNKNOWN" not in out
+    # Every cost here is known, so the total is a number rather than UNKNOWN.
+    # UNKNOWN is still the honest word on the lines whose data is genuinely
+    # missing: these rows predate provenance, and no provider ever reported a
+    # billed cost for them.
+    total = next(x for x in out.splitlines() if x.startswith("total cost:"))
+    assert "UNKNOWN" not in total
     assert money(out, "total cost") == pytest.approx(BIG_ON_STRONG + 2 * SMALL_ON_STRONG)
+    assert "billed: UNKNOWN (3 of 3 rows)" in out
+    assert "price provenance: provenance unknown (3 of 3 priced rows)" in out
 
 
 def test_report_prints_unknown_when_any_cost_is_missing(
@@ -394,6 +401,62 @@ def test_report_fails_cleanly_on_missing_price_sheet(
     assert code == 1
     err = capsys.readouterr().err
     assert err.startswith("tamias report:")
+
+
+def test_report_uses_row_provenance_not_the_requested_sheet(tmp_path, capsys) -> None:
+    """A simulated number stays labelled when report receives another sheet."""
+    db = tmp_path / "simulated.db"
+    store = Store(db)
+    try:
+        store.log_request(
+            "2026-10-04T00:00:00Z",
+            "session",
+            "gpt-4o",
+            "gpt-4o",
+            Usage(10, 10, 0, 0),
+            CostBreakdown(usd=0.123, formula="test", price_sheet_date=SHEET_DATE),
+            1,
+            "200",
+            Decision("STAY", None, "test"),
+            price_sheet="simulated-prices.toml",
+            price_simulated=True,
+        )
+    finally:
+        store.close()
+
+    code, out = run(
+        capsys, str(db), str(Path(__file__).resolve().parents[1] / "prices.openrouter.toml")
+    )
+
+    assert code == 0
+    assert "SIMULATED PRICES, NOT REAL SAVINGS" in out
+    assert "WARNING" in out
+    assert "simulated-prices.toml" in out
+
+
+def test_report_reconciles_computed_and_provider_cost(tmp_path, capsys) -> None:
+    db = tmp_path / "provider-cost.db"
+    store = Store(db)
+    try:
+        store.log_request(
+            "2026-10-04T00:00:00Z",
+            "session",
+            "gpt-4o",
+            "gpt-4o",
+            Usage(10, 10, 0, 0, provider_cost_usd=0.10),
+            CostBreakdown(usd=0.12, formula="test", price_sheet_date=SHEET_DATE),
+            1,
+            "200",
+            Decision("STAY", None, "test"),
+        )
+    finally:
+        store.close()
+
+    code, out = run(capsys, str(db), write_prices(tmp_path))
+
+    assert code == 0
+    assert "computed vs billed: $0.120000 vs $0.100000" in out
+    assert "difference: $0.020000" in out
 
 
 def test_report_fails_cleanly_on_a_sheet_without_a_date(

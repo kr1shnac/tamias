@@ -38,6 +38,22 @@ RAW_USAGE = {
 }
 
 
+def test_usage_cost_is_read_when_openrouter_reports_it() -> None:
+    assert proxy.to_usage({**RAW_USAGE, "cost": 0.0025}).provider_cost_usd == 0.0025
+
+
+def test_usage_cost_is_unknown_when_absent() -> None:
+    assert proxy.to_usage(RAW_USAGE).provider_cost_usd is None
+
+
+def test_final_stream_usage_cost_is_read_from_a_canned_chunk() -> None:
+    payload = proxy.sse_payload(
+        b'data: {"usage":{"prompt_tokens":11,"completion_tokens":7,"cost":0.0025}}'
+    )
+    assert payload is not None
+    assert proxy.to_usage(payload["usage"]).provider_cost_usd == 0.0025
+
+
 class FakeStore:
     """Collects the rows the proxy logs, with store.Store's exact signature."""
 
@@ -55,6 +71,7 @@ class FakeStore:
         latency_ms: int | None,
         status: str,
         decision: Decision,
+        **provenance: Any,
     ) -> int:
         self.rows.append(
             {
@@ -67,6 +84,7 @@ class FakeStore:
                 "latency_ms": latency_ms,
                 "status": status,
                 "decision": decision,
+                **provenance,
             }
         )
         return len(self.rows)
@@ -189,6 +207,25 @@ async def test_body_forwarded_byte_identical(client: httpx.AsyncClient, store: F
     assert response.status_code == 200
     assert base64.b64decode(response.json()["echo"]["raw_body_b64"]) == raw
     assert store.last["model_requested"] == "gpt-mock"
+
+
+async def test_request_usage_cost_is_opt_in(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    app = proxy.create_app(
+        UPSTREAM_URL,
+        store,
+        sheet,
+        "shadow",
+        request_usage_cost=True,
+        transport=StreamingASGITransport(upstream),
+    )
+    async with as_client(app) as cost_client:
+        response = await cost_client.post(
+            "/v1/chat/completions", content=make_body("gpt-mock"), headers=JSON_HEADERS
+        )
+
+    assert forwarded_body(response.json()["echo"])["usage"] == {"include": True}
 
 
 async def test_headers_forwarded_without_hop_by_hop_or_accept_encoding(

@@ -23,6 +23,7 @@ class Usage:
     cached_input_tokens: int | None
     cache_write_tokens: int | None
     cache_write_1h_tokens: int | None = None
+    provider_cost_usd: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

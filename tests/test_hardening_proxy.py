@@ -402,10 +402,6 @@ class HandlerTransport(httpx.AsyncBaseTransport):
         return await self.handler(request)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-1: a refused upstream connection answers 5xx but writes no request-log row",
-)
 async def test_connection_refused_is_logged_and_service_resumes(
     db_path: Path, prices_path: Path
 ) -> None:
@@ -456,6 +452,8 @@ async def test_connection_refused_is_logged_and_service_resumes(
         f"both requests must be logged, got {len(rows)}: {[dict(r) for r in rows]}"
     )
     assert status_of(store) == ["500", "200"], status_of(store)
+    assert rows[0]["input_tokens"] is None
+    assert rows[0]["output_tokens"] is None
     store.close()
 
 
