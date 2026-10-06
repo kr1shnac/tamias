@@ -105,6 +105,7 @@ def _log(
     latency_ms: int | None,
     decision: Decision,
     sheet,
+    **audit: object,
 ) -> int:
     """Append one request, storing the cost the proxy would have logged."""
     return store.log_request(
@@ -119,11 +120,42 @@ def _log(
         decision=decision,
         price_sheet=sheet.source,
         price_simulated=sheet.simulated,
+        **audit,
     )
 
 
 def _stay() -> Decision:
     return Decision(action="STAY", target_model=None, reason="no switch needed")
+
+
+def test_dashboard_reads_persisted_effort_values(tmp_path: Path, sheet) -> None:
+    db_path = tmp_path / "effort.db"
+    store = Store(db_path)
+    try:
+        _log(
+            store,
+            ts="2026-10-07T00:00:00Z",
+            model_requested=STRONG,
+            model_used=CHEAP,
+            usage=Usage(100, 10, 0, 0),
+            latency_ms=10,
+            decision=Decision(
+                action="SWITCH",
+                target_model=CHEAP,
+                reason="easy tool",
+                target_effort="low",
+            ),
+            sheet=sheet,
+            effort_requested="high",
+            effort_used="low",
+            decision_target_effort="low",
+        )
+    finally:
+        store.close()
+
+    (row,) = build_rows(db_path, sheet)
+    assert row["effort_requested"] == "high"
+    assert row["effort_used"] == "low"
 
 
 def _no_tokens() -> Usage:
@@ -1076,4 +1108,3 @@ def test_no_inner_html_in_served_page(tmp_path: Path, sheet_path: Path) -> None:
     with TestClient(app) as client:
         html = client.get("/").text
         assert "innerHTML" not in html
-

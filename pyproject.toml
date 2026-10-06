@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tamias"
-version = "0.1.0a2"
+version = "0.1.0a3"
 description = "Local HTTP proxy that logs token usage and cost per request for OpenAI-compatible agents."
 readme = "README.md"
 requires-python = ">=3.11"

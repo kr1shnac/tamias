@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0a3] - 2026-10-07
+
+### Added
+
+- Optional reasoning-effort routing: `tamias serve --effort-policy easy-low`
+  adds high effort to planning and tool-error turns and low effort to easy tool
+  turns when active routing is selected. `--effort-style` chooses OpenRouter's
+  `reasoning.effort` or OpenAI's `reasoning_effort` request field.
+- The request log now records requested effort, forwarded effort, and the
+  router's target effort. Existing logs migrate those nullable columns in
+  place, and the dashboard displays the request and forwarded values.
+
+### Known limitations
+
+- Effort behavior is verified with fixtures only; whether a provider honours a
+  requested effort remains unverified.
+
+[0.1.0a3]: https://pypi.org/project/tamias/0.1.0a3/
+
 ## [0.1.0a2] - 2026-10-06
 
 Pre-alpha, prepared for TestPyPI. Merges four branches that had been developed
