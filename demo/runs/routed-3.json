@@ -1,0 +1,13 @@
+{
+  "arm": "routed",
+  "n": 3,
+  "dry_run": false,
+  "tests_passed": false,
+  "wall_seconds": 86,
+  "models": {
+    "strong": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "cheap": "nvidia/nemotron-3.5-lightning:free"
+  },
+  "price_sheet": "prices.openrouter-sim.toml",
+  "db": "/home/krish/Desktop/tamias/demo/runs/routed-3.db"
+}

@@ -12,7 +12,10 @@ The demo is one small task run twice under two arms:
 | `routed` | `--router-mode active --cheap-model … --strong-model … --inject-usage` | what it **did**: mechanical tool work is rewritten to the cheap model |
 
 Each run writes `demo/runs/<arm>-<n>.db` (the request log) and
-`demo/runs/<arm>-<n>.json` (the score). Both are gitignored.
+`demo/runs/<arm>-<n>.json` (the score). The runs from 2026-10-05 are committed
+as the evidence this document reads from. `.gitignore` still ignores `*.db` and
+`demo/runs/`, so a run you produce yourself stays out of a commit unless you
+`git add -f` it deliberately.
 
 ---
 
