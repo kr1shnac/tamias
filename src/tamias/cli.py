@@ -23,9 +23,11 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime
+from collections.abc import Callable
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.request import urlopen
 
 from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
 from tamias.pricing_fetch import DEFAULT_URL, fetch_models, render_sheet
@@ -39,6 +41,8 @@ ROUTER_MODES = ("shadow", "active", "off")
 SIMULATED_LABEL = "SIMULATED PRICES, NOT REAL SAVINGS"
 RUN_START_TIMEOUT_SECONDS = 15
 RUN_STOP_TIMEOUT_SECONDS = 5
+DOCTOR_ONLINE_TIMEOUT_SECONDS = 2.0
+PRICE_SHEET_STALE_DAYS = 30
 
 # store.Store owns the schema; these are the columns the report reads, with a
 # little tolerance for a renamed table or column.
@@ -547,6 +551,74 @@ def agent_config(agent: str, port: int, project: str | None) -> str:
     )
 
 
+def doctor(
+    *,
+    prices: Path,
+    db: Path,
+    port: int,
+    online: bool,
+    upstream: str,
+    today: date | None = None,
+    opener: Callable[..., Any] = urlopen,
+    port_checker: Callable[[int], bool] | None = None,
+) -> int:
+    """Print local readiness checks without contacting an upstream by default."""
+    blocking = False
+    python_version = (sys.version_info.major, sys.version_info.minor)
+    if python_version >= (3, 11):
+        print(f"OK Python: {sys.version_info.major}.{sys.version_info.minor}")
+    else:
+        print(f"FAIL Python: {sys.version_info.major}.{sys.version_info.minor}; requires 3.11+")
+        blocking = True
+
+    try:
+        sheet = load_price_sheet(prices)
+        published = date.fromisoformat(sheet.date)
+        age = (today or date.today()) - published
+        if age.days < 0 or age.days > PRICE_SHEET_STALE_DAYS:
+            print(f"WARN Price sheet: {prices} ({age.days} days old)")
+        else:
+            print(f"OK Price sheet: {prices} ({age.days} days old)")
+    except (OSError, ValueError) as exc:
+        print(f"WARN Price sheet: {exc}")
+
+    db_directory = db.parent
+    if db_directory.is_dir() and os.access(db_directory, os.W_OK):
+        print(f"OK DB directory: {db_directory} writable")
+    else:
+        print(f"FAIL DB directory: {db_directory} is not writable")
+        blocking = True
+
+    try:
+        available = port_checker(port) if port_checker else _port_is_free(port)
+        if not available:
+            raise OSError
+        print(f"OK Port: {port} free")
+    except OSError:
+        print(f"FAIL Port: {port} in use")
+        blocking = True
+
+    if os.getenv("OPENROUTER_API_KEY"):
+        print("OK OPENROUTER_API_KEY: set")
+    else:
+        print("WARN OPENROUTER_API_KEY: missing")
+
+    if online:
+        try:
+            with opener(upstream, timeout=DOCTOR_ONLINE_TIMEOUT_SECONDS):
+                pass
+            print(f"OK Upstream: {upstream} reachable")
+        except OSError as exc:
+            print(f"WARN Upstream: {upstream} unreachable ({exc})")
+    return int(blocking)
+
+
+def _port_is_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", port))
+    return True
+
+
 def _serve_router_config(args: argparse.Namespace) -> RouterConfig:
     config = load_router_config(args.router_config, args.router_profile)
     return RouterConfig(
@@ -801,6 +873,16 @@ def build_parser() -> argparse.ArgumentParser:
     agent_parser.add_argument("agent", choices=("claude-code", "codex", "opencode"))
     agent_parser.add_argument("--port", type=int, default=8000)
     agent_parser.add_argument("--project")
+    doctor_parser = sub.add_parser("doctor", help="check local tamias readiness")
+    doctor_parser.add_argument(
+        "--prices", default="prices.toml", help="path to the TOML price sheet"
+    )
+    doctor_parser.add_argument("--db", default="requests.db", help="path to the sqlite request log")
+    doctor_parser.add_argument("--port", type=int, default=8000, help="port to check")
+    doctor_parser.add_argument("--upstream", default=DEFAULT_URL, help="upstream URL for --online")
+    doctor_parser.add_argument(
+        "--online", action="store_true", help="also check upstream reachability"
+    )
     return parser
 
 
@@ -860,6 +942,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "agent-config":
         print(agent_config(args.agent, args.port, args.project))
         return 0
+    if args.command == "doctor":
+        return doctor(
+            prices=Path(args.prices),
+            db=Path(args.db),
+            port=args.port,
+            online=args.online,
+            upstream=args.upstream,
+        )
     return 2
 
 
