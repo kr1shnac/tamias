@@ -261,25 +261,35 @@ def report(db_path: str, prices_path: str) -> None:
         print(f"total cost: {_money(known_total)}{suffix}")
     print(f"requests shadow would have switched: {switched}")
 
+    billed_values: list[float] = []
     reconciled: list[tuple[float, float]] = []
     for row in rows:
         computed = _stored_cost(row)
         billed = row.get("provider_cost_usd")
-        if (
-            computed is not None
-            and isinstance(billed, int | float)
-            and not isinstance(billed, bool)
-        ):
-            reconciled.append((computed, float(billed)))
-    if len(reconciled) == len(rows) and reconciled:
-        computed_total = sum(computed for computed, _billed in reconciled)
-        billed_total = sum(billed for _computed, billed in reconciled)
+        if isinstance(billed, int | float) and not isinstance(billed, bool):
+            billed_value = float(billed)
+            billed_values.append(billed_value)
+            if computed is not None:
+                reconciled.append((computed, billed_value))
+    if billed_values:
         print(
-            f"computed vs billed: {_money(computed_total)} vs {_money(billed_total)}; "
-            f"difference: {_money(computed_total - billed_total)}{suffix}"
+            f"spent (billed by OpenRouter): {_money(sum(billed_values))} over "
+            f"{len(billed_values)} of {len(rows)} requests"
         )
     else:
-        print(f"billed: UNKNOWN ({len(rows) - len(reconciled)} of {len(rows)} rows){suffix}")
+        print("billed cost: UNKNOWN")
+    if reconciled:
+        computed_total = sum(computed for computed, _billed in reconciled)
+        billed_total = sum(billed for _computed, billed in reconciled)
+        stored_label = ", ".join(stored_sheets) if stored_sheets else "provenance unknown"
+        print(
+            f"computed cost: {_money(computed_total)} (computed from list prices "
+            f"({stored_label})) over {len(reconciled)} rows{suffix}"
+        )
+        print(
+            f"difference (billed - computed): {_money(billed_total - computed_total)} over "
+            f"{len(reconciled)} rows{suffix}"
+        )
 
     if unknown_provenance:
         print(

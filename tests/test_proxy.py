@@ -54,6 +54,26 @@ def test_final_stream_usage_cost_is_read_from_a_canned_chunk() -> None:
     assert proxy.to_usage(payload["usage"]).provider_cost_usd == 0.0025
 
 
+async def test_response_id_is_stored_as_generation_id(
+    client: httpx.AsyncClient, store: FakeStore
+) -> None:
+    """Chat response IDs are stored defensively for later lookup reconciliation."""
+    await client.post("/v1/chat/completions", content=make_body("gpt-mock"))
+
+    assert store.last["generation_id"] == "chatcmpl-mock"
+
+
+async def test_stream_response_id_is_stored_as_generation_id(
+    client: httpx.AsyncClient, store: FakeStore
+) -> None:
+    await client.post(
+        "/v1/chat/completions",
+        content=make_body("gpt-mock", stream=True, stream_options={"include_usage": True}),
+    )
+
+    assert store.last["generation_id"] == "chatcmpl-mock"
+
+
 class FakeStore:
     """Collects the rows the proxy logs, with store.Store's exact signature."""
 

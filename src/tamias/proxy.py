@@ -46,6 +46,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from tamias import anthropic_adapter, pricing, router
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
+from tamias.store import sanitize_generation_id
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
 
 logger = logging.getLogger("tamias.proxy")
@@ -100,6 +101,7 @@ class RequestLog(Protocol):
         *,
         price_sheet: str | None = None,
         price_simulated: bool | None = None,
+        generation_id: object = None,
     ) -> int: ...
 
 
@@ -400,6 +402,7 @@ def create_app(
         started: float,
         status: int,
         decision: Decision,
+        generation_id: object = None,
     ) -> None:
         cost = pricing.compute_cost(model_used, usage, sheet)
         store.log_request(
@@ -414,6 +417,10 @@ def create_app(
             decision,
             price_sheet=sheet.source,
             price_simulated=sheet.simulated,
+            # The response id is response-supplied, so it is reduced to a bare
+            # identifier here rather than trusted: anything that is not one
+            # becomes NULL instead of text in the log.
+            generation_id=sanitize_generation_id(generation_id),
         )
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
@@ -480,6 +487,7 @@ def create_app(
                 started,
                 upstream.status_code,
                 decision,
+                details.get("id"),
             )
             advance(session_id, model_used)
             return Response(
@@ -504,14 +512,17 @@ def create_app(
     ) -> AsyncIterator[bytes]:
         seen_model: Any = None
         seen_usage: Any = None
+        seen_generation_id: Any = None
 
         def absorb(payload: dict[str, Any]) -> None:
-            nonlocal seen_model, seen_usage
+            nonlocal seen_model, seen_usage, seen_generation_id
             usage = payload.get("usage")
             if isinstance(usage, dict) and usage:
                 seen_usage = usage
             if seen_model is None and isinstance(payload.get("model"), str):
                 seen_model = payload["model"]
+            if seen_generation_id is None and isinstance(payload.get("id"), str):
+                seen_generation_id = payload["id"]
 
         buffer = b""
         try:
@@ -537,6 +548,7 @@ def create_app(
                 started,
                 upstream.status_code,
                 decision,
+                seen_generation_id,
             )
             advance(session_id, model_used)
 

@@ -139,6 +139,55 @@ def build_proxy(db_path: Path, prices_path: Path) -> tuple[FastAPI, Store]:
     return app, store_
 
 
+def upstream_answering(response_id: Any) -> FastAPI:
+    """A mock upstream whose response carries ``response_id`` in its ``id`` field.
+
+    The response id is the one part of a response body that reaches the log, so a
+    test has to be able to choose it: a real id, an id with a space in it, or one
+    past the length cap.
+    """
+    app = FastAPI()
+
+    @app.post(CHAT_PATH)
+    async def chat(request: Request) -> Response:
+        await request.body()
+        return JSONResponse(
+            {
+                "id": response_id,
+                "object": "chat.completion",
+                "model": STRONG,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": f"{REPLY_SECRET} {PROMPT_SECRET}",
+                        },
+                    }
+                ],
+                "usage": USAGE,
+            }
+        )
+
+    return app
+
+
+def build_proxy_answering(
+    db_path: Path, prices_path: Path, response_id: Any
+) -> tuple[FastAPI, Store]:
+    """The proxy in front of an upstream that answers with ``response_id``."""
+    request_log = Store(db_path)
+    app = proxy.create_app(
+        "http://upstream.invalid",
+        request_log,
+        load_price_sheet(prices_path),
+        "shadow",
+        config=CONFIG,
+        transport=StreamingASGITransport(upstream_answering(response_id)),
+    )
+    return app, request_log
+
+
 @asynccontextmanager
 async def proxy_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     async with httpx.AsyncClient(
@@ -196,6 +245,7 @@ EXPECTED_COLUMNS = (
     "price_sheet",
     "price_simulated",
     "provider_cost_usd",
+    "generation_id",
 )
 
 # Every column whose declared SQL type can hold text, and the single thing allowed
@@ -226,6 +276,21 @@ TEXT_COLUMN_ALLOW_LIST = {
     # response.  test_request_text_never_lands_in_any_column is what holds it to
     # that: a prompt lands in no column at all, this one included.
     "price_sheet": "configuration: the --prices sheet path (store.Store log_request keyword)",
+    # generation_id is the second column a value from outside reaches, and the
+    # only one fed by a *response* body rather than by configuration: it is the
+    # provider's own `id` field, kept so scripts/reconcile_live.py can look the
+    # generation up.  It is allowed on shape, not on trust --
+    # store.sanitize_generation_id keeps a bare id of at most 128 characters
+    # matching [A-Za-z0-9_.:-]+ and stores NULL for anything else, an id with a
+    # space in it included.  The tests below hold it to that: a valid id is
+    # stored verbatim, an id with a space or over the length cap becomes NULL,
+    # and "SECRET-PROMPT" from the request lands in no column at all.  Note the
+    # limit of the guarantee: `-` is legal in a real id, so shape excludes
+    # prose-with-spaces, it does not exclude every string that reads like text.
+    "generation_id": (
+        "the response's own `id`, only via store.sanitize_generation_id "
+        "(bare identifier, <= 128 chars) or NULL"
+    ),
 }
 
 TEXT_TYPES = ("CHAR", "CLOB", "TEXT")
@@ -336,6 +401,103 @@ async def test_request_text_never_lands_in_any_column(db_path: Path, prices_path
     # conversation.
     assert row["price_sheet"] == str(prices_path)
     assert row["price_simulated"] == 0
+
+
+# --- generation_id is an id or it is nothing ---------------------------------
+
+# The characters OpenRouter's own documented examples use in a generation id, so
+# the "valid" case is a real shape rather than one invented to fit the regex.
+BARE_ID = "gen-2026_10.04:abcDEF123"
+AT_THE_CAP = "g" * store.GENERATION_ID_MAX_CHARS
+PAST_THE_CAP = "g" * (store.GENERATION_ID_MAX_CHARS + 1)
+
+
+async def test_a_bare_provider_id_is_stored_as_the_generation_id(
+    db_path: Path, prices_path: Path
+) -> None:
+    """A well-formed id is kept verbatim: it is what the reconciliation lookup needs.
+
+    The rest of the row is asserted too, so this cannot pass because the request
+    failed to be logged at all.
+    """
+    app, request_log = build_proxy_answering(db_path, prices_path, BARE_ID)
+    await send_secret_request(app)
+    rows = request_log.rows()
+    request_log.close()
+
+    assert len(rows) == 1, "the request was not logged, so nothing was proven"
+    row = rows[0]
+    assert row["generation_id"] == BARE_ID
+    assert row["input_tokens"] == USAGE["prompt_tokens"]
+    assert row["decision_action"] == "STAY"
+
+
+async def test_an_id_at_the_length_cap_is_still_stored(db_path: Path, prices_path: Path) -> None:
+    """The cap is inclusive, so the longest admissible id is not thrown away."""
+    app, request_log = build_proxy_answering(db_path, prices_path, AT_THE_CAP)
+    await send_secret_request(app)
+    rows = request_log.rows()
+    request_log.close()
+
+    assert len(rows) == 1
+    assert rows[0]["generation_id"] == AT_THE_CAP
+    assert len(rows[0]["generation_id"]) == store.GENERATION_ID_MAX_CHARS
+
+
+@pytest.mark.parametrize(
+    "response_id",
+    [
+        "gen with spaces",
+        "gen\tid",
+        PAST_THE_CAP,
+        "",
+        12345,
+        {"id": BARE_ID},
+    ],
+    ids=["spaces", "tab", "past-the-cap", "empty", "number", "object"],
+)
+async def test_anything_that_is_not_a_bare_id_is_stored_as_null(
+    db_path: Path, prices_path: Path, response_id: Any
+) -> None:
+    """Whitespace, over-length and non-string ids all become NULL.
+
+    UNKNOWN rather than a guess: a dropped id is a row that reconciliation skips,
+    which is honest, whereas a mangled one would be looked up in the wrong place.
+    The guarantee is the id's shape, so prose is excluded by its whitespace while
+    a hyphen is kept -- real ids such as ``chatcmpl-...`` contain one.
+    """
+    app, request_log = build_proxy_answering(db_path, prices_path, response_id)
+    await send_secret_request(app)
+    rows = request_log.rows()
+    request_log.close()
+
+    assert len(rows) == 1, "the request was not logged, so nothing was proven"
+    assert rows[0]["generation_id"] is None
+
+
+async def test_a_request_containing_secret_prompt_lands_in_no_column(
+    db_path: Path, prices_path: Path
+) -> None:
+    """SECRET-PROMPT stays out of every column, generation_id included.
+
+    ``generation_id`` is the one column fed by a response body, so it is named
+    explicitly here alongside the by-name sweep of the row: what lands there is
+    the provider's bare id, never anything the client sent.
+    """
+    app, request_log = build_proxy(db_path, prices_path)
+    await send_secret_request(app, text="SECRET-PROMPT")
+    rows = request_log.rows()
+    request_log.close()
+
+    assert len(rows) == 1, "the request was not logged, so nothing was proven"
+    row = rows[0]
+    for name, value in zip(row.keys(), row, strict=True):
+        assert "SECRET-PROMPT" not in str(value), f"SECRET-PROMPT reached column {name!r}"
+    assert row["generation_id"] == "chatcmpl-private"
+    assert b"SECRET-PROMPT" not in db_bytes(db_path), "the prompt is in the file somewhere"
+    # The row is still a real row, so the check cannot pass by storing nothing.
+    assert row["input_tokens"] == USAGE["prompt_tokens"]
+    assert row["output_tokens"] == USAGE["completion_tokens"]
 
 
 async def test_authorization_header_is_never_stored(db_path: Path, prices_path: Path) -> None:

@@ -16,7 +16,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from tamias.store import COLUMNS, Store  # noqa: E402
+from tamias.store import COLUMNS, GENERATION_ID_MAX_CHARS, Store  # noqa: E402
 from tamias.types import CostBreakdown, Decision, Usage  # noqa: E402
 
 SHEET_DATE = "2026-10-04"
@@ -48,6 +48,7 @@ def log(
     decision: Decision = STAY,
     latency_ms: int | None = 120,
     ts: str = TS,
+    generation_id: str | None = None,
 ) -> int:
     return store.log_request(
         ts,
@@ -61,6 +62,7 @@ def log(
         decision,
         price_sheet=SHEET_DATE,
         price_simulated=False,
+        generation_id=generation_id,
     )
 
 
@@ -84,6 +86,49 @@ def test_log_request_persists_every_field(store: Store) -> None:
     assert row["decision_action"] == "STAY"
     assert row["decision_target_model"] is None
     assert row["decision_reason"] == "already on the cheap model"
+
+
+def test_generation_id_is_nullable_and_persisted(store: Store) -> None:
+    log(store, generation_id="gen-123")
+    (row,) = store.rows()
+    assert row["generation_id"] == "gen-123"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "gen with spaces",
+        "gen\tid",
+        "gen id\nwith newline",
+        "a" * (GENERATION_ID_MAX_CHARS + 1),
+        "",
+        None,
+        12345,
+        ["gen-123"],
+    ],
+    ids=["spaces", "tab", "newline", "too-long", "empty", "none", "number", "list"],
+)
+def test_a_generation_id_that_is_not_a_bare_identifier_is_stored_as_null(
+    store: Store, value: object
+) -> None:
+    """The log itself refuses the value, whatever the caller passes.
+
+    This is the store's own guarantee rather than the proxy's: the only writer of
+    the row decides, so no caller can put prose into ``generation_id``.
+    """
+    log(store, generation_id=value)  # type: ignore[arg-type]
+
+    (row,) = store.rows()
+    assert row["generation_id"] is None
+
+
+def test_a_generation_id_at_the_length_cap_is_still_persisted(store: Store) -> None:
+    """The cap is inclusive; the longest admissible id survives."""
+    longest = "g" * GENERATION_ID_MAX_CHARS
+    log(store, generation_id=longest)
+
+    (row,) = store.rows()
+    assert row["generation_id"] == longest
 
 
 def test_unknown_fields_are_stored_as_null_never_as_zero(store: Store) -> None:
@@ -227,7 +272,7 @@ def test_columns_are_the_documented_set(store: Store) -> None:
     (row,) = store.rows()
 
     assert tuple(row.keys()) == ("id", *COLUMNS)
-    # The three provenance/cost columns are appended, not slotted into the middle:
+    # The audit columns are appended, not slotted into the middle:
     # ALTER TABLE can only add at the end, so this order is the one an existing
     # log has too.
     assert COLUMNS == (
@@ -249,6 +294,7 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "price_sheet",
         "price_simulated",
         "provider_cost_usd",
+        "generation_id",
     )
 
 
@@ -287,4 +333,4 @@ def test_reopening_an_old_schema_adds_nullable_audit_columns(tmp_path: Path) -> 
     finally:
         opened.close()
 
-    assert {"price_sheet", "price_simulated"} <= columns
+    assert {"price_sheet", "price_simulated", "provider_cost_usd", "generation_id"} <= columns

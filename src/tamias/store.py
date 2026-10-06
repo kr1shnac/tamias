@@ -1,25 +1,52 @@
 """SQLite log of one row per proxied request.
 
 Only metadata is stored: token counts, cost, latency, status and the routing
-decision.  No prompt or response text is ever accepted by this module.  The one
-column that holds caller-supplied text, ``price_sheet``, is written from
-configuration alone -- the path of the price sheet the row was priced with -- and
-never from a request or a response.
+decision.  No prompt or response text is ever accepted by this module.  Two
+columns are written from outside, and both are held to a shape rather than to
+trust: ``price_sheet`` comes from configuration alone -- the path of the price
+sheet the row was priced with, never from a request or a response -- and
+``generation_id`` is the provider's own response id, which
+:func:`sanitize_generation_id` reduces to a bare identifier or NULL.
 
 UNKNOWN token counts, costs and latencies are stored as SQL NULL.  They are
 never coerced to 0, so "the upstream did not say" stays distinguishable from
 "the upstream said zero" after the fact.
 """
 
+import re
 import sqlite3
 import threading
 from pathlib import Path
 
 from tamias.types import CostBreakdown, Decision, Usage
 
-__all__ = ["Store", "COLUMNS"]
+__all__ = ["Store", "COLUMNS", "sanitize_generation_id", "GENERATION_ID_MAX_CHARS"]
 
 TABLE = "requests"
+
+# The provider's response id is the only value in this log that arrives inside a
+# response body, so it is admitted on shape rather than on trust.  A real id is a
+# short opaque token: letters, digits and the separators OpenRouter's own examples
+# use, which is why `-` and `_` are kept and why prose with spaces in it is not.
+# This is a shape guarantee, not a secrecy guarantee: it bounds what a column can
+# hold, it does not prove the value is meaningless.
+GENERATION_ID_MAX_CHARS = 128
+_GENERATION_ID = re.compile(r"[A-Za-z0-9_.:-]+")
+
+
+def sanitize_generation_id(value: object) -> str | None:
+    """Return `value` when it is a bare provider id, else None (SQL NULL).
+
+    Anything else -- a number, a dict, an empty string, an id with a space in it,
+    or one longer than :data:`GENERATION_ID_MAX_CHARS` -- is stored as NULL, so
+    "the provider said no usable id" stays distinguishable from a real one.
+    """
+    if not isinstance(value, str):
+        return None
+    if not _GENERATION_ID.fullmatch(value) or len(value) > GENERATION_ID_MAX_CHARS:
+        return None
+    return value
+
 
 # A new column is appended at the end, never inserted in the middle: an existing
 # log gets it from ALTER TABLE, which can only add at the end, so a fresh
@@ -44,6 +71,7 @@ COLUMNS = (
     "price_sheet",
     "price_simulated",
     "provider_cost_usd",
+    "generation_id",
 )
 
 _CREATE_TABLE = f"""
@@ -66,7 +94,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     decision_reason TEXT NOT NULL,
     price_sheet TEXT,
     price_simulated INTEGER,
-    provider_cost_usd REAL
+    provider_cost_usd REAL,
+    generation_id TEXT
 )
 """
 
@@ -102,6 +131,7 @@ class Store:
             ("price_sheet", "TEXT"),
             ("price_simulated", "INTEGER"),
             ("provider_cost_usd", "REAL"),
+            ("generation_id", "TEXT"),
         ):
             if name not in present:
                 self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
@@ -120,12 +150,15 @@ class Store:
         *,
         price_sheet: str | None = None,
         price_simulated: bool | None = None,
+        generation_id: object = None,
     ) -> int:
         """Append one request and return its row id.
 
         Every None field is written as NULL.  `decision` is always persisted,
         including a shadow-mode decision that was not acted on; the
         target_model of a STAY decision is NULL rather than the current model.
+        `generation_id` is whatever the response carried: it is passed through
+        :func:`sanitize_generation_id`, so only a bare id reaches the row.
         """
         row = (
             ts,
@@ -146,6 +179,7 @@ class Store:
             price_sheet,
             price_simulated,
             usage.provider_cost_usd,
+            sanitize_generation_id(generation_id),
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)
