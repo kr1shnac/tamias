@@ -16,8 +16,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import signal
+import socket
 import sqlite3
+import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +37,8 @@ from tamias.types import Usage
 ESTIMATE_LABEL = "estimate; ignores cache rebuild cost; not measured"
 ROUTER_MODES = ("shadow", "active", "off")
 SIMULATED_LABEL = "SIMULATED PRICES, NOT REAL SAVINGS"
+RUN_START_TIMEOUT_SECONDS = 15
+RUN_STOP_TIMEOUT_SECONDS = 5
 
 # store.Store owns the schema; these are the columns the report reads, with a
 # little tolerance for a renamed table or column.
@@ -550,6 +558,160 @@ def _serve_router_config(args: argparse.Namespace) -> RouterConfig:
     )
 
 
+def _choose_port() -> int:
+    """Ask the kernel for a loopback port, then release it for the proxy."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _wait_for_proxy(process: subprocess.Popen[Any], port: int) -> bool:
+    """Return once the proxy accepts loopback connections, within the fixed deadline."""
+    deadline = time.monotonic() + RUN_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return True
+        except OSError:
+            time.sleep(0.05)
+    return False
+
+
+def _stop_proxy(process: subprocess.Popen[Any]) -> None:
+    """Stop the proxy without leaving a listener behind for a later command."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=RUN_STOP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _reserve_run_db(db: str | None, project: str | None) -> str:
+    """Create an empty, exclusive run database path for the proxy to populate."""
+    if db is not None:
+        path = Path(db)
+        if path.exists():
+            raise FileExistsError(f"refusing to overwrite existing database: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=False)
+        return str(path)
+
+    stem = project or "run"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    directory = Path("tamias-runs")
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = 0
+    while True:
+        discriminator = "" if suffix == 0 else f"-{suffix}"
+        path = directory / f"{stem}-{timestamp}{discriminator}.db"
+        try:
+            path.touch(exist_ok=False)
+        except FileExistsError:
+            suffix += 1
+            continue
+        return str(path)
+
+
+def run(args: argparse.Namespace) -> int:
+    """Run one command through a short-lived loopback proxy, then print its report."""
+    child_command = args.child_command
+    if child_command[:1] == ["--"]:
+        child_command = child_command[1:]
+    if not child_command:
+        print("tamias run: COMMAND is required after --", file=sys.stderr)
+        return 2
+
+    try:
+        db = _reserve_run_db(args.db, args.project)
+    except OSError as exc:
+        print(f"tamias run: {exc}", file=sys.stderr)
+        return 1
+
+    port = _choose_port()
+    serve_command = [
+        sys.executable,
+        "-m",
+        "tamias.cli",
+        "serve",
+        "--upstream",
+        args.upstream,
+        "--prices",
+        args.prices,
+        "--db",
+        db,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--router-mode",
+        args.mode,
+        "--cheap-model",
+        args.cheap_model,
+        "--strong-model",
+        args.strong_model,
+    ]
+    if args.router_config:
+        serve_command.extend(("--router-config", args.router_config))
+
+    try:
+        proxy_process = subprocess.Popen(serve_command)
+    except OSError as exc:
+        print(f"tamias run: could not start proxy: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        if not _wait_for_proxy(proxy_process, port):
+            print(
+                f"tamias run: proxy did not accept connections within "
+                f"{RUN_START_TIMEOUT_SECONDS} seconds",
+                file=sys.stderr,
+            )
+            return 1
+
+        prefix = f"/p/{args.project}" if args.project else ""
+        root = f"http://127.0.0.1:{port}{prefix}"
+        child_env = os.environ.copy()
+        child_env["OPENAI_BASE_URL"] = f"{root}/v1"
+        child_env["ANTHROPIC_BASE_URL"] = root
+        try:
+            child_process = subprocess.Popen(child_command, env=child_env)
+        except OSError as exc:
+            print(f"tamias run: could not start COMMAND: {exc}", file=sys.stderr)
+            return 127
+        try:
+            child_code = child_process.wait()
+        except KeyboardInterrupt:
+            child_code = child_process.poll()
+            if child_code is None:
+                child_process.send_signal(signal.SIGINT)
+                try:
+                    child_code = child_process.wait(timeout=RUN_STOP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    child_process.terminate()
+                    try:
+                        child_code = child_process.wait(timeout=RUN_STOP_TIMEOUT_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        child_process.kill()
+                        child_code = child_process.wait()
+            if child_code is None:
+                child_code = 130
+        _stop_proxy(proxy_process)
+        try:
+            report(db, args.prices)
+        except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+            print(f"tamias report: {exc}", file=sys.stderr)
+        return child_code if child_code >= 0 else 128 - child_code
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        _stop_proxy(proxy_process)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tamias", description="Local chat API proxy.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -611,6 +773,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument("--verbose", action="store_true", help="log every proxy event")
 
+    run_parser = sub.add_parser("run", help="run one command through a short-lived proxy")
+    run_parser.add_argument("--mode", choices=ROUTER_MODES, default="shadow")
+    run_parser.add_argument("--project")
+    run_parser.add_argument("--cheap-model", default="")
+    run_parser.add_argument("--strong-model", default="")
+    run_parser.add_argument("--db", help="new sqlite request log path")
+    run_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
+    run_parser.add_argument("--upstream", required=True, help="OpenAI-compatible upstream base URL")
+    run_parser.add_argument("--router-config", help="TOML router configuration path")
+    run_parser.add_argument("child_command", nargs=argparse.REMAINDER, metavar="COMMAND")
+
     report_parser = sub.add_parser("report", help="summarise cost and shadow routing")
     report_parser.add_argument("--db", required=True, help="path to the proxy sqlite log")
     report_parser.add_argument(
@@ -667,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as exc:
             print(f"tamias serve: {exc}", file=sys.stderr)
             return 1
+    if args.command == "run":
+        return run(args)
     if args.command == "dashboard":
         from tamias.dashboard import main as dashboard_main
 
