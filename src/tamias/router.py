@@ -73,14 +73,24 @@ class RouterConfig:
 
     ``easy_tools`` is normalised to a frozenset so instances stay hashable and
     usable as a ``decide`` default argument.
+
+    ``profile`` selects the matching strategy: ``generic`` (the default)
+    recognises tool names from any agent through :func:`classify_tool`;
+    ``legacy`` is exactly the v1 behaviour, exact-name matching against
+    ``easy_tools`` only.  Any other value is rejected.
     """
 
     easy_tools: frozenset[str] = EASY_TOOLS
     cheap_model: str = ""
     strong_model: str = ""
     min_gap: int = 3
+    profile: str = "generic"
 
     def __post_init__(self) -> None:
+        if self.profile not in ("generic", "legacy"):
+            raise ValueError(
+                f"profile must be 'generic' or 'legacy', got {self.profile!r}"
+            )
         object.__setattr__(self, "easy_tools", frozenset(self.easy_tools))
 
 
@@ -136,12 +146,15 @@ def _tool_name(messages: list[Any], tool_message: dict[str, Any]) -> str | None:
 def _is_easy(tool: str, config: RouterConfig) -> bool:
     """Whether ``tool`` is cheap mechanical work the cheap model can handle.
 
-    An exact name in ``easy_tools`` always qualifies; otherwise the generic
+    An exact name in ``easy_tools`` always qualifies; under the ``legacy``
+    profile that is the whole rule, exactly as in v1.  Under ``generic`` the
     matcher decides, and only the read and shell families route -- edit work
     and UNKNOWN names are what the strong model is for.
     """
     if tool in config.easy_tools:
         return True
+    if config.profile == "legacy":
+        return False
     return classify_tool(tool) in ("read", "shell")
 
 

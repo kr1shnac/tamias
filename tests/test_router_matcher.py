@@ -174,3 +174,65 @@ def test_matcher_does_not_mutate_the_body() -> None:
     second = decide(body, state(), CONFIG)
     assert body == before
     assert first == second
+
+
+# --- profiles -----------------------------------------------------------------
+
+
+def test_profile_defaults_to_generic() -> None:
+    assert RouterConfig().profile == "generic"
+
+
+def test_legacy_profile_is_accepted() -> None:
+    assert RouterConfig(profile="legacy").profile == "legacy"
+
+
+@pytest.mark.parametrize("bad", ["GENERIC", "Legacy", "strict", "", "v1"])
+def test_unknown_profile_raises_value_error(bad: str) -> None:
+    with pytest.raises(ValueError, match="profile"):
+        RouterConfig(profile=bad)
+
+
+def config(profile: str) -> RouterConfig:
+    return RouterConfig(profile=profile, cheap_model=CHEAP, strong_model=STRONG, min_gap=3)
+
+
+@pytest.mark.parametrize("profile", ["generic", "legacy"])
+def test_shared_rules_hold_under_both_profiles(profile: str) -> None:
+    cfg = config(profile)
+
+    user_turn = {"model": STRONG, "messages": [{"role": "user", "content": "add a test"}]}
+    assert decide(user_turn, state(), cfg).action == "STAY"
+
+    error = decide(body_with_tool("read", "Traceback (most recent call last):"), state(), cfg)
+    assert error.action == "STAY"
+    assert error.reason == "tool error: needs strong model"
+
+    assert decide(body_with_tool("read", "ok"), state(index=2), cfg).action == "STAY"
+    assert decide(body_with_tool("read", "ok"), state(index=3), cfg).action == "SWITCH"
+
+    hysteresis = decide(body_with_tool("read", "ok"), state(index=9, model=CHEAP), cfg)
+    assert hysteresis.action == "STAY"
+    assert "hysteresis" in hysteresis.reason
+
+    assert decide(body_with_tool("edit_file", "wrote 1 file"), state(), cfg).action == "STAY"
+
+
+@pytest.mark.parametrize("name", ["Bash", "read_file", "run_shell", "search_in_files", "Edit"])
+def test_legacy_profile_only_knows_exact_names(name: str) -> None:
+    assert decide(body_with_tool(name, "ok"), state(), config("legacy")).action == "STAY"
+
+
+def test_legacy_profile_routes_its_six_names() -> None:
+    for name in sorted(EASY_TOOLS):
+        decision = decide(body_with_tool(name, "ok"), state(), config("legacy"))
+        assert decision.action == "SWITCH", name
+        assert decision.target_model == CHEAP
+
+
+def test_generic_profile_recognises_names_from_any_agent() -> None:
+    for name in ("run_shell", "read_file", "Bash", "search_in_files"):
+        decision = decide(body_with_tool(name, "ok"), state(), config("generic"))
+        assert decision.action == "SWITCH", name
+        assert decision.target_model == CHEAP
+
