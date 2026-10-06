@@ -429,8 +429,15 @@ def report(db_path: str, prices_path: str) -> None:
                 f"{_money(realised_saved)} over {realised_count} rows "
                 f"({ESTIMATE_LABEL}"
             )
-            if realised_unpriced and realised_count > realised_unpriced:
-                line1 += f"; {realised_unpriced} of {realised_count} not priced"
+            if realised_unpriced:
+                # Mirror the estimated line above: whenever any rewritten row
+                # went unpriced, say so, and count against every rewritten row.
+                # Hiding the caveat once unpriced rows outnumber priced ones
+                # would quote the priced subset as if it were the whole set.
+                line1 += (
+                    f"; {realised_unpriced} of "
+                    f"{realised_count + realised_unpriced} rewritten rows not priced"
+                )
             line1 += f"){suffix}"
         else:
             line1 = (
