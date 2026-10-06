@@ -14,7 +14,14 @@ import copy
 
 import pytest
 
-from tamias.router import EASY_TOOLS, RouterConfig, classify_tool, decide
+from tamias.router import (
+    EASY_TOOLS,
+    ERROR_MARKERS,
+    GENERIC_ERROR_MARKERS,
+    RouterConfig,
+    classify_tool,
+    decide,
+)
 from tamias.types import SessionState
 
 CHEAP = "cheap-1"
@@ -235,4 +242,82 @@ def test_generic_profile_recognises_names_from_any_agent() -> None:
         decision = decide(body_with_tool(name, "ok"), state(), config("generic"))
         assert decision.action == "SWITCH", name
         assert decision.target_model == CHEAP
+
+
+# --- shell output gating ------------------------------------------------------
+
+
+def test_marker_defaults_differ_by_profile() -> None:
+    assert RouterConfig().error_markers == GENERIC_ERROR_MARKERS
+    assert RouterConfig(profile="legacy").error_markers == ERROR_MARKERS
+    assert set(ERROR_MARKERS) < set(GENERIC_ERROR_MARKERS)
+    assert "Error:" not in GENERIC_ERROR_MARKERS
+
+
+@pytest.mark.parametrize("marker", GENERIC_ERROR_MARKERS)
+def test_default_error_markers_block_every_tool(marker: str) -> None:
+    for name in ("shell", "Bash", "read_file", "read"):
+        decision = decide(body_with_tool(name, f"output\n{marker} detail"), state(), CONFIG)
+        assert decision.action == "STAY", (name, marker)
+        assert decision.reason == "tool error: needs strong model"
+
+
+def test_legacy_profile_keeps_the_v1_markers() -> None:
+    legacy = config("legacy")
+    assert decide(body_with_tool("shell", "Exception: boom"), state(), legacy).action == "SWITCH"
+    assert decide(body_with_tool("shell", "Exception: boom"), state(), CONFIG).action == "STAY"
+
+
+def test_capital_error_colon_is_opt_in_not_default() -> None:
+    assert decide(body_with_tool("shell", "Error: nope"), state(), CONFIG).action == "SWITCH"
+    opt_in = RouterConfig(
+        cheap_model=CHEAP,
+        strong_model=STRONG,
+        min_gap=3,
+        error_markers=(*GENERIC_ERROR_MARKERS, "Error:"),
+    )
+    assert decide(body_with_tool("shell", "Error: nope"), state(), opt_in).action == "STAY"
+
+
+def gated(limit: int) -> RouterConfig:
+    return RouterConfig(cheap_model=CHEAP, strong_model=STRONG, min_gap=3, big_output_chars=limit)
+
+
+def test_clean_shell_result_under_the_limit_switches() -> None:
+    decision = decide(body_with_tool("run_shell", "ok"), state(), gated(100))
+    assert decision.action == "SWITCH"
+    assert decision.target_model == CHEAP
+
+
+@pytest.mark.parametrize("size", [100, 5_000])
+def test_shell_result_at_or_over_the_limit_stays(size: int) -> None:
+    decision = decide(body_with_tool("Bash", "x" * size), state(), gated(100))
+    assert decision.action == "STAY"
+    assert decision.target_model is None
+    assert "too large" in decision.reason
+
+
+def test_size_limit_does_not_gate_non_shell_results() -> None:
+    decision = decide(body_with_tool("read_file", "x" * 5_000), state(), gated(10))
+    assert decision.action == "SWITCH"
+
+
+def test_size_limit_only_applies_when_configured() -> None:
+    assert RouterConfig().big_output_chars is None
+    decision = decide(body_with_tool("shell", "x" * 100_000), state(), CONFIG)
+    assert decision.action == "SWITCH"
+
+
+def test_size_limit_is_honoured_on_the_legacy_profile_too() -> None:
+    cfg = RouterConfig(profile="legacy", cheap_model=CHEAP, min_gap=3, big_output_chars=10)
+    assert decide(body_with_tool("shell", "x" * 500), state(), cfg).action == "STAY"
+
+
+def test_error_marker_rule_wins_over_the_size_gate() -> None:
+    decision = decide(
+        body_with_tool("Bash", "Traceback (most recent call last):"), state(), gated(10)
+    )
+    assert decision.action == "STAY"
+    assert decision.reason == "tool error: needs strong model"
+
 

@@ -15,6 +15,21 @@ from tamias.types import Decision, SessionState, ToolClass
 EASY_TOOLS: frozenset[str] = frozenset({"shell", "bash", "read", "grep", "ls", "glob"})
 ERROR_MARKERS: tuple[str, ...] = ("Traceback", "FAILED", "error:")
 
+GENERIC_ERROR_MARKERS: tuple[str, ...] = (
+    "Traceback",
+    "FAILED",
+    "error:",
+    "Exception",
+    "non-zero exit code",
+)
+"""What the generic profile treats as a failed tool result.
+
+The v1 three plus what real tool output prints when it fails.  ``Error:`` is
+deliberately not in the default: ``test_error_markers_are_case_sensitive`` in
+tests/test_router.py pins it as not-a-marker for the default config, so it is
+opt-in through ``RouterConfig(error_markers=...)`` or the TOML key.
+"""
+
 READ_TOKENS: frozenset[str] = frozenset(
     {"read", "grep", "glob", "ls", "list", "find", "cat", "head", "tail", "search", "view", "stat"}
 )
@@ -104,7 +119,8 @@ class RouterConfig:
         object.__setattr__(self, "edit_tools", frozenset(self.edit_tools))
         object.__setattr__(self, "shell_tools", frozenset(self.shell_tools))
         if self.error_markers is None:
-            object.__setattr__(self, "error_markers", ERROR_MARKERS)
+            default_markers = ERROR_MARKERS if self.profile == "legacy" else GENERIC_ERROR_MARKERS
+            object.__setattr__(self, "error_markers", default_markers)
         else:
             object.__setattr__(self, "error_markers", tuple(self.error_markers))
 
@@ -197,9 +213,12 @@ def decide(
 
     1. a trailing ``user`` message means the agent is planning -> STAY;
     2. a trailing ``tool`` message carrying an error marker -> STAY;
-    3. a trailing ``tool`` message from an easy tool, with enough requests
-       since the last switch -> SWITCH to ``cheap_model``;
-    4. anything else -> STAY.
+    3. a trailing ``tool`` message whose shell output is over
+       ``config.big_output_chars`` -> STAY;
+    4. a trailing ``tool`` message from an easy tool -- under ``generic`` that
+       is any read- or shell-family name -- with enough requests since the
+       last switch -> SWITCH to ``config.cheap_model``;
+    5. anything else -> STAY.
     """
     messages = body.get("messages")
     if not isinstance(messages, list):
@@ -223,17 +242,30 @@ def decide(
 
         # Rule 3: cheap mechanical work.
         tool = _tool_name(messages, last)
-        if tool is not None and _is_easy(tool, config):
-            # Hysteresis: while we are already on the cheap model the gap since
-            # the last switch is zero, so we stay put until it grows again.
-            gap = 0 if state.current_model == config.cheap_model else state.request_index
-            if gap >= config.min_gap:
-                return Decision(
-                    action="SWITCH",
-                    target_model=config.cheap_model,
-                    reason=f"easy tool: {tool}",
+        if tool is not None:
+            tool_class = _tool_class(tool, config)
+            if (
+                tool_class == "shell"
+                and config.big_output_chars is not None
+                and len(text) >= config.big_output_chars
+            ):
+                return _stay(
+                    f"shell output too large: {len(text)} >= {config.big_output_chars} chars"
                 )
-            return _stay(f"hysteresis: {gap} of {config.min_gap} requests since last switch")
+            if _is_easy(tool, config):
+                # Hysteresis: while we are already on the cheap model the gap
+                # since the last switch is zero, so we stay put until it grows
+                # again.
+                gap = 0 if state.current_model == config.cheap_model else state.request_index
+                if gap >= config.min_gap:
+                    return Decision(
+                        action="SWITCH",
+                        target_model=config.cheap_model,
+                        reason=f"easy tool: {tool}",
+                    )
+                return _stay(
+                    f"hysteresis: {gap} of {config.min_gap} requests since last switch"
+                )
 
     # Rule 4: default.
     if isinstance(requested_model, str) and requested_model:
