@@ -237,6 +237,18 @@ def forward_headers(request: Request) -> dict[str, str]:
     }
 
 
+def forward_response_headers(headers: httpx.Headers) -> dict[str, str]:
+    """Copy end-to-end upstream response headers without proxy framing."""
+    connection_named = {
+        token.strip().lower()
+        for value in headers.get_list("connection")
+        for token in value.split(",")
+        if token.strip()
+    }
+    dropped = HOP_BY_HOP | connection_named
+    return {key: value for key, value in headers.items() if key.lower() not in dropped}
+
+
 def _model_name(value: Any) -> str:
     return value if isinstance(value, str) and value else UNKNOWN_MODEL
 
@@ -462,14 +474,14 @@ def register_routes(
             return Response(
                 content=upstream.content,
                 status_code=upstream.status_code,
-                media_type=upstream.headers.get("content-type", "application/json"),
+                headers=forward_response_headers(upstream.headers),
             )
 
         upstream = await client.send(outgoing, stream=True)
         return StreamingResponse(
             _stream_messages(upstream, session_id, model_requested, decision, started),
             status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "text/event-stream"),
+            headers=forward_response_headers(upstream.headers),
         )
 
     _promote_route(app, MESSAGES_PATH)

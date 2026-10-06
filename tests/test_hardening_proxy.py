@@ -305,12 +305,13 @@ async def test_upstream_429_with_retry_after_passes_through_and_is_logged(
     store.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-2: a 429 loses its Retry-After header, only content-type is relayed",
+@pytest.mark.parametrize(
+    ("status", "content_type"), [(429, "application/json"), (503, "text/plain")]
 )
-async def test_upstream_429_keeps_its_retry_after_header(db_path: Path, prices_path: Path) -> None:
-    """A rate-limited client must learn when to come back.
+async def test_upstream_error_keeps_rate_limit_and_content_headers(
+    db_path: Path, prices_path: Path, status: int, content_type: str
+) -> None:
+    """Clients receive rate-limit headers on 429s and server failures.
 
     ``Retry-After`` is the one upstream header a client cannot do without: without
     it a well-behaved SDK either hammers the proxy or backs off for its own
@@ -318,16 +319,32 @@ async def test_upstream_429_keeps_its_retry_after_header(db_path: Path, prices_p
     the response instead of relaying it, so the header has to survive that.
     """
     payload = json.dumps({"error": {"message": "slow down", "type": "rate_limit_error"}}).encode()
-    upstream = create_status_upstream(429, payload, "application/json", {"retry-after": "7"})
+    upstream = create_status_upstream(
+        status,
+        payload,
+        content_type,
+        {
+            "retry-after": "7",
+            "x-ratelimit-limit-requests": "100",
+            "x-ratelimit-remaining-requests": "0",
+            "connection": "keep-alive, x-upstream-hop",
+            "x-upstream-hop": "discard-me",
+        },
+    )
     app, store = build_proxy(upstream, db_path, prices_path)
 
     async with proxy_client(app) as client:
         response = await client.post(
-            CHAT_PATH, content=user_body(), headers=send_headers("hdr-429")
+            CHAT_PATH, content=user_body(), headers=send_headers(f"hdr-{status}")
         )
 
-    assert response.status_code == 429
+    assert response.status_code == status
     assert response.headers.get("retry-after") == "7", dict(response.headers)
+    assert response.headers.get("x-ratelimit-limit-requests") == "100", dict(response.headers)
+    assert response.headers.get("x-ratelimit-remaining-requests") == "0", dict(response.headers)
+    assert response.headers.get("content-type", "").startswith(content_type)
+    assert "connection" not in response.headers
+    assert "x-upstream-hop" not in response.headers
     store.close()
 
 

@@ -138,6 +138,19 @@ def forward_headers(request: Request) -> dict[str, str]:
     }
 
 
+def forward_response_headers(headers: httpx.Headers) -> dict[str, str]:
+    """Copy end-to-end upstream response headers without proxy framing."""
+    connection_values = headers.get_list("connection")
+    connection_named = {
+        token.strip().lower()
+        for value in connection_values
+        for token in value.split(",")
+        if token.strip()
+    }
+    dropped = HOP_BY_HOP | connection_named
+    return {key: value for key, value in headers.items() if key.lower() not in dropped}
+
+
 def with_usage_included(body: dict[str, Any]) -> bytes:
     """Re-encode a streaming body asking the upstream for a usage chunk."""
     options = body.get("stream_options")
@@ -493,14 +506,14 @@ def create_app(
             return Response(
                 content=upstream.content,
                 status_code=upstream.status_code,
-                media_type=upstream.headers.get("content-type", "application/json"),
+                headers=forward_response_headers(upstream.headers),
             )
 
         upstream = await client.send(outgoing, stream=True)
         return StreamingResponse(
             _stream_chat(upstream, session_id, model_requested, decision, started),
             status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "text/event-stream"),
+            headers=forward_response_headers(upstream.headers),
         )
 
     async def _stream_chat(
@@ -566,7 +579,7 @@ def create_app(
         return StreamingResponse(
             relay(upstream),
             status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "application/octet-stream"),
+            headers=forward_response_headers(upstream.headers),
         )
 
     # Registered last, and promoted ahead of the catch-all above, so that
