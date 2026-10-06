@@ -1026,3 +1026,53 @@ def test_module_entry_point_exists() -> None:
 
     assert callable(dashboard.main)
     assert dashboard.__doc__ is not None
+
+def test_grouping_by_project_field(tmp_path: Path, sheet_path: Path) -> None:
+    db = _active_db(tmp_path / "active.db", load_price_sheet(sheet_path))
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE requests ADD COLUMN project TEXT")
+        conn.execute("UPDATE requests SET project = 'p1' WHERE id <= 4")
+        conn.execute("UPDATE requests SET project = 'p2' WHERE id > 4")
+        
+    app = create_dashboard_app(db, sheet_path)
+    with TestClient(app) as client:
+        nav = client.get("/api/nav").json()
+        assert "p1" in nav["projects"]
+        assert nav["projects"]["p1"]["count"] == 4
+        assert nav["projects"]["p2"]["count"] == 4
+        
+        rows_p1 = client.get("/api/rows?project=p1").json()
+        assert len(rows_p1) == 4
+        
+        summary_p2 = client.get("/api/summary?project=p2").json()
+        assert summary_p2["n_requests"] == 4
+
+def test_grouping_by_session_when_no_project_field(tmp_path: Path, sheet_path: Path) -> None:
+    db = _active_db(tmp_path / "active.db", load_price_sheet(sheet_path))
+    app = create_dashboard_app(db, sheet_path)
+    with TestClient(app) as client:
+        nav = client.get("/api/nav").json()
+        assert "dash-session" in nav["projects"]
+        assert nav["projects"]["dash-session"]["count"] == 8
+        
+        rows = client.get("/api/rows?project=dash-session").json()
+        assert len(rows) == 8
+        
+        empty = client.get("/api/rows?project=valid-but-unknown").json()
+        assert empty == []
+
+def test_invalid_and_unknown_filter_values(tmp_path: Path, sheet_path: Path) -> None:
+    db = _active_db(tmp_path / "active.db", load_price_sheet(sheet_path))
+    app = create_dashboard_app(db, sheet_path)
+    with TestClient(app) as client:
+        assert client.get("/api/rows?project=invalid/path").status_code == 400
+        assert client.get("/api/summary?session=invalid!value").status_code == 400
+        assert client.get("/api/rows?project=valid_unknown").json() == []
+
+def test_no_inner_html_in_served_page(tmp_path: Path, sheet_path: Path) -> None:
+    db = _active_db(tmp_path / "active.db", load_price_sheet(sheet_path))
+    app = create_dashboard_app(db, sheet_path)
+    with TestClient(app) as client:
+        html = client.get("/").text
+        assert "innerHTML" not in html
+
