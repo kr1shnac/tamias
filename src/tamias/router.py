@@ -27,9 +27,11 @@ class RouterConfig:
     cheap_model: str = ""
     strong_model: str = ""
     min_gap: int = 3
+    error_markers: frozenset[str] = frozenset(ERROR_MARKERS)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "easy_tools", frozenset(self.easy_tools))
+        object.__setattr__(self, "error_markers", frozenset(self.error_markers))
 
 
 DEFAULT_CONFIG = RouterConfig()
@@ -112,7 +114,7 @@ def decide(
     if role == "tool":
         # Rule 2: a failed tool call is exactly what needs the strong model.
         text = _text_of(last.get("content"))
-        if any(marker in text for marker in ERROR_MARKERS):
+        if any(marker in text for marker in config.error_markers):
             return _stay("tool error: needs strong model")
 
         # Rule 3: cheap mechanical work.

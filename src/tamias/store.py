@@ -32,6 +32,15 @@ TABLE = "requests"
 # hold, it does not prove the value is meaningless.
 GENERATION_ID_MAX_CHARS = 128
 _GENERATION_ID = re.compile(r"[A-Za-z0-9_.:-]+")
+PROJECT_MAX_CHARS = 64
+_PROJECT = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def sanitize_project(value: object) -> str | None:
+    """A project is a bounded identifier, never arbitrary request text."""
+    if not isinstance(value, str) or not value or len(value) > PROJECT_MAX_CHARS:
+        return None
+    return value if _PROJECT.fullmatch(value) else None
 
 
 def sanitize_generation_id(value: object) -> str | None:
@@ -72,6 +81,7 @@ COLUMNS = (
     "price_simulated",
     "provider_cost_usd",
     "generation_id",
+    "project",
 )
 
 _CREATE_TABLE = f"""
@@ -95,7 +105,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     price_sheet TEXT,
     price_simulated INTEGER,
     provider_cost_usd REAL,
-    generation_id TEXT
+    generation_id TEXT,
+    project TEXT
 )
 """
 
@@ -132,6 +143,7 @@ class Store:
             ("price_simulated", "INTEGER"),
             ("provider_cost_usd", "REAL"),
             ("generation_id", "TEXT"),
+            ("project", "TEXT"),
         ):
             if name not in present:
                 self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
@@ -151,6 +163,7 @@ class Store:
         price_sheet: str | None = None,
         price_simulated: bool | None = None,
         generation_id: object = None,
+        project: object = None,
     ) -> int:
         """Append one request and return its row id.
 
@@ -180,6 +193,7 @@ class Store:
             price_simulated,
             usage.provider_cost_usd,
             sanitize_generation_id(generation_id),
+            sanitize_project(project),
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)

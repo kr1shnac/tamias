@@ -46,7 +46,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from tamias import anthropic_adapter, pricing, responses_adapter, router
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
-from tamias.store import sanitize_generation_id
+from tamias.store import sanitize_generation_id, sanitize_project
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
 
 logger = logging.getLogger("tamias.proxy")
@@ -80,6 +80,7 @@ HOP_BY_HOP = frozenset(
     }
 )
 DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding"}
+PROJECT_HEADER = "x-tamias-project"
 
 PASSTHROUGH_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 UPSTREAM_TIMEOUT_ENV = "TAMIAS_UPSTREAM_TIMEOUT_SECONDS"
@@ -104,6 +105,7 @@ class RequestLog(Protocol):
         price_sheet: str | None = None,
         price_simulated: bool | None = None,
         generation_id: object = None,
+        project: object = None,
     ) -> int: ...
 
 
@@ -136,7 +138,7 @@ def forward_headers(request: Request) -> dict[str, str]:
     return {
         key: value
         for key, value in request.headers.items()
-        if key.lower() not in DROPPED_REQUEST_HEADERS
+        if key.lower() not in DROPPED_REQUEST_HEADERS | {PROJECT_HEADER}
     }
 
 
@@ -365,6 +367,22 @@ def create_app(
     app.state.request_usage_cost = request_usage_cost
     app.state.sessions = table
 
+    @app.middleware("http")
+    async def project_prefix(request: Request, call_next: Any) -> Response:
+        path = request.scope["path"]
+        candidate: object = request.headers.get(PROJECT_HEADER)
+        if path.startswith("/p/"):
+            candidate, separator, suffix = path[3:].partition("/")
+            if not separator:
+                return _bad_request("project prefix must be /p/<name>/...")
+            request.scope["path"] = "/" + suffix
+            request.scope["raw_path"] = request.scope["path"].encode()
+        project = sanitize_project(candidate)
+        if candidate is not None and project is None:
+            return _bad_request("invalid project: use [A-Za-z0-9_.-]+ (maximum 64 characters)")
+        request.state.project = project
+        return await call_next(request)
+
     def plan(session_id: str, body: dict[str, Any], model: str) -> Decision:
         """Ask the router what it would do, and log it.
 
@@ -430,6 +448,7 @@ def create_app(
         status: int,
         decision: Decision,
         generation_id: object = None,
+        project: object = None,
     ) -> None:
         cost = pricing.compute_cost(model_used, usage, sheet)
         store.log_request(
@@ -448,6 +467,7 @@ def create_app(
             # identifier here rather than trusted: anything that is not one
             # becomes NULL instead of text in the log.
             generation_id=sanitize_generation_id(generation_id),
+            project=project,
         )
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
@@ -515,6 +535,7 @@ def create_app(
                 upstream.status_code,
                 decision,
                 details.get("id"),
+                request.state.project,
             )
             advance(session_id, model_used)
             return Response(
@@ -525,7 +546,9 @@ def create_app(
 
         upstream = await client.send(outgoing, stream=True)
         return StreamingResponse(
-            _stream_chat(upstream, session_id, model_requested, decision, started),
+            _stream_chat(
+                upstream, session_id, model_requested, decision, started, request.state.project
+            ),
             status_code=upstream.status_code,
             headers=forward_response_headers(upstream.headers),
         )
@@ -536,6 +559,7 @@ def create_app(
         model_requested: str,
         decision: Decision,
         started: float,
+        project: object,
     ) -> AsyncIterator[bytes]:
         seen_model: Any = None
         seen_usage: Any = None
@@ -576,6 +600,7 @@ def create_app(
                 upstream.status_code,
                 decision,
                 seen_generation_id,
+                project,
             )
             advance(session_id, model_used)
 

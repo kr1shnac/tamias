@@ -246,6 +246,7 @@ EXPECTED_COLUMNS = (
     "price_simulated",
     "provider_cost_usd",
     "generation_id",
+    "project",
 )
 
 # Every column whose declared SQL type can hold text, and the single thing allowed
@@ -291,6 +292,9 @@ TEXT_COLUMN_ALLOW_LIST = {
         "the response's own `id`, only via store.sanitize_generation_id "
         "(bare identifier, <= 128 chars) or NULL"
     ),
+    # Filled only from client configuration (/p/<name> or X-Tamias-Project),
+    # never from a prompt or response, and sanitized to a bounded identifier.
+    "project": "client configuration project label, [A-Za-z0-9_.-]+, <= 64 chars or NULL",
 }
 
 TEXT_TYPES = ("CHAR", "CLOB", "TEXT")

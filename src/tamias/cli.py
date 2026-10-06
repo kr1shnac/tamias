@@ -14,6 +14,7 @@ money.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sqlite3
 import sys
@@ -23,6 +24,7 @@ from typing import Any
 from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
 from tamias.pricing_fetch import DEFAULT_URL, fetch_models, render_sheet
 from tamias.router import EASY_TOOLS, RouterConfig
+from tamias.router_config import load_router_config
 from tamias.store import Store
 from tamias.types import Usage
 
@@ -430,6 +432,7 @@ def build_serve_app(
     min_gap: int = 3,
     inject_usage: bool = False,
     request_usage_cost: bool = False,
+    router_config: RouterConfig | None = None,
     transport: Any | None = None,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
@@ -443,7 +446,7 @@ def build_serve_app(
 
     sheet = load_price_sheet(prices)
     store = Store(db)
-    config = RouterConfig(
+    config = router_config or RouterConfig(
         easy_tools=EASY_TOOLS,
         cheap_model=cheap_model,
         strong_model=strong_model,
@@ -481,6 +484,7 @@ def serve(args: argparse.Namespace) -> int:
         min_gap=args.min_gap,
         inject_usage=args.inject_usage,
         request_usage_cost=args.request_usage_cost,
+        router_config=_serve_router_config(args),
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -514,6 +518,38 @@ def proxy_path() -> str:
     return CHAT_PATH
 
 
+def agent_config(agent: str, port: int, project: str | None) -> str:
+    """Return a paste-only local proxy snippet; this never writes configuration."""
+    prefix = f"/p/{project}" if project else ""
+    root = f"http://127.0.0.1:{port}{prefix}"
+    if agent == "claude-code":
+        return f"export ANTHROPIC_BASE_URL={root}"
+    if agent == "codex":
+        return f'[model_providers.tamias]\nbase_url = "{root}/v1"\nwire_api = "responses"'
+    return json.dumps(
+        {
+            "provider": {
+                "tamias": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {"baseURL": f"{root}/v1"},
+                }
+            }
+        },
+        separators=(",", ":"),
+    )
+
+
+def _serve_router_config(args: argparse.Namespace) -> RouterConfig:
+    config = load_router_config(args.router_config, args.router_profile)
+    return RouterConfig(
+        easy_tools=config.easy_tools,
+        error_markers=config.error_markers,
+        cheap_model=args.cheap_model or config.cheap_model,
+        strong_model=args.strong_model or config.strong_model,
+        min_gap=args.min_gap if args.min_gap is not None else config.min_gap,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tamias", description="Local chat API proxy.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -533,6 +569,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="base URL of the OpenAI-compatible upstream, without /v1/chat/completions",
     )
+    serve_parser.add_argument("--router-profile", choices=("generic", "legacy"), default="generic")
+    serve_parser.add_argument("--router-config", help="TOML router configuration path")
     serve_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
     serve_parser.add_argument("--db", required=True, help="path to the sqlite request log")
     serve_parser.add_argument("--port", type=int, default=8000, help="port to listen on")
@@ -555,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--min-gap",
         type=int,
-        default=3,
+        default=None,
         help="requests that must pass after the last switch before switching again",
     )
     serve_parser.add_argument(
@@ -581,6 +619,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to the TOML price sheet used for pricing; a sheet with "
         "`simulated = true` labels every amount it produces as simulated",
     )
+    dashboard_parser = sub.add_parser("dashboard", help="serve the local run dashboard")
+    dashboard_parser.add_argument("--db", required=True, help="path to the proxy sqlite log")
+    dashboard_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
+    dashboard_parser.add_argument("--port", type=int, default=8000, help="port to listen on")
+    dashboard_parser.add_argument("--host", default="127.0.0.1", help="address to bind")
+    agent_parser = sub.add_parser("agent-config", help="print an agent configuration snippet")
+    agent_parser.add_argument("agent", choices=("claude-code", "codex", "opencode"))
+    agent_parser.add_argument("--port", type=int, default=8000)
+    agent_parser.add_argument("--project")
     return parser
 
 
@@ -620,6 +667,24 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as exc:
             print(f"tamias serve: {exc}", file=sys.stderr)
             return 1
+    if args.command == "dashboard":
+        from tamias.dashboard import main as dashboard_main
+
+        return dashboard_main(
+            [
+                "--db",
+                args.db,
+                "--prices",
+                args.prices,
+                "--host",
+                args.host,
+                "--port",
+                str(args.port),
+            ]
+        )
+    if args.command == "agent-config":
+        print(agent_config(args.agent, args.port, args.project))
+        return 0
     return 2
 
 

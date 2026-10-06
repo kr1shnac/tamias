@@ -1,0 +1,8 @@
+# Router keys: easy_tools, error_markers, cheap_model, strong_model, and min_gap.
+[router]
+easy_tools = ["shell", "bash", "read", "grep", "ls", "glob"]
+# Include "Error:" for agents whose tools return "Error: ..." on failure.
+error_markers = ["Traceback", "FAILED", "error:", "Error:"]
+cheap_model = "openai/gpt-4.1-mini"
+strong_model = "openai/gpt-4.1"
+min_gap = 3
