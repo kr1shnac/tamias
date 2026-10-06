@@ -78,8 +78,10 @@ If an agent's tools return `Error: ...`, configure `error_markers`; see
   implemented.
 - Tested on fixtures only: live provider behaviour and real Codex and Claude
   Code traffic are unverified.
-- Evidence: one pair of runs on free models used simulated prices; the routed
-  arm cost more than the baseline.
+- Evidence: dry runs on free models with simulated prices. The two arms did
+  different amounts of work, so their totals are not comparable in either
+  direction, and every dollar figure shown is hypothetical — the real billed
+  cost of the free models is `$0`.
 
 ## Documentation
 

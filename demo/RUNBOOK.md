@@ -215,19 +215,25 @@ Read this before quoting any number from this demo.
   OpenRouter publishes per token. It says nothing about how well a model does
   this task, and a cheap model that needs three attempts to fix `median` is worse
   than a strong one that needs one, whatever the sheet says.
-- **The two arms are not cost-comparable as shipped.** The routed arm gets
-  `--inject-usage` and the baseline does not, so in the dry run the routed rows
-  carry token counts and cost, and the baseline rows are UNKNOWN:
+- **The two arms did not do the same amount of work, so their totals are not
+  comparable.** Both arms take `--inject-usage` and both price every row, so this
+  is not a measurability gap any more — but the row counts differ:
 
   ```
-  routed-1.db     total cost: $0.001202   (12 of 12 rows priced)
-  baseline-1.db   total cost: UNKNOWN    (12 of 12 rows have unknown cost)
+  routed-1.db     12 rows   $0.001202   (12 of 12 rows priced)
+  baseline-1.db   12 rows   $0.001559   (12 of 12 rows priced)
+  routed-2.db     10 rows   $0.239832   (10 of 10 rows priced)
+  baseline-2.db    7 rows   $0.180645    (7 of 7 rows priced)
+  baseline-3.db    4 rows   $0.083058    (4 of 4 rows priced)
   ```
 
-  That gap is a **measurability** difference, not a saving. Do not read
-  "baseline UNKNOWN" as "routing saved money". Compare the arms on
-  `model_used` vs `model_requested` and on `decision_action` counts, which are
-  directly comparable.
+  A dollar difference between the arms mostly measures how much the agent
+  happened to do, not what routing saved. Compare `model_used` against
+  `model_requested` and the `decision_action` counts instead; those do not depend
+  on how many rows each arm wrote. Every figure above is hypothetical: all rows
+  are `:free` models, so the real billed cost is `$0`, and `tamias report` puts
+  `[SIMULATED PRICES, NOT REAL SAVINGS]` beside each of them — copy the label
+  along with the number.
 - **`--effort-policy` may not be wired up.** `config.env` has an `EFFORT_POLICY`
   setting and the routed arm passes `--effort-policy "$EFFORT_POLICY"` when it is
   non-empty — but if `tamias serve` on this branch has no such flag, setting it
