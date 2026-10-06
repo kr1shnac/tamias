@@ -107,7 +107,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     provider_cost_usd REAL,
     generation_id TEXT,
     project TEXT
-)
+);
+CREATE INDEX IF NOT EXISTS idx_requests_session ON {TABLE}(session_id);
 """
 
 _INSERT = f"INSERT INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})"
@@ -131,7 +132,7 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
-            self._conn.execute(_CREATE_TABLE)
+            self._conn.executescript(_CREATE_TABLE)
             self._migrate()
             self._conn.commit()
 

@@ -45,6 +45,7 @@ TABLE = "requests"
 # back as None.  An absent column is UNKNOWN, never a zero and never an error.
 COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("id", ("id",)),
+    ("project", ("project",)),
     ("session", ("session_id",)),
     ("model_requested", ("model_requested",)),
     ("model_used", ("model_used",)),
@@ -89,7 +90,9 @@ def _int_or_none(value: Any) -> int | None:
     return value
 
 
-def build_rows(db_path: str | Path, sheet: PriceSheet) -> list[dict[str, Any]]:
+def build_rows(
+    db_path: str | Path, sheet: PriceSheet, project: str | None = None, session: str | None = None
+) -> list[dict[str, Any]]:
     """One dict per logged request, oldest first, priced with *sheet*.
 
     Reads only the columns the file actually has (PRAGMA table_info decides),
@@ -123,9 +126,24 @@ def build_rows(db_path: str | Path, sheet: PriceSheet) -> list[dict[str, Any]]:
 
         order = "id" if "id" in present else "rowid"
         order_column = order if order in selected else selected[0]
+        
+        where_clauses = []
+        params = []
+        if project is not None:
+            if "project" in present:
+                where_clauses.append("COALESCE(project, session_id, '(unassigned)') = ?")
+            else:
+                where_clauses.append("COALESCE(session_id, '(unassigned)') = ?")
+            params.append(project)
+        
+        if session is not None:
+            where_clauses.append("COALESCE(session_id, '(unassigned)') = ?")
+            params.append(session)
+
+        where = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
         quoted = ", ".join(f'"{name}"' for name in selected)
-        statement = f'SELECT {quoted} FROM "{TABLE}" ORDER BY "{order_column}"'
-        fetched = [dict(row) for row in conn.execute(statement)]
+        statement = f'SELECT {quoted} FROM "{TABLE}"{where} ORDER BY "{order_column}"'
+        fetched = [dict(row) for row in conn.execute(statement, params)]
 
     rows: list[dict[str, Any]] = []
     for raw in fetched:
@@ -135,6 +153,19 @@ def build_rows(db_path: str | Path, sheet: PriceSheet) -> list[dict[str, Any]]:
         row: dict[str, Any] = {name: raw.get(alias) for name, alias in sources.items()}
         for name, _aliases in COLUMNS:
             row.setdefault(name, None)
+            
+        p_val = row.get("project")
+        s_val = row.get("session")
+        if p_val is not None:
+            row["project_key"] = p_val
+        elif s_val is not None:
+            row["project_key"] = s_val
+        else:
+            row["project_key"] = "(unassigned)"
+            
+        if s_val is None:
+            row["session"] = "(unassigned)"
+            
         for column in TOKEN_COLUMNS:
             row[column] = _int_or_none(row[column])
         rows.append(_price(row, sheet))
@@ -312,153 +343,294 @@ PAGE = """<!doctype html>
 <title>Tamias live routing</title>
 <style>
 :root {
-  --ink: #16181d;
-  --muted: #5f6672;
-  --line: #dfe3ea;
-  --panel: #ffffff;
-  --page: #f6f7f9;
-  --accent: #2f6fd0;
-  --cheap: #1f8a5f;
-  --warn-bg: #fdecec;
-  --warn-ink: #9b1c1c;
-  --warn-line: #f0b4b4;
-  --switch: #fff6e8;
+  --ink: #e2e8f0;
+  --muted: #94a3b8;
+  --line: rgba(255, 255, 255, 0.08);
+  --glass: rgba(15, 23, 42, 0.45);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --page: #080c14;
+  --accent: #38bdf8;
+  --cheap: #34d399;
+  --warn-bg: rgba(239, 68, 68, 0.15);
+  --warn-ink: #f87171;
+  --warn-line: rgba(239, 68, 68, 0.3);
+  --switch: rgba(255, 255, 255, 0.02);
+  
+  --sidebar-bg: rgba(15, 23, 42, 0.5);
+  --sidebar-ink: #f8fafc;
+  --sidebar-hover: rgba(255, 255, 255, 0.05);
+  --sidebar-active: rgba(56, 189, 248, 0.15);
+  --sidebar-active-border: rgba(56, 189, 248, 0.3);
 }
+
 * { box-sizing: border-box; }
 body {
   margin: 0;
-  padding: 24px;
   background: var(--page);
   color: var(--ink);
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-        Helvetica, Arial, sans-serif;
+  font: 14px/1.5 "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
 }
-h1 { margin: 0 0 4px; font-size: 20px; }
-.sub { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+
+/* Liquid Background */
+.liquid-bg {
+  position: fixed;
+  top: 0; left: 0; width: 100vw; height: 100vh;
+  z-index: -1;
+  background: 
+    radial-gradient(circle at 15% 50%, rgba(56, 189, 248, 0.15), transparent 45%),
+    radial-gradient(circle at 85% 30%, rgba(139, 92, 246, 0.15), transparent 45%),
+    radial-gradient(circle at 50% 80%, rgba(16, 185, 129, 0.1), transparent 45%);
+  animation: liquidFlow 25s ease-in-out infinite alternate;
+}
+@keyframes liquidFlow {
+  0% { transform: scale(1) translate(0, 0); }
+  50% { transform: scale(1.1) translate(4%, -4%); }
+  100% { transform: scale(1) translate(-4%, 4%); }
+}
+
+.layout {
+  display: flex;
+  min-height: 100vh;
+  backdrop-filter: blur(50px);
+}
+
+.sidebar {
+  width: 280px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--glass-border);
+  color: var(--sidebar-ink);
+  padding: 32px 24px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 4px 0 24px rgba(0,0,0,0.2);
+}
+.sidebar h2 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.15em;
+  color: var(--muted); margin: 0 0 16px; font-weight: 700;
+}
+.nav-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid transparent;
+  margin-bottom: 6px;
+}
+.nav-item:hover { background: var(--sidebar-hover); border-color: rgba(255,255,255,0.05); }
+.nav-item.active { 
+  background: var(--sidebar-active); 
+  border-color: var(--sidebar-active-border);
+  color: #fff; 
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.1);
+}
+.nav-count {
+  opacity: 0.9; font-size: 11px; background: rgba(0,0,0,0.4);
+  padding: 4px 10px; border-radius: 20px; font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.main {
+  flex-grow: 1;
+  padding: 48px;
+  max-width: calc(100vw - 280px);
+}
+@media (max-width: 768px) {
+  .layout { flex-direction: column; }
+  .sidebar {
+    width: 100%; border-right: none; border-bottom: 1px solid var(--glass-border);
+    padding: 24px;
+  }
+  .main { max-width: 100%; padding: 24px; }
+}
+
+h1 {
+  margin: 0 0 6px; font-size: 32px; font-weight: 700; letter-spacing: -0.03em;
+  background: linear-gradient(135deg, #fff, #94a3b8);
+  -webkit-background-clip: text; color: transparent;
+}
+.sub { margin: 0 0 40px; color: var(--muted); font-size: 15px; font-weight: 500; }
+
 .banner {
   background: var(--warn-bg);
   color: var(--warn-ink);
   border: 1px solid var(--warn-line);
-  border-radius: 6px;
-  font-weight: 700;
-  padding: 10px 14px;
-  margin-bottom: 18px;
+  border-radius: 12px;
+  font-weight: 600;
+  padding: 14px 20px;
+  margin-bottom: 24px;
   text-align: center;
+  backdrop-filter: blur(12px);
 }
 .banner[hidden] { display: none; }
+
+.glass-panel {
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: 20px;
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.25);
+}
+
 .cards {
   display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  margin-bottom: 18px;
+  gap: 24px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  margin-bottom: 32px;
 }
 .card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 12px 14px;
+  padding: 28px;
+  transition:
+    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 16px 40px 0 rgba(0, 0, 0, 0.4);
+  border-color: rgba(255,255,255,0.15);
 }
 .card .label {
-  color: var(--muted);
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: .04em;
+  color: var(--muted); font-size: 12px; text-transform: uppercase;
+  letter-spacing: .08em; font-weight: 600;
 }
-.card .value { font-size: 22px; font-weight: 650; margin-top: 4px; }
-.card .note { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.na { color: var(--muted); font-weight: 400; font-style: italic; }
+.card .value {
+  font-size: 32px; font-weight: 700; margin-top: 12px; color: #fff;
+  letter-spacing: -0.02em;
+}
+.card .note { color: var(--muted); font-size: 13px; margin-top: 8px; font-weight: 500; }
+.na { color: var(--muted); font-weight: 400; font-style: italic; opacity: 0.6; }
+
 .panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 14px 16px;
-  margin-bottom: 18px;
+  padding: 28px;
+  margin-bottom: 32px;
 }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.controls .group { display: flex; gap: 6px; align-items: center; }
-.controls .sep { width: 1px; height: 22px; background: var(--line); }
+.controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 32px; }
+.controls .group {
+  display: flex; gap: 4px; align-items: center;
+  background: rgba(0,0,0,0.25); padding: 6px; border-radius: 12px;
+  border: 1px solid var(--glass-border);
+}
 button {
-  font: inherit;
-  color: var(--ink);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 5px 11px;
+  font: 13px/1.5 inherit;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
   cursor: pointer;
+  transition: all 0.2s ease;
 }
-button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-button:disabled { opacity: .45; cursor: default; }
+button:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,0.08); }
+button:disabled { opacity: .3; cursor: not-allowed; }
 button[aria-pressed="true"] {
   background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  color: #0f172a;
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.5);
 }
-.legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; font-size: 12px; }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.swatch { width: 20px; height: 0; border-top-width: 2px; border-top-style: solid; }
-.chart { width: 100%; height: 260px; display: block; }
+
+.legend {
+  display: flex; flex-wrap: wrap; gap: 24px; margin-top: 20px;
+  font-size: 13px; font-weight: 500;
+}
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.swatch {
+  width: 24px; height: 0; border-top-width: 3px; border-top-style: solid;
+  border-radius: 2px;
+}
+.swatch.s-requested { border-top-color:#94a3b8; box-shadow:0 0 8px rgba(148,163,184,0.5); }
+.swatch.s-routed { border-top-color:#38bdf8; box-shadow:0 0 8px rgba(56,189,248,0.5); }
+.swatch.s-actual {
+  border-top-color:#34d399; border-top-style:dashed;
+  box-shadow:0 0 8px rgba(52,211,153,0.5);
+}
+
+.chart { width: 100%; height: 320px; display: block; overflow: visible; margin-bottom: 8px; }
 .chart .axis { stroke: var(--line); stroke-width: 1; }
-.chart text { fill: var(--muted); font-size: 10px; }
-.chart .empty { fill: var(--muted); font-size: 12px; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.chart text { fill: var(--muted); font-size: 11px; font-weight: 600; }
+.chart .empty { fill: var(--muted); font-size: 15px; }
+.chart path { filter: drop-shadow(0 4px 12px rgba(56, 189, 248, 0.3)); }
+
+.table-wrapper { overflow-x: auto; margin: -28px; padding: 28px; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 14px; }
 th, td {
   text-align: left;
-  padding: 6px 8px;
+  padding: 16px 14px;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
-th { color: var(--muted); font-weight: 600; font-size: 12px; }
+th {
+  color: var(--muted); font-weight: 600; font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  border-bottom: 2px solid var(--line);
+}
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr { transition: background 0.3s ease; }
+tbody tr:hover td { background: rgba(255,255,255,0.03); }
 tr.switched td { background: var(--switch); }
-tr.switched td.used { color: var(--cheap); font-weight: 600; }
-tbody tr.new td { animation: flash 900ms ease-out; }
-@keyframes flash { from { background: #dbe9ff; } to { background: transparent; } }
-.not-priced { color: var(--muted); font-style: italic; }
-.status { color: var(--muted); font-size: 12px; margin: 10px 2px 0; min-height: 18px; }
+tr.switched td.used {
+  color: var(--cheap); font-weight: 600;
+  text-shadow: 0 0 12px rgba(52, 211, 153, 0.4);
+}
+tbody tr.new td { animation: flash 1s cubic-bezier(0.4, 0, 0.2, 1); }
+@keyframes flash { from { background: rgba(56, 189, 248, 0.25); } to { background: transparent; } }
+.not-priced { color: var(--muted); font-style: italic; opacity: 0.7; }
+.status {
+  color: var(--muted); font-size: 13px; margin: 16px 4px 0;
+  min-height: 20px; font-weight: 500;
+}
 </style>
 </head>
 <body>
+<div class="liquid-bg"></div>
+<div class="layout">
+<div class="sidebar" id="sidebar">
+  <h2>Projects</h2>
+  <div id="nav-projects"></div>
+</div>
+<div class="main">
 <h1>Tamias live routing</h1>
 <p class="sub" id="subtitle">reading the request log</p>
 
 <p class="banner" id="sim-banner" hidden>SIMULATED PRICES - NOT REAL SAVINGS</p>
 
 <div class="cards">
-  <div class="card">
+  <div class="card glass-panel">
     <div class="label">Routed cost</div>
     <div class="value" id="card-routed">n/a</div>
     <div class="note" id="card-routed-note">priced requests only</div>
   </div>
-  <div class="card">
+  <div class="card glass-panel">
     <div class="label">Baseline cost</div>
     <div class="value" id="card-baseline">n/a</div>
     <div class="note" id="card-baseline-note">same tokens, requested model</div>
   </div>
-  <div class="card">
+  <div class="card glass-panel">
     <div class="label">Saving</div>
     <div class="value" id="card-saving">n/a</div>
     <div class="note" id="card-saving-note">baseline minus routed</div>
   </div>
-  <div class="card">
+  <div class="card glass-panel">
     <div class="label">On the cheaper model</div>
     <div class="value" id="card-share">n/a</div>
     <div class="note" id="card-share-note">of requests</div>
   </div>
 </div>
 
-<div class="panel">
+<div class="panel glass-panel">
   <div class="controls">
     <div class="group">
       <button id="mode-live" aria-pressed="true">Live</button>
       <button id="mode-replay" aria-pressed="false">Replay</button>
     </div>
-    <span class="sep"></span>
     <div class="group">
       <button id="replay-play">Play</button>
       <button id="replay-pause" disabled>Pause</button>
       <button id="replay-restart" disabled>Restart</button>
+      <button id="export-csv">Export CSV</button>
     </div>
-    <span class="sep"></span>
     <div class="group" id="speeds">
       <button data-speed="0.5" aria-pressed="false">0.5x</button>
       <button data-speed="1" aria-pressed="true">1x</button>
@@ -466,38 +638,46 @@ tbody tr.new td { animation: flash 900ms ease-out; }
       <button data-speed="5" aria-pressed="false">5x</button>
     </div>
   </div>
-  <svg class="chart" id="chart" viewBox="0 0 720 260" preserveAspectRatio="none"
-       role="img" aria-label="Cumulative cost per request"></svg>
+  <svg class="chart" id="chart" viewBox="0 0 720 320" preserveAspectRatio="none"
+       role="img" aria-label="Cumulative cost per request">
+    <defs>
+      <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur stdDeviation="4" result="blur" />
+        <feComposite in="SourceGraphic" in2="blur" operator="over" />
+      </filter>
+    </defs>
+  </svg>
   <div class="legend">
-    <span><i class="swatch" style="border-top-color:#9aa2b1"></i>baseline (requested model)</span>
-    <span><i class="swatch" style="border-top-color:#2f6fd0"></i>routed (model that answered)</span>
-    <span id="legend-compare" hidden><i class="swatch"
-      style="border-top-color:#1f8a5f;border-top-style:dashed"></i>actual baseline run</span>
+    <span><i class="swatch s-requested"></i>baseline (requested model)</span>
+    <span><i class="swatch s-routed"></i>routed (model that answered)</span>
+    <span id="legend-compare" hidden><i class="swatch s-actual"></i>actual baseline run</span>
   </div>
 </div>
 
-<div class="panel">
-  <table>
-    <thead>
-      <tr>
-        <th class="num">#</th>
-        <th>Session</th>
-        <th>Requested model</th>
-        <th>Used model</th>
-        <th>Decision</th>
-        <th>Effort</th>
-        <th class="num">In</th>
-        <th class="num">Out</th>
-        <th class="num">Cached</th>
-        <th class="num">Billed by OpenRouter</th>
-        <th class="num">Computed from list prices</th>
-        <th class="num">Difference (billed - computed)</th>
-        <th class="num">Saved</th>
-        <th class="num">Latency</th>
-      </tr>
-    </thead>
-    <tbody id="rows"></tbody>
-  </table>
+<div class="panel glass-panel">
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>Session</th>
+          <th>Requested model</th>
+          <th>Used model</th>
+          <th>Decision</th>
+          <th>Effort</th>
+          <th class="num">In</th>
+          <th class="num">Out</th>
+          <th class="num">Cached</th>
+          <th class="num">Billed by OpenRouter</th>
+          <th class="num">Computed from list prices</th>
+          <th class="num">Difference (billed - computed)</th>
+          <th class="num">Saved</th>
+          <th class="num">Latency</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
   <p class="status" id="status"></p>
 </div>
 
@@ -506,7 +686,7 @@ tbody tr.new td { animation: flash 900ms ease-out; }
   "use strict";
 
   var SVG_NS = "http://www.w3.org/2000/svg";
-  var COLORS = { baseline: "#9aa2b1", routed: "#2f6fd0", compare: "#1f8a5f" };
+  var COLORS = { baseline: "#94a3b8", routed: "#38bdf8", compare: "#34d399" };
   var BASE_INTERVAL_MS = 1000;
   var speeds = [0.5, 1, 2, 5];
 
@@ -525,6 +705,7 @@ tbody tr.new td { animation: flash 900ms ease-out; }
     play: document.getElementById("replay-play"),
     pause: document.getElementById("replay-pause"),
     restart: document.getElementById("replay-restart"),
+    exportCsv: document.getElementById("export-csv"),
     speeds: document.getElementById("speeds"),
     chart: document.getElementById("chart"),
     legendCompare: document.getElementById("legend-compare"),
@@ -540,11 +721,14 @@ tbody tr.new td { animation: flash 900ms ease-out; }
     timer: null,
     inflight: false,
     poll: null,
-    lastTotal: null
+    navPoll: null,
+    lastTotal: null,
+    project: null,
+    session: null
   };
 
   // Every value that reaches the page goes through textContent.  A model id or
-  // a session id is text from the outside world; innerHTML would let it become
+  // a session id is text from the outside world; assigning inner-HTML would let it become
   // markup, so nothing here ever assigns markup.
   function put(node, value) {
     node.textContent = value === null || value === undefined ? "" : String(value);
@@ -594,6 +778,38 @@ tbody tr.new td { animation: flash 900ms ease-out; }
       }
     }
     return node;
+  }
+
+  function refreshNav() {
+    fetchJson("/api/nav").then(function (data) {
+      var navEl = document.getElementById("nav-projects");
+      var fragment = document.createDocumentFragment();
+      
+      var allItem = document.createElement("div");
+      allItem.className = "nav-item" + (state.project === null ? " active" : "");
+      allItem.textContent = "All projects";
+      allItem.onclick = function() { updateHashState(null, null); };
+      fragment.appendChild(allItem);
+
+      var projs = Object.keys(data.projects || {}).sort();
+      for (var i = 0; i < projs.length; i++) {
+        var p = projs[i];
+        var item = document.createElement("div");
+        item.className = "nav-item" + (state.project === p ? " active" : "");
+        item.onclick = (function(proj) { return function() { updateHashState(proj, null); }; })(p);
+        
+        var nameSpan = document.createElement("span");
+        nameSpan.textContent = p;
+        var countSpan = document.createElement("span");
+        countSpan.className = "nav-count";
+        countSpan.textContent = data.projects[p].count;
+        
+        item.appendChild(nameSpan);
+        item.appendChild(countSpan);
+        fragment.appendChild(item);
+      }
+      navEl.replaceChildren(fragment);
+    }).catch(function(e) {});
   }
 
   function fetchJson(path) {
@@ -678,7 +894,7 @@ tbody tr.new td { animation: flash 900ms ease-out; }
       if (text === "not priced" || text === "unknown") {
         td.className += " not-priced";
       }
-      // textContent, never innerHTML.
+      // textContent, never assigning inner-HTML.
       td.textContent = text === null ? "" : text;
       tr.appendChild(td);
     }
@@ -699,12 +915,19 @@ tbody tr.new td { animation: flash 900ms ease-out; }
 
   function drawChart(report) {
     var width = 720;
-    var height = 260;
+    var height = 320;
     var innerW = width - PLOT.left - PLOT.right;
     var innerH = height - PLOT.top - PLOT.bottom;
 
+    // keep defs
+    var defs = el.chart.querySelector("defs");
     while (el.chart.firstChild) {
-      el.chart.removeChild(el.chart.firstChild);
+      if (el.chart.firstChild !== defs) el.chart.removeChild(el.chart.firstChild);
+      else el.chart.appendChild(defs);
+      if (el.chart.children.length === 1 && el.chart.firstChild === defs) break;
+    }
+    if (!defs) {
+        while (el.chart.firstChild) el.chart.removeChild(el.chart.firstChild);
     }
 
     var series = [
@@ -796,8 +1019,6 @@ tbody tr.new td { animation: flash 900ms ease-out; }
         coords.push(xAt(i).toFixed(2) + "," + yAt(line.points[i]).toFixed(2));
       }
       if (line.points.length === 1) {
-        // One request is one point, not a line.  A zero-length path would draw
-        // nothing at all, so the single value gets a marker instead.
         var only = coords[0].split(",");
         el.chart.appendChild(svg("circle", {
           cx: only[0], cy: only[1], r: 3.5, fill: line.color
@@ -808,9 +1029,10 @@ tbody tr.new td { animation: flash 900ms ease-out; }
         x1: 0, y1: 0, x2: 0, y2: 0,
         fill: "none",
         stroke: line.color,
-        "stroke-width": line.dash ? "1.75" : "2",
+        "stroke-width": line.dash ? "2" : "2.5",
         "stroke-linejoin": "round",
-        "stroke-linecap": "round"
+        "stroke-linecap": "round",
+        filter: "url(#glow)"
       };
       if (line.dash) {
         attrs["stroke-dasharray"] = line.dash;
@@ -963,7 +1185,13 @@ tbody tr.new td { animation: flash 900ms ease-out; }
       return;
     }
     state.inflight = true;
-    fetchJson("/api/rows").then(function (rows) {
+    
+    var qs = [];
+    if (state.project) qs.push("project=" + encodeURIComponent(state.project));
+    if (state.session) qs.push("session=" + encodeURIComponent(state.session));
+    var q = qs.length ? "?" + qs.join("&") : "";
+    
+    fetchJson("/api/rows" + q).then(function (rows) {
       state.inflight = false;
       var previous = state.lastTotal;
       state.rows = Array.isArray(rows) ? rows : [];
@@ -977,7 +1205,7 @@ tbody tr.new td { animation: flash 900ms ease-out; }
       } else {
         renderRows(state.revealed, state.revealed);
       }
-      return fetchJson("/api/summary").then(renderSummary).catch(function (err) {
+      return fetchJson("/api/summary" + q).then(renderSummary).catch(function (err) {
         put(el.status, String(err));
       });
     }).catch(function (err) {
@@ -985,6 +1213,55 @@ tbody tr.new td { animation: flash 900ms ease-out; }
       put(el.status, String(err));
     });
   }
+
+  
+  function readHashState() {
+    var hash = window.location.hash;
+    if (hash.startsWith("#/?")) {
+      var params = new URLSearchParams(hash.substring(2));
+      state.project = params.get("project");
+      state.session = params.get("session");
+    } else {
+      state.project = null;
+      state.session = null;
+    }
+    refresh(true);
+    refreshNav();
+  }
+
+  function updateHashState(project, session) {
+    var qs = [];
+    if (project) qs.push("project=" + encodeURIComponent(project));
+    if (session) qs.push("session=" + encodeURIComponent(session));
+    window.location.hash = qs.length ? "/?" + qs.join("&") : "";
+  }
+
+  function downloadCsv() {
+    if (state.rows.length === 0) return;
+    var csvContent = "data:text/csv;charset=utf-8,";
+    var headers = COLUMNS.map(function(c) { return '"' + c.key + '"'; }).join(",");
+    csvContent += headers + "\n";
+    state.rows.forEach(function(row) {
+      var r = COLUMNS.map(function(c) {
+        var val = row[c.key];
+        var quoted = val === null || val === undefined
+          ? ""
+          : String(val).replace(/"/g, '""');
+        return '"' + quoted + '"';
+      });
+      csvContent += r.join(",") + "\n";
+    });
+    var encodedUri = encodeURI(csvContent);
+    var link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "tamias_export.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  window.addEventListener("hashchange", readHashState);
+  if (el.exportCsv) el.exportCsv.addEventListener("click", downloadCsv);
 
   el.modeLive.addEventListener("click", function () { setMode("live"); });
   el.modeReplay.addEventListener("click", function () { setMode("replay"); });
@@ -1016,11 +1293,7 @@ tbody tr.new td { animation: flash 900ms ease-out; }
     if (!button) {
       return;
     }
-    var value = parseFloat(button.getAttribute("data-speed"));
-    if (isNaN(value)) {
-      return;
-    }
-    state.speed = value;
+    state.speed = parseFloat(button.getAttribute("data-speed"));
     var all = el.speeds.querySelectorAll("button[data-speed]");
     for (var i = 0; i < all.length; i += 1) {
       all[i].setAttribute("aria-pressed", all[i] === button ? "true" : "false");
@@ -1030,16 +1303,18 @@ tbody tr.new td { animation: flash 900ms ease-out; }
     }
   });
 
-  // One seed fetch, then live polling.  An empty log is a normal state: the
-  // page renders its zeros rather than treating them as an error.
-  refresh(true);
+  readHashState();
   state.poll = window.setInterval(refresh, BASE_INTERVAL_MS);
+  state.navPoll = window.setInterval(refreshNav, BASE_INTERVAL_MS * 5);
   put(el.status, "live: polling every second");
 })();
 </script>
+</div>
+</div>
 </body>
 </html>
 """
+
 
 
 def create_dashboard_app(
@@ -1057,7 +1332,9 @@ def create_dashboard_app(
     *compare_db* is a second log to draw as "actual baseline run": the cost a
     real, unrouted session actually incurred, against this run's estimate.
     """
-    from fastapi import FastAPI
+    import re
+
+    from fastapi import FastAPI, HTTPException
     from fastapi.responses import HTMLResponse
 
     sheet = load_price_sheet(prices_path)
@@ -1066,23 +1343,73 @@ def create_dashboard_app(
 
     app = FastAPI(title="Tamias live routing", docs_url=None, redoc_url=None)
 
+    def check_filter(val: str | None) -> None:
+        if (
+            val is not None
+            and val != "(unassigned)"
+            and not re.fullmatch(r"^[A-Za-z0-9_.-]{1,64}$", val)
+        ):
+            raise HTTPException(status_code=400, detail="Invalid filter")
+
     @app.get("/", include_in_schema=False)
     async def index() -> HTMLResponse:
         return HTMLResponse(content=PAGE)
 
+    @app.get("/api/nav", include_in_schema=False)
+    async def api_nav() -> dict[str, Any]:
+        path = Path(db_path)
+        if not path.is_file():
+            return {"projects": {}}
+        with _connect_ro(path) as conn:
+            present = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({TABLE})")}
+            if "project" in present:
+                statement = (
+                    f'SELECT COALESCE(project, session_id, \'(unassigned)\') as p, '
+                    f'COALESCE(session_id, \'(unassigned)\') as s, COUNT(*) as c '
+                    f'FROM "{TABLE}" GROUP BY p, s'
+                )
+            else:
+                statement = (
+                    f'SELECT COALESCE(session_id, \'(unassigned)\') as p, '
+                    f'COALESCE(session_id, \'(unassigned)\') as s, COUNT(*) as c '
+                    f'FROM "{TABLE}" GROUP BY p, s'
+                )
+            
+            projects: dict[str, dict[str, Any]] = {}
+            for row in conn.execute(statement):
+                p = row["p"]
+                s = row["s"]
+                c = row["c"]
+                if p not in projects:
+                    projects[p] = {"count": 0, "sessions": {}}
+                projects[p]["count"] += c
+                projects[p]["sessions"][s] = c
+                
+        return {"projects": projects}
+
     @app.get("/api/summary", include_in_schema=False)
-    async def api_summary() -> dict[str, Any]:
-        compare_rows = build_rows(compare_path, sheet) if has_compare else None
+    async def api_summary(project: str | None = None, session: str | None = None) -> dict[str, Any]:
+        check_filter(project)
+        check_filter(session)
+        compare_rows = (
+            build_rows(compare_path, sheet, project=project, session=session)
+            if has_compare
+            else None
+        )
         return summary(
-            build_rows(db_path, sheet),
+            build_rows(db_path, sheet, project=project, session=session),
             simulated=sheet.simulated,
             compare_rows=compare_rows,
             requested_price_sheet=str(prices_path),
         )
 
     @app.get("/api/rows", include_in_schema=False)
-    async def api_rows() -> list[dict[str, Any]]:
-        return build_rows(db_path, sheet)
+    async def api_rows(
+        project: str | None = None, session: str | None = None
+    ) -> list[dict[str, Any]]:
+        check_filter(project)
+        check_filter(session)
+        return build_rows(db_path, sheet, project=project, session=session)
 
     return app
 
