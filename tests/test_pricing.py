@@ -11,7 +11,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from tamias.pricing import ModelPrice, compute_cost, load_price_sheet  # noqa: E402
+from tamias.pricing import ModelPrice, PriceSheet, compute_cost, load_price_sheet  # noqa: E402
 from tamias.types import Usage  # noqa: E402
 
 
@@ -234,4 +234,169 @@ def test_provenance_must_be_a_table(tmp_path):
     path = tmp_path / "prices.toml"
     path.write_text('date = "2026-10-06"\nprovenance = 3\n\n[gpt-4o]\ninput = 3.0\n', "utf-8")
     with pytest.raises(ValueError, match="provenance"):
+        load_price_sheet(path)
+
+
+# --- what a fetched sheet may and may not claim --------------------------------
+
+RULES_SHEET = """date = "2026-10-04"
+
+[strong]
+input = 3.0
+output = 15.0
+cached_input = 0.30
+cache_write = 3.75
+cache_write_1h = 6.0
+
+[no-cache-rates]
+input = 3.0
+output = 15.0
+cache_write = 3.75
+
+[no-write-rate]
+input = 3.0
+output = 15.0
+cached_input = 0.30
+
+[tiered]
+input = 3.0
+output = 15.0
+tier_200k_input = 6.0
+tier_200k_output = 30.0
+
+[tiered-free]
+input = 0.0
+output = 0.0
+cached_input = 0.0
+cache_write = 0.0
+tier_200k_input = 0.0
+"""
+
+
+def rules_sheet(tmp_path) -> PriceSheet:
+    path = tmp_path / "prices.toml"
+    path.write_text(RULES_SHEET, encoding="utf-8")
+    return load_price_sheet(path)
+
+
+def test_provider_billed_cost_wins_over_the_sheet_sum(tmp_path):
+    """The provider's own bill is the number; sheet arithmetic only fills gaps."""
+    sheet = rules_sheet(tmp_path)
+    usage = Usage(1_000_000, 100_000, 0, 0, provider_cost_usd=0.42)
+    breakdown = compute_cost("strong", usage, sheet)
+    assert breakdown.usd == 0.42
+    assert compute_cost("strong", Usage(1_000_000, 100_000, 0, 0), sheet).usd == pytest.approx(4.5)
+    assert "billed" in breakdown.formula
+
+
+def test_provider_billed_cost_wins_even_when_the_model_is_not_in_the_sheet(tmp_path):
+    """A bill the provider sent is exact whatever the sheet does or does not know."""
+    sheet = rules_sheet(tmp_path)
+    usage = Usage(1_000_000, 100_000, None, None, provider_cost_usd=0.001)
+    breakdown = compute_cost("a-model-nobody-priced", usage, sheet)
+    assert breakdown.usd == 0.001
+    assert "a-model-nobody-priced" not in breakdown.formula
+
+
+def test_provider_billed_zero_is_a_known_number_not_unknown(tmp_path):
+    """Zero dollars billed is a measurement, so it prices as exactly zero."""
+    sheet = rules_sheet(tmp_path)
+    usage = Usage(1_000_000, 100_000, 0, 0, provider_cost_usd=0.0)
+    assert compute_cost("strong", usage, sheet).usd == 0.0
+
+
+def test_provider_billed_cost_wins_over_a_tiered_model(tmp_path):
+    """Money already billed does not need the sheet's unsupported tiers."""
+    sheet = rules_sheet(tmp_path)
+    usage = Usage(10_000, 2_000, 0, 0, provider_cost_usd=0.5)
+    assert compute_cost("tiered", usage, sheet).usd == 0.5
+
+
+def test_without_a_provider_price_the_exact_sheet_sum_is_used(tmp_path):
+    """The fallback arithmetic is the documented sum, to the cent."""
+    sheet = rules_sheet(tmp_path)
+    usage = Usage(1_000_000, 100_000, 0, 0)
+    breakdown = compute_cost("strong", usage, sheet)
+    assert breakdown.usd == pytest.approx(4.5)
+    assert "usd = (" in breakdown.formula
+
+
+def test_a_missing_cached_rate_for_nonzero_cached_tokens_is_unknown(tmp_path):
+    """Cache reads are never guessed at: no rate, no number."""
+    sheet = rules_sheet(tmp_path)
+    breakdown = compute_cost("no-cache-rates", Usage(10_000, 2_000, 4_000, 0), sheet)
+    assert breakdown.usd is None
+    assert "cached_input_rate" in breakdown.formula
+
+
+def test_a_missing_write_rate_for_nonzero_write_tokens_is_unknown(tmp_path):
+    """Cache writes are the same bargain: the field is named, the cost is not."""
+    sheet = rules_sheet(tmp_path)
+    breakdown = compute_cost("no-write-rate", Usage(10_000, 2_000, 0, 1_000), sheet)
+    assert breakdown.usd is None
+    assert "cache_write_rate" in breakdown.formula
+
+
+def test_a_missing_cache_rate_costs_nothing_when_the_count_is_zero(tmp_path):
+    """A rate nobody quoted only matters if tokens actually reached it."""
+    sheet = rules_sheet(tmp_path)
+    breakdown = compute_cost("no-cache-rates", Usage(10_000, 2_000, 0, 0), sheet)
+    # 10_000 input * 3.0 + 2_000 output * 15.0 = 60_000 / 1_000_000
+    assert breakdown.usd == pytest.approx(0.06)
+
+
+def test_cache_reads_are_priced_at_the_cache_rate_not_the_input_rate(tmp_path):
+    """A discounted cache read must never be billed at the plain input price."""
+    sheet = rules_sheet(tmp_path)
+    usage = Usage(1_000_000, 0, 1_000_000, 0)
+    breakdown = compute_cost("strong", usage, sheet)
+    assert breakdown.usd == pytest.approx(0.3)  # 1M * 0.30, not 1M * 3.0
+
+
+def test_cache_writes_are_priced_at_the_write_rate_not_the_input_rate(tmp_path):
+    """Writes carry their own rate: 100k * 3.75 on top of 900k * 3.0."""
+    sheet = rules_sheet(tmp_path)
+    usage = Usage(1_000_000, 0, 0, 100_000)
+    breakdown = compute_cost("strong", usage, sheet)
+    assert breakdown.usd == pytest.approx(3.075)  # 2.70 + 0.375, never 3.00
+
+
+def test_reasoning_tokens_are_counted_once_inside_completion_tokens(tmp_path):
+    """Reasoning is part of the output count, so the formula adds it once."""
+    sheet = rules_sheet(tmp_path)
+    # output_tokens = 1_000_000 already includes any reasoning tokens the
+    # upstream reported inside the completion.
+    usage = Usage(1_000_000, 1_000_000, 0, 0)
+    breakdown = compute_cost("strong", usage, sheet)
+    assert breakdown.usd == pytest.approx(18.0)  # 3.0 input + 15.0 output
+    assert "reasoning" not in breakdown.formula
+    assert breakdown.formula.count("output") == 1
+
+
+def test_a_tier_field_makes_the_cost_unknown_and_names_it(tmp_path):
+    """Tiered long-context pricing is unsupported: UNKNOWN, never a guess."""
+    sheet = rules_sheet(tmp_path)
+    assert sheet.get("tiered").tiers == ("tier_200k_input", "tier_200k_output")
+    breakdown = compute_cost("tiered", Usage(10_000, 2_000, 0, 0), sheet)
+    assert breakdown.usd is None
+    assert "tier_200k_input" in breakdown.formula
+    assert "tier" in breakdown.formula
+
+
+def test_a_tiered_model_is_unknown_even_when_every_rate_is_zero(tmp_path):
+    """The free-model shortcut does not rescue an entry with tier fields."""
+    sheet = rules_sheet(tmp_path)
+    breakdown = compute_cost("tiered-free", Usage(None, None, None, None), sheet)
+    assert breakdown.usd is None
+    assert "tier_200k_input" in breakdown.formula
+
+
+def test_a_rate_key_that_is_not_a_tier_field_is_still_rejected(tmp_path):
+    """Only names beginning with `tier` are tolerated; typos stay errors."""
+    path = tmp_path / "prices.toml"
+    path.write_text(
+        'date = "2026-10-04"\n\n[m]\ninput = 3.0\noutput = 15.0\ninput_200k = 6.0\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unknown rate"):
         load_price_sheet(path)
