@@ -55,6 +55,7 @@ COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("output_tokens", ("output_tokens",)),
     ("cached_input_tokens", ("cached_input_tokens",)),
     ("cache_write_tokens", ("cache_write_tokens",)),
+    ("cost_usd", ("cost_usd",)),
     ("price_sheet", ("price_sheet",)),
     ("price_simulated", ("price_simulated",)),
     ("provider_cost_usd", ("provider_cost_usd",)),
@@ -160,6 +161,12 @@ def _price(row: dict[str, Any], sheet: PriceSheet) -> dict[str, Any]:
     priced = actual is not None and baseline is not None
 
     row["actual_cost"] = actual
+    stored_cost = row.get("cost_usd")
+    row["computed_cost_usd"] = (
+        float(stored_cost)
+        if isinstance(stored_cost, int | float) and not isinstance(stored_cost, bool)
+        else None
+    )
     row["baseline_cost"] = baseline
     row["saved"] = baseline - actual if priced else None
     row["switched"] = bool(
@@ -223,21 +230,32 @@ def summary(
         "cumulative_baseline": cumulative_baseline,
     }
 
-    reconciled = [
-        (row["actual_cost"], float(row["provider_cost_usd"]))
+    billed_rows = [
+        float(row["provider_cost_usd"])
         for row in rows
-        if row["priced"]
-        and isinstance(row.get("provider_cost_usd"), int | float)
+        if isinstance(row.get("provider_cost_usd"), int | float)
         and not isinstance(row.get("provider_cost_usd"), bool)
     ]
-    report["provider_rows"] = len(reconciled)
-    report["provider_missing"] = n_requests - len(reconciled)
-    if len(reconciled) == n_requests and reconciled:
+    reconciled = [
+        (computed, float(row["provider_cost_usd"]))
+        for row in rows
+        if isinstance(row.get("provider_cost_usd"), int | float)
+        and not isinstance(row.get("provider_cost_usd"), bool)
+        and isinstance(
+            (computed := row.get("computed_cost_usd", row.get("actual_cost"))), int | float
+        )
+        and not isinstance(computed, bool)
+    ]
+    report["provider_rows"] = len(billed_rows)
+    report["provider_missing"] = n_requests - len(billed_rows)
+    if billed_rows:
+        report["provider_billed_total"] = sum(billed_rows)
+    if reconciled:
         provider_computed = sum(computed for computed, _billed in reconciled)
         provider_billed = sum(billed for _computed, billed in reconciled)
         report["provider_computed_total"] = provider_computed
-        report["provider_billed_total"] = provider_billed
-        report["provider_difference"] = provider_computed - provider_billed
+        report["provider_reconciled_rows"] = len(reconciled)
+        report["provider_difference"] = provider_billed - provider_computed
 
     priced_rows = [row for row in rows if row["priced"]]
     stored_simulated = [row.get("price_simulated") for row in priced_rows]
@@ -471,7 +489,9 @@ tbody tr.new td { animation: flash 900ms ease-out; }
         <th class="num">In</th>
         <th class="num">Out</th>
         <th class="num">Cached</th>
-        <th class="num">Cost</th>
+        <th class="num">Billed by OpenRouter</th>
+        <th class="num">Computed from list prices</th>
+        <th class="num">Difference (billed - computed)</th>
         <th class="num">Saved</th>
         <th class="num">Latency</th>
       </tr>
@@ -597,14 +617,28 @@ tbody tr.new td { animation: flash 900ms ease-out; }
     { key: "input_tokens", numeric: true },
     { key: "output_tokens", numeric: true },
     { key: "cached_input_tokens", numeric: true },
-    { key: "actual_cost", numeric: true, money: true },
+    { key: "provider_cost_usd", numeric: true, money: true },
+    { key: "computed_cost_usd", numeric: true, money: true },
+    { key: "billed_difference", numeric: true, money: true },
     { key: "saved", numeric: true, money: true },
     { key: "latency_ms", numeric: true }
   ];
 
   function cellText(row, column) {
     var value = row[column.key];
-    if (column.key === "actual_cost" || column.key === "saved") {
+    if (column.key === "provider_cost_usd") {
+      return isMissing(value) ? "UNKNOWN" : money(value);
+    }
+    if (column.key === "computed_cost_usd") {
+      if (isMissing(value)) return "not priced";
+      var sheet = isMissing(row.price_sheet) ? "provenance unknown" : row.price_sheet;
+      return money(value) + " (computed from list prices (" + sheet + "))";
+    }
+    if (column.key === "billed_difference") {
+      if (isMissing(row.provider_cost_usd) || isMissing(row.computed_cost_usd)) return "UNKNOWN";
+      return money(row.provider_cost_usd - row.computed_cost_usd);
+    }
+    if (column.key === "saved") {
       return row.priced ? money(value) : "not priced";
     }
     if (column.key === "effort_used" || column.key === "effort_requested") {
@@ -793,9 +827,18 @@ tbody tr.new td { animation: flash 900ms ease-out; }
     el.banner.hidden = !simulated;
 
     var billing = report.provider_billed_total === undefined
-      ? "; billed: UNKNOWN (" + report.provider_missing + " of " + report.n_requests + ")"
-      : "; computed vs billed: " + money(report.provider_computed_total) + " vs " +
-        money(report.provider_billed_total) + "; difference: " + money(report.provider_difference);
+      ? "; billed cost: UNKNOWN"
+      : "; spent (billed by OpenRouter): " + money(report.provider_billed_total) +
+        " over " + report.provider_rows + " of " + report.n_requests + " requests";
+    var reconciliation = report.provider_difference === undefined
+      ? ""
+      : "; computed cost: " + money(report.provider_computed_total) +
+        " (computed from list prices (" +
+        (report.price_sheets && report.price_sheets.length
+          ? report.price_sheets.join(", ")
+          : "provenance unknown") +
+        ")); difference (billed - computed): " + money(report.provider_difference) +
+        " over " + report.provider_reconciled_rows + " rows";
     var warning = report.price_sheet_warning ? "; " + report.price_sheet_warning : "";
     var provenance = report.provenance_unknown
       ? "; provenance unknown for " + report.provenance_unknown + " priced rows"
@@ -805,7 +848,7 @@ tbody tr.new td { animation: flash 900ms ease-out; }
     put(el.subtitle, report.n_requests
       ? report.n_requests + (report.n_requests === 1 ? " request logged, " : " requests logged, ") +
         report.n_priced + " priced, " + report.n_unpriced + " not priced" +
-        provenance + billing + warning
+        provenance + billing + reconciliation + warning
       : "no requests logged yet");
 
     show(el.cardRouted, money(report.actual_total));

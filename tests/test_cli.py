@@ -109,6 +109,7 @@ def log(
     action: str,
     model_used: str = "gpt-4o",
     model_requested: str = "gpt-4o",
+    price_sheet: str | None = None,
 ) -> None:
     store = Store(db)
     store.log_request(
@@ -125,6 +126,8 @@ def log(
         latency_ms=120,
         status="200",
         decision=Decision(action=action, target_model=None, reason="test"),
+        price_sheet=price_sheet,
+        price_simulated=False if price_sheet is not None else None,
     )
     store.close()
 
@@ -157,7 +160,7 @@ def test_report_counts_requests_and_totals_known_costs(
     total = next(x for x in out.splitlines() if x.startswith("total cost:"))
     assert "UNKNOWN" not in total
     assert money(out, "total cost") == pytest.approx(BIG_ON_STRONG + 2 * SMALL_ON_STRONG)
-    assert "billed: UNKNOWN (3 of 3 rows)" in out
+    assert "billed cost: UNKNOWN" in out
     assert "price provenance: provenance unknown (3 of 3 priced rows)" in out
 
 
@@ -455,8 +458,38 @@ def test_report_reconciles_computed_and_provider_cost(tmp_path, capsys) -> None:
     code, out = run(capsys, str(db), write_prices(tmp_path))
 
     assert code == 0
-    assert "computed vs billed: $0.120000 vs $0.100000" in out
-    assert "difference: $0.020000" in out
+    assert "spent (billed by OpenRouter): $0.100000 over 1 of 1 requests" in out
+    assert "computed cost: $0.120000 (computed from list prices (provenance unknown))" in out
+    assert "difference (billed - computed): $-0.020000 over 1 rows" in out
+
+
+def test_report_labels_billed_cost_and_stored_price_sheet(tmp_path, capsys) -> None:
+    """Provider-reported money and stored-sheet arithmetic stay visibly distinct."""
+    db = str(tmp_path / "billed-cost.db")
+    prices = write_prices(tmp_path)
+    log(
+        db,
+        Usage(10, 1, 0, 0, provider_cost_usd=0.10),
+        0.12,
+        "STAY",
+        price_sheet=prices,
+    )
+    log(
+        db,
+        Usage(10, 1, 0, 0, provider_cost_usd=0.0),
+        0.0,
+        "STAY",
+        model_used="free-model",
+        model_requested="free-model",
+        price_sheet=prices,
+    )
+
+    code, out = run(capsys, db, prices)
+
+    assert code == 0
+    assert "spent (billed by OpenRouter): $0.100000 over 2 of 2 requests" in out
+    assert f"computed cost: $0.120000 (computed from list prices ({prices}))" in out
+    assert "difference (billed - computed): $-0.020000 over 2 rows" in out
 
 
 def test_report_fails_cleanly_on_a_sheet_without_a_date(

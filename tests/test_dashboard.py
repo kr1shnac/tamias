@@ -430,7 +430,74 @@ def test_summary_reconciles_provider_cost_on_rows_with_both_values() -> None:
     ]
     report = summary(rows)
     assert report["provider_billed_total"] == pytest.approx(0.10)
-    assert report["provider_difference"] == pytest.approx(0.02)
+    assert report["provider_difference"] == pytest.approx(-0.02)
+
+
+@pytest.mark.parametrize(
+    ("rows", "billed_total", "billed_rows", "difference"),
+    [
+        pytest.param(
+            [
+                {"priced": True, "actual_cost": 0.12, "provider_cost_usd": 0.10},
+                {"priced": True, "actual_cost": 0.20, "provider_cost_usd": 0.20},
+            ],
+            0.30,
+            2,
+            -0.02,
+            id="all-billed",
+        ),
+        pytest.param(
+            [
+                {"priced": True, "actual_cost": 0.12, "provider_cost_usd": 0.10},
+                {"priced": True, "actual_cost": 0.20, "provider_cost_usd": None},
+            ],
+            0.10,
+            1,
+            -0.02,
+            id="partial-billed",
+        ),
+        pytest.param(
+            [
+                {"priced": True, "actual_cost": 0.12, "provider_cost_usd": None},
+                {"priced": True, "actual_cost": 0.20, "provider_cost_usd": None},
+            ],
+            None,
+            0,
+            None,
+            id="no-billed-rows",
+        ),
+        pytest.param(
+            [{"priced": True, "actual_cost": 0.0, "provider_cost_usd": 0.0}],
+            0.0,
+            1,
+            0.0,
+            id="free-model-billed-zero",
+        ),
+    ],
+)
+def test_billed_summary_uses_only_provider_cost(
+    rows: list[dict[str, object]],
+    billed_total: float | None,
+    billed_rows: int,
+    difference: float | None,
+) -> None:
+    """Billed money is provider-reported; list-price arithmetic never fills it in."""
+    report = summary([{"switched": False, "baseline_cost": 0.0, **row} for row in rows])
+
+    assert report["provider_rows"] == billed_rows
+    assert report["provider_missing"] == len(rows) - billed_rows
+    assert report.get("provider_billed_total") == pytest.approx(billed_total)
+    assert report.get("provider_difference") == pytest.approx(difference)
+
+
+def test_dashboard_labels_billed_computed_and_difference() -> None:
+    """The live page exposes the three separate accounting values per request."""
+    from tamias import dashboard
+
+    assert "Billed by OpenRouter" in dashboard.PAGE
+    assert "Computed from list prices" in dashboard.PAGE
+    assert "Difference (billed - computed)" in dashboard.PAGE
+    assert "spent (billed by OpenRouter)" in dashboard.PAGE
 
 
 def test_summary_warns_when_requested_sheet_differs_from_stored() -> None:
