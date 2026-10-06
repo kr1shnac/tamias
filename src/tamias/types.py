@@ -8,7 +8,14 @@ count was zero, and inventing a zero would silently understate cost.
 from dataclasses import dataclass
 from typing import Literal
 
-__all__ = ["Usage", "CostBreakdown", "Decision", "SessionState"]
+__all__ = ["Usage", "CostBreakdown", "Decision", "SessionState", "ToolClass"]
+
+ToolClass = Literal["read", "edit", "shell", "unknown"]
+"""Which family a tool name belongs to.
+
+``unknown`` is also the answer for neutral names (todo, plan, task, think) and
+for anything ambiguous or unrecognised: UNKNOWN never routes.
+"""
 
 
 @dataclass(frozen=True, slots=True)

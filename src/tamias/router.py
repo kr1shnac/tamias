@@ -6,13 +6,65 @@ decision) and active mode (which rewrites ``body["model"]``) therefore always
 agree on what the decision was.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
-from tamias.types import Decision, SessionState
+from tamias.types import Decision, SessionState, ToolClass
 
 EASY_TOOLS: frozenset[str] = frozenset({"shell", "bash", "read", "grep", "ls", "glob"})
 ERROR_MARKERS: tuple[str, ...] = ("Traceback", "FAILED", "error:")
+
+READ_TOKENS: frozenset[str] = frozenset(
+    {"read", "grep", "glob", "ls", "list", "find", "cat", "head", "tail", "search", "view", "stat"}
+)
+EDIT_TOKENS: frozenset[str] = frozenset(
+    {"write", "edit", "patch", "create", "replace", "multiedit", "mkdir"}
+)
+SHELL_TOKENS: frozenset[str] = frozenset(
+    {"bash", "shell", "sh", "run", "exec", "execute", "command", "terminal"}
+)
+NEUTRAL_TOKENS: frozenset[str] = frozenset({"todo", "plan", "task", "think"})
+
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_NAME_SEPARATORS = re.compile(r"[_\-.]+")
+
+
+def _tokens(name: str) -> list[str]:
+    """Split a tool name into lower-case tokens.
+
+    Splits on underscores, hyphens and dots first, then on camelCase
+    boundaries, so ``str_replace_editor`` -> [str, replace, editor] and
+    ``MultiEdit`` -> [multi, edit].
+    """
+    words: list[str] = []
+    for chunk in _NAME_SEPARATORS.split(name):
+        for word in _CAMEL_BOUNDARY.split(chunk):
+            if word:
+                words.append(word.lower())
+    return words
+
+
+def classify_tool(name: str) -> ToolClass:
+    """Classify a tool name into the read, edit or shell family.
+
+    A name carrying a neutral token (todo, plan, task, think) is always
+    ``unknown``, and so is a name that matches two non-neutral families:
+    ``read_shell`` says nothing about which family an agent meant.
+    """
+    tokens = set(_tokens(name))
+    if not tokens or tokens & NEUTRAL_TOKENS:
+        return "unknown"
+    in_read = bool(tokens & READ_TOKENS)
+    in_edit = bool(tokens & EDIT_TOKENS)
+    in_shell = bool(tokens & SHELL_TOKENS)
+    if in_read and not in_edit and not in_shell:
+        return "read"
+    if in_edit and not in_read and not in_shell:
+        return "edit"
+    if in_shell and not in_read and not in_edit:
+        return "shell"
+    return "unknown"
 
 
 @dataclass(frozen=True)
@@ -81,6 +133,18 @@ def _tool_name(messages: list[Any], tool_message: dict[str, Any]) -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _is_easy(tool: str, config: RouterConfig) -> bool:
+    """Whether ``tool`` is cheap mechanical work the cheap model can handle.
+
+    An exact name in ``easy_tools`` always qualifies; otherwise the generic
+    matcher decides, and only the read and shell families route -- edit work
+    and UNKNOWN names are what the strong model is for.
+    """
+    if tool in config.easy_tools:
+        return True
+    return classify_tool(tool) in ("read", "shell")
+
+
 def decide(
     body: dict[str, Any],
     state: SessionState,
@@ -117,7 +181,7 @@ def decide(
 
         # Rule 3: cheap mechanical work.
         tool = _tool_name(messages, last)
-        if tool in config.easy_tools:
+        if tool is not None and _is_easy(tool, config):
             # Hysteresis: while we are already on the cheap model the gap since
             # the last switch is zero, so we stay put until it grows again.
             gap = 0 if state.current_model == config.cheap_model else state.request_index
