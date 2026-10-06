@@ -43,7 +43,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from tamias import anthropic_adapter, pricing, router
+from tamias import anthropic_adapter, pricing, responses_adapter, router
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
 from tamias.store import sanitize_generation_id
@@ -587,5 +587,6 @@ def create_app(
     # client put on app.state above, so both routes share one connection pool
     # and one lifespan.
     anthropic_adapter.register_routes(app, upstream_url, store, sheet, router_mode, config=routing)
+    responses_adapter.register_routes(app, upstream_url, store, sheet)
 
     return app
