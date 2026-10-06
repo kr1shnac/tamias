@@ -637,8 +637,12 @@ def _port_is_free(port: int) -> bool:
 def _serve_router_config(args: argparse.Namespace) -> RouterConfig:
     config = load_router_config(args.router_config, args.router_profile)
     return RouterConfig(
+        profile=config.profile,
         easy_tools=config.easy_tools,
+        edit_tools=config.edit_tools,
+        shell_tools=config.shell_tools,
         error_markers=config.error_markers,
+        big_output_chars=config.big_output_chars,
         cheap_model=args.cheap_model or config.cheap_model,
         strong_model=args.strong_model or config.strong_model,
         min_gap=args.min_gap if args.min_gap is not None else config.min_gap,

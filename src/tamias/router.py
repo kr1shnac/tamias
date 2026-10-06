@@ -6,13 +6,80 @@ decision) and active mode (which rewrites ``body["model"]``) therefore always
 agree on what the decision was.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
-from tamias.types import Decision, SessionState
+from tamias.types import Decision, SessionState, ToolClass
 
 EASY_TOOLS: frozenset[str] = frozenset({"shell", "bash", "read", "grep", "ls", "glob"})
 ERROR_MARKERS: tuple[str, ...] = ("Traceback", "FAILED", "error:")
+
+GENERIC_ERROR_MARKERS: tuple[str, ...] = (
+    "Traceback",
+    "FAILED",
+    "error:",
+    "Exception",
+    "non-zero exit code",
+)
+"""What the generic profile treats as a failed tool result.
+
+The v1 three plus what real tool output prints when it fails.  ``Error:`` is
+deliberately not in the default: ``test_error_markers_are_case_sensitive`` in
+tests/test_router.py pins it as not-a-marker for the default config, so it is
+opt-in through ``RouterConfig(error_markers=...)`` or the TOML key.
+"""
+
+READ_TOKENS: frozenset[str] = frozenset(
+    {"read", "grep", "glob", "ls", "list", "find", "cat", "head", "tail", "search", "view", "stat"}
+)
+EDIT_TOKENS: frozenset[str] = frozenset(
+    {"write", "edit", "patch", "create", "replace", "multiedit", "mkdir"}
+)
+SHELL_TOKENS: frozenset[str] = frozenset(
+    {"bash", "shell", "sh", "run", "exec", "execute", "command", "terminal"}
+)
+NEUTRAL_TOKENS: frozenset[str] = frozenset({"todo", "plan", "task", "think"})
+
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_NAME_SEPARATORS = re.compile(r"[_\-.]+")
+
+
+def _tokens(name: str) -> list[str]:
+    """Split a tool name into lower-case tokens.
+
+    Splits on underscores, hyphens and dots first, then on camelCase
+    boundaries, so ``str_replace_editor`` -> [str, replace, editor] and
+    ``MultiEdit`` -> [multi, edit].
+    """
+    words: list[str] = []
+    for chunk in _NAME_SEPARATORS.split(name):
+        for word in _CAMEL_BOUNDARY.split(chunk):
+            if word:
+                words.append(word.lower())
+    return words
+
+
+def classify_tool(name: str) -> ToolClass:
+    """Classify a tool name into the read, edit or shell family.
+
+    A name carrying a neutral token (todo, plan, task, think) is always
+    ``unknown``, and so is a name that matches two non-neutral families:
+    ``read_shell`` says nothing about which family an agent meant.
+    """
+    tokens = set(_tokens(name))
+    if not tokens or tokens & NEUTRAL_TOKENS:
+        return "unknown"
+    in_read = bool(tokens & READ_TOKENS)
+    in_edit = bool(tokens & EDIT_TOKENS)
+    in_shell = bool(tokens & SHELL_TOKENS)
+    if in_read and not in_edit and not in_shell:
+        return "read"
+    if in_edit and not in_read and not in_shell:
+        return "edit"
+    if in_shell and not in_read and not in_edit:
+        return "shell"
+    return "unknown"
 
 
 @dataclass(frozen=True)
@@ -21,17 +88,41 @@ class RouterConfig:
 
     ``easy_tools`` is normalised to a frozenset so instances stay hashable and
     usable as a ``decide`` default argument.
+
+    ``profile`` selects the matching strategy: ``generic`` (the default)
+    recognises tool names from any agent through :func:`classify_tool`;
+    ``legacy`` is exactly the v1 behaviour, exact-name matching against
+    ``easy_tools`` only.  Any other value is rejected.
+
+    ``edit_tools`` and ``shell_tools`` are extra exact names for those
+    families, ``error_markers`` are the substrings that make a tool result a
+    failure (None means "profile default"), and ``big_output_chars`` caps how
+    large a shell result may be and still be easy (None means no cap).
     """
 
     easy_tools: frozenset[str] = EASY_TOOLS
     cheap_model: str = ""
     strong_model: str = ""
     min_gap: int = 3
-    error_markers: frozenset[str] = frozenset(ERROR_MARKERS)
+    profile: str = "generic"
+    edit_tools: frozenset[str] = frozenset()
+    shell_tools: frozenset[str] = frozenset()
+    error_markers: tuple[str, ...] | None = None
+    big_output_chars: int | None = None
 
     def __post_init__(self) -> None:
+        if self.profile not in ("generic", "legacy"):
+            raise ValueError(
+                f"profile must be 'generic' or 'legacy', got {self.profile!r}"
+            )
         object.__setattr__(self, "easy_tools", frozenset(self.easy_tools))
-        object.__setattr__(self, "error_markers", frozenset(self.error_markers))
+        object.__setattr__(self, "edit_tools", frozenset(self.edit_tools))
+        object.__setattr__(self, "shell_tools", frozenset(self.shell_tools))
+        if self.error_markers is None:
+            default_markers = ERROR_MARKERS if self.profile == "legacy" else GENERIC_ERROR_MARKERS
+            object.__setattr__(self, "error_markers", default_markers)
+        else:
+            object.__setattr__(self, "error_markers", tuple(self.error_markers))
 
 
 DEFAULT_CONFIG = RouterConfig()
@@ -83,6 +174,34 @@ def _tool_name(messages: list[Any], tool_message: dict[str, Any]) -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _tool_class(tool: str, config: RouterConfig) -> ToolClass:
+    """Classify ``tool``, letting the exact-name sets override the matcher.
+
+    ``shell_tools`` and ``edit_tools`` are the operator's way of pinning a
+    name to a family the token matcher cannot see.
+    """
+    if tool in config.shell_tools:
+        return "shell"
+    if tool in config.edit_tools:
+        return "edit"
+    return classify_tool(tool)
+
+
+def _is_easy(tool: str, config: RouterConfig) -> bool:
+    """Whether ``tool`` is cheap mechanical work the cheap model can handle.
+
+    An exact name in ``easy_tools`` always qualifies; under the ``legacy``
+    profile that is the whole rule, exactly as in v1.  Under ``generic`` the
+    matcher decides, and only the read and shell families route -- edit work
+    and UNKNOWN names are what the strong model is for.
+    """
+    if tool in config.easy_tools:
+        return True
+    if config.profile == "legacy":
+        return False
+    return _tool_class(tool, config) in ("read", "shell")
+
+
 def decide(
     body: dict[str, Any],
     state: SessionState,
@@ -94,9 +213,12 @@ def decide(
 
     1. a trailing ``user`` message means the agent is planning -> STAY;
     2. a trailing ``tool`` message carrying an error marker -> STAY;
-    3. a trailing ``tool`` message from an easy tool, with enough requests
-       since the last switch -> SWITCH to ``cheap_model``;
-    4. anything else -> STAY.
+    3. a trailing ``tool`` message whose shell output is over
+       ``config.big_output_chars`` -> STAY;
+    4. a trailing ``tool`` message from an easy tool -- under ``generic`` that
+       is any read- or shell-family name -- with enough requests since the
+       last switch -> SWITCH to ``config.cheap_model``;
+    5. anything else -> STAY.
     """
     messages = body.get("messages")
     if not isinstance(messages, list):
@@ -114,22 +236,36 @@ def decide(
     if role == "tool":
         # Rule 2: a failed tool call is exactly what needs the strong model.
         text = _text_of(last.get("content"))
-        if any(marker in text for marker in config.error_markers):
+        markers = config.error_markers if config.error_markers is not None else ERROR_MARKERS
+        if any(marker in text for marker in markers):
             return _stay("tool error: needs strong model")
 
         # Rule 3: cheap mechanical work.
         tool = _tool_name(messages, last)
-        if tool in config.easy_tools:
-            # Hysteresis: while we are already on the cheap model the gap since
-            # the last switch is zero, so we stay put until it grows again.
-            gap = 0 if state.current_model == config.cheap_model else state.request_index
-            if gap >= config.min_gap:
-                return Decision(
-                    action="SWITCH",
-                    target_model=config.cheap_model,
-                    reason=f"easy tool: {tool}",
+        if tool is not None:
+            tool_class = _tool_class(tool, config)
+            if (
+                tool_class == "shell"
+                and config.big_output_chars is not None
+                and len(text) >= config.big_output_chars
+            ):
+                return _stay(
+                    f"shell output too large: {len(text)} >= {config.big_output_chars} chars"
                 )
-            return _stay(f"hysteresis: {gap} of {config.min_gap} requests since last switch")
+            if _is_easy(tool, config):
+                # Hysteresis: while we are already on the cheap model the gap
+                # since the last switch is zero, so we stay put until it grows
+                # again.
+                gap = 0 if state.current_model == config.cheap_model else state.request_index
+                if gap >= config.min_gap:
+                    return Decision(
+                        action="SWITCH",
+                        target_model=config.cheap_model,
+                        reason=f"easy tool: {tool}",
+                    )
+                return _stay(
+                    f"hysteresis: {gap} of {config.min_gap} requests since last switch"
+                )
 
     # Rule 4: default.
     if isinstance(requested_model, str) and requested_model:

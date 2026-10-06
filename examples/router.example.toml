@@ -1,8 +1,30 @@
-# Router keys: easy_tools, error_markers, cheap_model, strong_model, and min_gap.
-[router]
+# Router configuration for `tamias serve --router-config <this file>`.
+#
+# Flat top-level keys only: the loader rejects an unknown key, a mistyped value
+# and any table, so a typo fails loudly instead of silently doing nothing.
+# Recognised keys: easy_tools, edit_tools, shell_tools, error_markers,
+# big_output_chars, min_gap.
+#
+# `profile` is not a key here on purpose -- it is `--router-profile` on the
+# command line, because the file must not pick the rules used to judge the
+# results it describes. `cheap_model` and `strong_model` are `--cheap-model`
+# and `--strong-model` for the same reason.
+
+# Exact tool names that always count as easy, added to the built-in six.
 easy_tools = ["shell", "bash", "read", "grep", "ls", "glob"]
-# Include "Error:" for agents whose tools return "Error: ..." on failure.
+
+# Substrings that make a tool result a failure, and so a reason to stay on the
+# strong model. Omit it to take the profile's default. Include "Error:" only for
+# agents whose tools return "Error: ..." on failure -- it is deliberately not in
+# either default, because `tests/test_router.py` pins it as not-a-marker.
 error_markers = ["Traceback", "FAILED", "error:", "Error:"]
-cheap_model = "openai/gpt-4.1-mini"
-strong_model = "openai/gpt-4.1"
+
+# Tool names to pin to a family the token matcher cannot see.
+edit_tools = ["format_code"]
+shell_tools = ["npm_run"]
+
+# Shell output at least this many characters long is never "easy".
+big_output_chars = 4096
+
+# Requests that must pass between two switches (hysteresis).
 min_gap = 3
