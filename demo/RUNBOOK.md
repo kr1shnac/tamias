@@ -225,13 +225,16 @@ Read this before quoting any number from this demo.
   "baseline UNKNOWN" as "routing saved money". Compare the arms on
   `model_used` vs `model_requested` and on `decision_action` counts, which are
   directly comparable.
-- **`--effort-policy` is not wired up.** `config.env` has an `EFFORT_POLICY`
+- **`--effort-policy` may not be wired up.** `config.env` has an `EFFORT_POLICY`
   setting and the routed arm passes `--effort-policy "$EFFORT_POLICY"` when it is
-  non-empty — but `tamias serve` on this branch has no such flag, so setting it
-  makes the serve call exit 2 with `unrecognized arguments`. **Leave it empty**
-  until the flag is merged.
-- **`tamias.dashboard` is not on this branch**, so section 5's dashboard commands
-  do not run yet. `tamias report` works on the same files today.
+  non-empty — but if `tamias serve` on this branch has no such flag, setting it
+  makes the serve call exit 2 with `unrecognized arguments`. Check first with
+  `tamias serve --help | grep effort`; **leave `EFFORT_POLICY` empty** unless the
+  flag is listed there.
+- **The dashboard runs on this branch.** Section 5's
+  `tamias dashboard --db … --prices …` (and the equivalent
+  `python -m tamias.dashboard …`) both work. `tamias report` reads the same files
+  without a browser if you would rather stay in the terminal.
 - **A run can still fail for reasons that have nothing to do with routing**: a
   free tier 429, a model id retired from the catalogue, or an agent that runs out
   of its 900 s budget. Read the `status` column before drawing any conclusion
