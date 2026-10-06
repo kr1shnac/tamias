@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
+from tamias.pricing_fetch import DEFAULT_URL, fetch_models, render_sheet
 from tamias.router import EASY_TOOLS, RouterConfig
 from tamias.store import Store
 from tamias.types import Usage
@@ -517,6 +518,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tamias", description="Local chat API proxy.")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    prices_parser = sub.add_parser("prices", help="manage price sheets")
+    prices_sub = prices_parser.add_subparsers(dest="prices_command", required=True)
+    fetch_parser = prices_sub.add_parser("fetch", help="fetch an OpenRouter model price sheet")
+    fetch_parser.add_argument("--out", required=True, help="new TOML price sheet path")
+    fetch_parser.add_argument("--url", default=DEFAULT_URL, help="model-feed URL")
+    fetch_parser.add_argument(
+        "--force", action="store_true", help="overwrite an existing output file"
+    )
+
     serve_parser = sub.add_parser("serve", help="run the proxy in front of an upstream")
     serve_parser.add_argument(
         "--upstream",
@@ -576,6 +586,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "prices" and args.prices_command == "fetch":
+        output = Path(args.out)
+        if output.exists() and not args.force:
+            print(
+                f"tamias prices fetch: refusing to overwrite {output}; pass --force",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            result = fetch_models(args.url)
+            output.write_text(render_sheet(result), encoding="utf-8")
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            print(f"tamias prices fetch: {exc}", file=sys.stderr)
+            return 1
+        skipped = ", ".join(
+            f"{reason}: {count}" for reason, count in sorted(result.skipped.items())
+        )
+        print(f"models: {len(result.models)}")
+        print(f"free: {result.free}")
+        print(f"skipped by reason: {skipped or 'none'}")
+        return 0
     if args.command == "report":
         try:
             report(args.db, args.prices)
