@@ -698,6 +698,14 @@ def run(args: argparse.Namespace) -> int:
         print("tamias run: COMMAND is required after --", file=sys.stderr)
         return 2
 
+    if not Path(args.prices).is_file():
+        print(
+            f"tamias run: price sheet {args.prices} is missing; run "
+            f"`tamias prices fetch --out {args.prices}`",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         db = _reserve_run_db(args.db, args.project)
     except OSError as exc:
@@ -851,8 +859,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--cheap-model", default="")
     run_parser.add_argument("--strong-model", default="")
     run_parser.add_argument("--db", help="new sqlite request log path")
-    run_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
-    run_parser.add_argument("--upstream", required=True, help="OpenAI-compatible upstream base URL")
+    run_parser.add_argument("--prices", default="prices.toml", help="path to the TOML price sheet")
+    run_parser.add_argument(
+        "--upstream", default=DEFAULT_URL, help="OpenAI-compatible upstream base URL"
+    )
     run_parser.add_argument("--router-config", help="TOML router configuration path")
     run_parser.add_argument("child_command", nargs=argparse.REMAINDER, metavar="COMMAND")
 

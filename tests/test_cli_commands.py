@@ -131,6 +131,49 @@ def test_run_reports_a_proxy_start_timeout(monkeypatch, tmp_path: Path, capsys) 
     )
 
 
+def test_run_defaults_prices_and_upstream(monkeypatch, tmp_path: Path) -> None:
+    class NeverStarts:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return self.returncode or 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    (tmp_path / "prices.toml").write_text(
+        'date = "2026-10-06"\n[model]\ninput = 1\noutput = 1\n', encoding="utf-8"
+    )
+    command: list[str] = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "Popen",
+        lambda args, **kwargs: (command.extend(args), NeverStarts())[1],
+    )
+    monkeypatch.setattr(cli, "_wait_for_proxy", lambda *args, **kwargs: False)
+
+    assert cli.main(["run", "--", "fake-child"]) == 1
+    assert command[command.index("--prices") + 1] == "prices.toml"
+    assert command[command.index("--upstream") + 1] == cli.DEFAULT_URL
+
+
+def test_run_explains_how_to_create_a_missing_default_price_sheet(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["run", "--", "fake-child"]) == 1
+    assert "tamias prices fetch --out prices.toml" in capsys.readouterr().err
+
+
 def test_run_reserves_a_new_default_database_without_overwriting(
     monkeypatch, tmp_path: Path
 ) -> None:
