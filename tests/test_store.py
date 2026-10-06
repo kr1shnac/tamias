@@ -295,6 +295,7 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "price_simulated",
         "provider_cost_usd",
         "generation_id",
+        "project",
     )
 
 
