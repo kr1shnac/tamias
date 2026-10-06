@@ -131,47 +131,87 @@ def test_run_reports_a_proxy_start_timeout(monkeypatch, tmp_path: Path, capsys) 
     )
 
 
-def test_run_defaults_prices_and_upstream(monkeypatch, tmp_path: Path) -> None:
-    class NeverStarts:
-        returncode = None
+class _NeverStarts:
+    returncode = None
 
-        def poll(self):
-            return self.returncode
+    def poll(self):
+        return self.returncode
 
-        def terminate(self) -> None:
-            self.returncode = 0
+    def terminate(self) -> None:
+        self.returncode = 0
 
-        def wait(self, timeout: float | None = None) -> int:
-            del timeout
-            return self.returncode or 0
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return self.returncode or 0
 
-        def kill(self) -> None:
-            self.returncode = -9
+    def kill(self) -> None:
+        self.returncode = -9
 
-    (tmp_path / "prices.toml").write_text(
-        'date = "2026-10-06"\n[model]\ninput = 1\noutput = 1\n', encoding="utf-8"
-    )
+
+def _capture_serve_command(monkeypatch) -> list[str]:
+    """Record the serve argv `run` would start and make the proxy never answer."""
     command: list[str] = []
-    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         cli.subprocess,
         "Popen",
-        lambda args, **kwargs: (command.extend(args), NeverStarts())[1],
+        lambda args, **kwargs: (command.extend(args), _NeverStarts())[1],
     )
     monkeypatch.setattr(cli, "_wait_for_proxy", lambda *args, **kwargs: False)
+    return command
+
+
+def _write_prices(directory: Path) -> Path:
+    sheet = directory / "prices.toml"
+    sheet.write_text('date = "2026-10-06"\n[model]\ninput = 1\noutput = 1\n', encoding="utf-8")
+    return sheet
+
+
+def test_run_defaults_prices_and_upstream(monkeypatch, tmp_path: Path) -> None:
+    _write_prices(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TAMIAS_UPSTREAM", raising=False)
+    command = _capture_serve_command(monkeypatch)
 
     assert cli.main(["run", "--", "fake-child"]) == 1
     assert command[command.index("--prices") + 1] == "prices.toml"
-    assert command[command.index("--upstream") + 1] == cli.DEFAULT_URL
+    assert command[command.index("--upstream") + 1] == cli.DEFAULT_UPSTREAM
+
+
+def test_run_upstream_defaults_to_the_tamias_upstream_variable(monkeypatch, tmp_path: Path) -> None:
+    _write_prices(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TAMIAS_UPSTREAM", "https://upstream.example/base")
+    command = _capture_serve_command(monkeypatch)
+
+    assert cli.main(["run", "--", "fake-child"]) == 1
+    assert command[command.index("--upstream") + 1] == "https://upstream.example/base"
+
+
+def test_run_prices_default_falls_back_to_the_home_sheet(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home_sheet = home / ".tamias" / "prices.toml"
+    home_sheet.parent.mkdir(parents=True)
+    _write_prices(home_sheet.parent)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TAMIAS_UPSTREAM", raising=False)
+    command = _capture_serve_command(monkeypatch)
+
+    assert cli.main(["run", "--", "fake-child"]) == 1
+    assert command[command.index("--prices") + 1] == str(home_sheet)
+    assert command[command.index("--upstream") + 1] == cli.DEFAULT_UPSTREAM
 
 
 def test_run_explains_how_to_create_a_missing_default_price_sheet(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "no-home-sheet"))
 
-    assert cli.main(["run", "--", "fake-child"]) == 1
-    assert "tamias prices fetch --out prices.toml" in capsys.readouterr().err
+    assert cli.main(["run", "--", "fake-child"]) == 2
+    assert capsys.readouterr().err.splitlines() == [
+        "no price sheet found; run: tamias prices fetch --out ./prices.toml"
+    ]
 
 
 def test_run_reserves_a_new_default_database_without_overwriting(

@@ -43,6 +43,11 @@ RUN_START_TIMEOUT_SECONDS = 15
 RUN_STOP_TIMEOUT_SECONDS = 5
 DOCTOR_ONLINE_TIMEOUT_SECONDS = 2.0
 PRICE_SHEET_STALE_DAYS = 30
+# Base URL of an OpenAI-compatible upstream, given without /v1/chat/completions,
+# so `run` can default to a real provider when the flag is omitted.
+DEFAULT_UPSTREAM = "https://openrouter.ai/api"
+DEFAULT_PRICES_NAME = "prices.toml"
+UPSTREAM_ENV_VAR = "TAMIAS_UPSTREAM"
 
 # store.Store owns the schema; these are the columns the report reads, with a
 # little tolerance for a renamed table or column.
@@ -689,6 +694,18 @@ def _reserve_run_db(db: str | None, project: str | None) -> str:
         return str(path)
 
 
+def _resolve_prices_path(explicit: str | None) -> Path | None:
+    """The sheet `run` uses: the flag, else ./prices.toml, else ~/.tamias/prices.toml."""
+    if explicit is not None:
+        path = Path(explicit)
+        return path if path.is_file() else None
+    home_sheet = Path.home() / ".tamias" / DEFAULT_PRICES_NAME
+    for candidate in (Path(DEFAULT_PRICES_NAME), home_sheet):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def run(args: argparse.Namespace) -> int:
     """Run one command through a short-lived loopback proxy, then print its report."""
     child_command = args.child_command
@@ -698,13 +715,12 @@ def run(args: argparse.Namespace) -> int:
         print("tamias run: COMMAND is required after --", file=sys.stderr)
         return 2
 
-    if not Path(args.prices).is_file():
-        print(
-            f"tamias run: price sheet {args.prices} is missing; run "
-            f"`tamias prices fetch --out {args.prices}`",
-            file=sys.stderr,
-        )
-        return 1
+    prices_path = _resolve_prices_path(args.prices)
+    if prices_path is None:
+        target = args.prices if args.prices is not None else f"./{DEFAULT_PRICES_NAME}"
+        print(f"no price sheet found; run: tamias prices fetch --out {target}", file=sys.stderr)
+        return 2
+    upstream = args.upstream or os.environ.get(UPSTREAM_ENV_VAR) or DEFAULT_UPSTREAM
 
     try:
         db = _reserve_run_db(args.db, args.project)
@@ -719,9 +735,9 @@ def run(args: argparse.Namespace) -> int:
         "tamias.cli",
         "serve",
         "--upstream",
-        args.upstream,
+        upstream,
         "--prices",
-        args.prices,
+        str(prices_path),
         "--db",
         db,
         "--host",
@@ -782,7 +798,7 @@ def run(args: argparse.Namespace) -> int:
                 child_code = 130
         _stop_proxy(proxy_process)
         try:
-            report(db, args.prices)
+            report(db, str(prices_path))
         except (OSError, ValueError, sqlite3.DatabaseError) as exc:
             print(f"tamias report: {exc}", file=sys.stderr)
         return child_code if child_code >= 0 else 128 - child_code
@@ -859,9 +875,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--cheap-model", default="")
     run_parser.add_argument("--strong-model", default="")
     run_parser.add_argument("--db", help="new sqlite request log path")
-    run_parser.add_argument("--prices", default="prices.toml", help="path to the TOML price sheet")
     run_parser.add_argument(
-        "--upstream", default=DEFAULT_URL, help="OpenAI-compatible upstream base URL"
+        "--prices",
+        default=None,
+        help=f"path to the TOML price sheet (default: ./{DEFAULT_PRICES_NAME}, else "
+        f"~/.tamias/{DEFAULT_PRICES_NAME})",
+    )
+    run_parser.add_argument(
+        "--upstream",
+        default=None,
+        help="base URL of the OpenAI-compatible upstream, without /v1/chat/completions "
+        f"(default: ${UPSTREAM_ENV_VAR} if set, else {DEFAULT_UPSTREAM})",
     )
     run_parser.add_argument("--router-config", help="TOML router configuration path")
     run_parser.add_argument("child_command", nargs=argparse.REMAINDER, metavar="COMMAND")

@@ -27,8 +27,25 @@ short, timed upstream reachability check. It warns for a missing
 Run one agent command through a temporary local proxy with `tamias run`:
 
 ```sh
+tamias run -- your-agent
+```
+
+`--prices` defaults to `./prices.toml` and then `~/.tamias/prices.toml`. If
+neither file exists the run stops with exit code 2 and
+
+```text
+no price sheet found; run: tamias prices fetch --out ./prices.toml
+```
+
+`--upstream` defaults to `$TAMIAS_UPSTREAM` when that variable is set and to
+`https://openrouter.ai/api` otherwise. Both flags still override the defaults:
+
+```sh
 tamias run --prices prices.toml --upstream https://your-provider.example -- your-agent
 ```
+
+As with `tamias serve`, the upstream is a base URL without
+`/v1/chat/completions`. `tamias run --help` prints the same defaults.
 
 Use `tamias agent-config` to print a local configuration snippet for an agent:
 
