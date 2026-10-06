@@ -358,6 +358,21 @@ def test_render_sheet_quotes_ids_that_bare_toml_keys_cannot_hold() -> None:
     assert '["paid/with-cache"]' in rendered
 
 
+def test_render_sheet_keeps_tier_fields_so_the_entry_stays_unknown(tmp_path: Path) -> None:
+    """Dropping a tier field would turn an UNKNOWN into a confident wrong number."""
+    models = {"tiered": ModelPrice(input=3.0, output=15.0, tiers=("tier_200k_input",))}
+    path = tmp_path / "prices.toml"
+    path.write_text(render_sheet(models, FETCHED_AT, SOURCE_URL), encoding="utf-8")
+
+    sheet = load_price_sheet(path)
+    assert sheet.get("tiered").tiers == ("tier_200k_input",)
+    usage = Usage(
+        input_tokens=10_000, output_tokens=2_000, cached_input_tokens=0, cache_write_tokens=0
+    )
+    assert compute_cost("tiered", usage, sheet).usd is None
+    assert "tier_200k_input" in compute_cost("tiered", usage, sheet).formula
+
+
 def test_rendered_free_model_still_costs_nothing_after_the_round_trip(tmp_path: Path) -> None:
     """The zero a free model was rendered with is the zero the arithmetic reads."""
     path = tmp_path / "prices.toml"

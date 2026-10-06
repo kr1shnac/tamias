@@ -1,4 +1,11 @@
-# Example price sheet for tamias.
+# EXAMPLE - NOT CURRENT - run `tamias prices fetch`
+#
+# This file is a hand-written illustration of the price-sheet schema, not a
+# sheet anyone should price a request with: nobody has re-checked these rates
+# against a provider since the `date` below.  For a current sheet, with its
+# provenance attached, run:
+#
+#   tamias prices fetch
 #
 # Every rate is USD per 1,000,000 tokens, as published by the provider on
 # `date` below.  A rate of 0 means the model really is free.  A rate left out

@@ -204,6 +204,11 @@ def render_sheet(models: dict[str, ModelPrice], fetched_at: str, source_url: str
             value = getattr(price, name)
             if value is not None:
                 lines.append(f"{name} = {float(value)!r}")
+        # Tier fields are written back out rather than dropped: losing one
+        # would turn an entry that prices as UNKNOWN into an entry that prices
+        # confidently at its base rate.  The value is a marker, not a price.
+        for tier in price.tiers:
+            lines.append(f"{_string(tier)} = {_string('unsupported')}")
     return "\n".join(lines) + "\n"
 
 
