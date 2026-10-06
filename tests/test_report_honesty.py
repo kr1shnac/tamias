@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 from tamias.cli import main
 from tamias.store import Store
 from tamias.types import CostBreakdown, Decision, Usage
@@ -24,7 +22,9 @@ def _log_simulated(
         session_id="s1",
         model_requested="gpt-4o",
         model_used="gpt-4o",
-        usage=Usage(input_tokens=100, output_tokens=50, cached_input_tokens=0, cache_write_tokens=None),
+        usage=Usage(
+            input_tokens=100, output_tokens=50, cached_input_tokens=0, cache_write_tokens=None
+        ),
         cost=CostBreakdown(usd=cost, formula="test", price_sheet_date=SHEET_DATE),
         latency_ms=120,
         status="200",
@@ -45,7 +45,9 @@ def _log_legacy(
         session_id="s1",
         model_requested="gpt-4o",
         model_used="gpt-4o",
-        usage=Usage(input_tokens=100, output_tokens=50, cached_input_tokens=0, cache_write_tokens=None),
+        usage=Usage(
+            input_tokens=100, output_tokens=50, cached_input_tokens=0, cache_write_tokens=None
+        ),
         cost=CostBreakdown(usd=cost, formula="test", price_sheet_date=SHEET_DATE),
         latency_ms=120,
         status="200",
@@ -68,7 +70,9 @@ def _log_real_priced_with_stored_sheet(
         session_id="s1",
         model_requested="gpt-4o",
         model_used="gpt-4o",
-        usage=Usage(input_tokens=100, output_tokens=50, cached_input_tokens=0, cache_write_tokens=None),
+        usage=Usage(
+            input_tokens=100, output_tokens=50, cached_input_tokens=0, cache_write_tokens=None
+        ),
         cost=CostBreakdown(usd=cost, formula="test", price_sheet_date=SHEET_DATE),
         latency_ms=120,
         status="200",
@@ -77,6 +81,7 @@ def _log_real_priced_with_stored_sheet(
         price_simulated=simulated,
     )
     store.close()
+
 
 def write_prices(tmp_path: Path, sheet_text: str) -> str:
     p = tmp_path / "prices.toml"
@@ -92,7 +97,9 @@ def run(capsys, db: str, prices: str):
 def test_simulated_rows_with_real_sheet_has_no_bare_total_cost(tmp_path, capsys):
     db = str(tmp_path / "log.db")
     _log_simulated(db, 0.01, price_sheet="prices.openrouter-sim.toml", simulated=True)
-    real_prices = write_prices(tmp_path, """
+    real_prices = write_prices(
+        tmp_path,
+        """
 simulated = false
 date = "2026-01-05"
 
@@ -100,7 +107,8 @@ date = "2026-01-05"
 input = 2.5e-6
 output = 10e-6
 cached_input = 1.25e-6
-""")
+""",
+    )
     code, out = run(capsys, db, real_prices)
     assert code == 0
     for line in out.splitlines():
@@ -112,7 +120,9 @@ cached_input = 1.25e-6
 def test_legacy_rows_have_no_bare_total_cost(tmp_path, capsys):
     db = str(tmp_path / "log.db")
     _log_legacy(db, 0.01)
-    prices = write_prices(tmp_path, """
+    prices = write_prices(
+        tmp_path,
+        """
 simulated = false
 date = "2026-01-05"
 
@@ -120,7 +130,8 @@ date = "2026-01-05"
 input = 2.5e-6
 output = 10e-6
 cached_input = 1.25e-6
-""")
+""",
+    )
     code, out = run(capsys, db, prices)
     assert code == 0
     for line in out.splitlines():
@@ -131,8 +142,12 @@ cached_input = 1.25e-6
 
 def test_real_priced_row_with_stored_sheet_has_no_bare_total_cost(tmp_path, capsys):
     db = str(tmp_path / "log.db")
-    _log_real_priced_with_stored_sheet(db, 0.01, price_sheet="prices.openrouter.toml", simulated=False)
-    prices = write_prices(tmp_path, """
+    _log_real_priced_with_stored_sheet(
+        db, 0.01, price_sheet="prices.openrouter.toml", simulated=False
+    )
+    prices = write_prices(
+        tmp_path,
+        """
 simulated = false
 date = "2026-01-05"
 
@@ -140,7 +155,8 @@ date = "2026-01-05"
 input = 2.5e-6
 output = 10e-6
 cached_input = 1.25e-6
-""")
+""",
+    )
     code, out = run(capsys, db, prices)
     assert code == 0
     for line in out.splitlines():
@@ -152,7 +168,9 @@ cached_input = 1.25e-6
 def test_mutation_bare_total_cost_would_fail(tmp_path, capsys):
     db = str(tmp_path / "log.db")
     _log_simulated(db, 0.01, price_sheet="prices.openrouter-sim.toml", simulated=True)
-    real_prices = write_prices(tmp_path, """
+    real_prices = write_prices(
+        tmp_path,
+        """
 simulated = false
 date = "2026-01-05"
 
@@ -160,8 +178,9 @@ date = "2026-01-05"
 input = 2.5e-6
 output = 10e-6
 cached_input = 1.25e-6
-""")
+""",
+    )
     code, out = run(capsys, db, real_prices)
     assert code == 0
-    bad = [l for l in out.splitlines() if re.match(r'^total cost:\s*\$\d', l)]
+    bad = [line for line in out.splitlines() if re.match(r"^total cost:\s*\$\d", line)]
     assert not bad, f"Found bad bare total cost: {bad}"

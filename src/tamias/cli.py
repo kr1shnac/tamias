@@ -360,10 +360,16 @@ def report(db_path: str, prices_path: str) -> None:
         and stored_sheets
         and str(prices_path) not in stored_sheets
     )
+    # Both saving lines print UNKNOWN here rather than an amount, so this is
+    # the one place the simulated banner can still be lost.  Put the warning
+    # back on the line: the banner when the rows declare simulated prices, and
+    # the provenance wording when the log cannot say which sheet priced them.
+    bases_warning = suffix or "  [price provenance unknown]"
     if bases_differ:
         print(
             "estimated saving: UNKNOWN "
             "(stored costs and the --prices sheet use different price bases)"
+            f"{bases_warning}"
         )
     elif switched and not with_counts:
         print(f"estimated saving: UNKNOWN (0 of {len(rows)} requests have token counts){suffix}")
@@ -384,6 +390,7 @@ def report(db_path: str, prices_path: str) -> None:
         line1 = (
             "realised saving: UNKNOWN "
             "(stored costs and the --prices sheet use different price bases)"
+            f"{bases_warning}"
         )
     elif realised_count > 0 or realised_unpriced > 0:
         if realised_count > 0:

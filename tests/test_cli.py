@@ -160,7 +160,9 @@ def test_report_counts_requests_and_totals_known_costs(
     # UNKNOWN is still the honest word on the lines whose data is genuinely
     # missing: these rows predate provenance, and no provider ever reported a
     # billed cost for them.
-    total = next(x for x in out.splitlines() if x.startswith("total cost:") or x.startswith("total cost ("))
+    total = next(
+        x for x in out.splitlines() if x.startswith("total cost:") or x.startswith("total cost (")
+    )
     assert "UNKNOWN" not in total
     assert money(out, "total cost") == pytest.approx(BIG_ON_STRONG + 2 * SMALL_ON_STRONG)
     assert "billed cost: UNKNOWN" in out
@@ -440,6 +442,74 @@ def test_report_uses_row_provenance_not_the_requested_sheet(tmp_path, capsys) ->
     assert "simulated-prices.toml" in out
 
 
+def test_report_keeps_the_simulated_warning_on_both_saving_lines(tmp_path, capsys) -> None:
+    """Both saving lines print UNKNOWN here, and both still name the banner."""
+    db = tmp_path / "simulated-savings.db"
+    store = Store(db)
+    try:
+        store.log_request(
+            "2026-10-04T00:00:00Z",
+            "session",
+            "gpt-4o",
+            "gpt-4o",
+            Usage(10, 10, 0, 0),
+            CostBreakdown(usd=0.123, formula="test", price_sheet_date=SHEET_DATE),
+            1,
+            "200",
+            Decision("STAY", None, "test"),
+            price_sheet="simulated-prices.toml",
+            price_simulated=True,
+        )
+    finally:
+        store.close()
+
+    code, out = run(
+        capsys, str(db), str(Path(__file__).resolve().parents[1] / "prices.openrouter.toml")
+    )
+
+    assert code == 0
+    banner = "SIMULATED PRICES, NOT REAL SAVINGS"
+    estimated = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
+    realised = next(x for x in out.splitlines() if x.startswith("realised saving"))
+    assert banner in estimated, f"estimated saving lost the banner:\n{estimated}"
+    assert banner in realised, f"realised saving lost the banner:\n{realised}"
+
+
+def test_report_keeps_the_provenance_warning_on_both_saving_lines(tmp_path, capsys) -> None:
+    """A log that cannot say which sheet priced a row says so on the savings."""
+    db = tmp_path / "unknown-provenance.db"
+    store = Store(db)
+    try:
+        store.log_request(
+            "2026-10-04T00:00:00Z",
+            "session",
+            "gpt-4o",
+            "gpt-4o",
+            Usage(10, 10, 0, 0),
+            CostBreakdown(usd=0.123, formula="test", price_sheet_date=SHEET_DATE),
+            1,
+            "200",
+            Decision("STAY", None, "test"),
+            price_sheet="mystery-prices.toml",
+        )
+    finally:
+        store.close()
+
+    code, out = run(
+        capsys, str(db), str(Path(__file__).resolve().parents[1] / "prices.openrouter.toml")
+    )
+
+    assert code == 0
+    warning = "[price provenance unknown]"
+    estimated = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
+    realised = next(x for x in out.splitlines() if x.startswith("realised saving"))
+    assert warning in estimated, f"estimated saving lost the warning:\n{estimated}"
+    assert warning in realised, f"realised saving lost the warning:\n{realised}"
+    # The simulated banner is not a substitute: this row never declared it.
+    assert "SIMULATED PRICES, NOT REAL SAVINGS" not in estimated
+    assert "SIMULATED PRICES, NOT REAL SAVINGS" not in realised
+
+
 def test_report_reconciles_computed_and_provider_cost(tmp_path, capsys) -> None:
     db = tmp_path / "provider-cost.db"
     store = Store(db)
@@ -541,10 +611,18 @@ def test_report_marks_every_cost_line_when_the_sheet_is_simulated_LEGACY(
     code, out = run(capsys, db, prices)
 
     assert code == 0
-    cost_lines = [x for x in out.splitlines() if (x.startswith("total cost:") or x.startswith("total cost (") or x.startswith("estimated saving:"))]
+    cost_lines = [
+        x
+        for x in out.splitlines()
+        if (
+            x.startswith("total cost:")
+            or x.startswith("total cost (")
+            or x.startswith("estimated saving:")
+        )
+    ]
     assert len(cost_lines) == 2
     # New behavior: total cost has provenance inline; other lines may retain legacy banners
-        # assert all("SIMULATED PRICES, NOT REAL SAVINGS" in x for x in cost_lines)
+    # assert all("SIMULATED PRICES, NOT REAL SAVINGS" in x for x in cost_lines)
     # The banner labels the figures; it does not change what they are.
     assert money(out, "total cost") == pytest.approx(BIG_ON_STRONG, abs=1e-6)
     assert money(out, "estimated saving") == pytest.approx(BIG_SAVING, abs=1e-6)
@@ -561,7 +639,9 @@ def test_report_marks_the_unknown_total_line_when_simulated_LEGACY(
     code, out = run(capsys, db, write_prices(tmp_path, SIMULATED_TABLE))
 
     assert code == 0
-    total = next(x for x in out.splitlines() if x.startswith("total cost:") or x.startswith("total cost ("))
+    total = next(
+        x for x in out.splitlines() if x.startswith("total cost:") or x.startswith("total cost (")
+    )
     assert "UNKNOWN" in total
     assert "1 of 2 requests have unknown cost" in total
     # New behavior per requirements

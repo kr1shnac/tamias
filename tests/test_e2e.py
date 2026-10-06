@@ -294,7 +294,10 @@ def test_report_totals_the_session(
     assert f"requests: {REQUESTS}" in out
     assert f"requests shadow would have switched: {len(EXPECTED_SWITCHES)}" in out
     assert f"cheap model assumed: {CHEAP}" in out
-    assert f"sheet passed on the command line (used only for savings estimates): {prices_path} ({SHEET_DATE})" in out
+    assert (
+        "sheet passed on the command line (used only for savings estimates): "
+        f"{prices_path} ({SHEET_DATE})" in out
+    )
 
 
 def test_report_calls_the_total_unknown_because_no_cost_is_known(
