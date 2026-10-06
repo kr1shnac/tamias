@@ -111,13 +111,28 @@ def upstream() -> FastAPI:
                 yield b"data: {"
 
             return StreamingResponse(truncated(), media_type="text/event-stream")
+        if body.get("stream") == "no_completed":
+            async def unfinished() -> AsyncIterator[bytes]:
+                yield sse(
+                    "response.in_progress",
+                    {"type": "response.in_progress", "response": {"usage": {"output_tokens": 999}}},
+                )
+
+            return StreamingResponse(unfinished(), media_type="text/event-stream")
         if body.get("stream"):
             async def stream() -> AsyncIterator[bytes]:
                 yield sse("response.created", {"response": {"id": "resp-stream", "model": model}})
+                yield sse(
+                    "response.in_progress",
+                    {"type": "response.in_progress", "response": {"usage": {"output_tokens": 999}}},
+                )
                 yield sse("response.output_text.delta", {"delta": "hello"})
                 yield sse(
                     "response.completed",
-                    {"response": {"id": "resp-stream", "model": model, "usage": usage()}},
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp-stream", "model": model, "usage": usage()},
+                    },
                 )
 
             return StreamingResponse(stream(), media_type="text/event-stream")
@@ -170,10 +185,17 @@ async def test_stream_relays_bytes_in_order_and_uses_response_completed(
     expected = b"".join(
         [
             sse("response.created", {"response": {"id": "resp-stream", "model": MODEL}}),
+            sse(
+                "response.in_progress",
+                {"type": "response.in_progress", "response": {"usage": {"output_tokens": 999}}},
+            ),
             sse("response.output_text.delta", {"delta": "hello"}),
             sse(
                 "response.completed",
-                {"response": {"id": "resp-stream", "model": MODEL, "usage": usage()}},
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp-stream", "model": MODEL, "usage": usage()},
+                },
             ),
         ]
     )
@@ -194,6 +216,18 @@ async def test_truncated_stream_logs_unknown_usage(
 
     assert response.status_code == 200
     assert received.endswith(b"data: {")
+    assert store.last["usage"] == Usage(None, None, None, None)
+
+
+async def test_stream_without_response_completed_logs_unknown_usage(
+    client: httpx.AsyncClient, store: FakeStore
+) -> None:
+    async with client.stream(
+        "POST", "/v1/responses", content=body(stream="no_completed")
+    ) as response:
+        _ = b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    assert response.status_code == 200
     assert store.last["usage"] == Usage(None, None, None, None)
 
 

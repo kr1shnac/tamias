@@ -175,7 +175,7 @@ def register_routes(
                 model_used = response["model"]
             if isinstance(response.get("id"), str):
                 generation_id = response["id"]
-            if response.get("usage") is not None:
+            if payload.get("type") == "response.completed" and response.get("usage") is not None:
                 completed_usage = response["usage"]
 
         try:
