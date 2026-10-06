@@ -77,6 +77,7 @@ DATA_PREFIX = b"data:"
 __all__ = [
     "AnthropicStreamUsage",
     "MESSAGES_PATH",
+    "cost_for_anthropic",
     "forward_headers",
     "register_routes",
     "usage_from_anthropic",
@@ -146,6 +147,27 @@ def usage_from_anthropic(raw: Any) -> Usage:
         cached_input_tokens=reads,
         cache_write_tokens=writes,
         cache_write_1h_tokens=one_hour,
+    )
+
+
+def cost_for_anthropic(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
+    """Price Anthropic cache usage only when its separate rates are quoted."""
+    cost = pricing.compute_cost(model, usage, sheet)
+    price = sheet.get(model)
+    if price is None:
+        return cost
+
+    missing_rates: list[str] = []
+    if usage.cached_input_tokens not in (None, 0) and price.cached_input is None:
+        missing_rates.append("cached_input_rate")
+    if usage.cache_write_tokens not in (None, 0) and price.cache_write is None:
+        missing_rates.append("cache_write_rate")
+    if not missing_rates:
+        return cost
+    return CostBreakdown(
+        usd=None,
+        formula=f"{cost.formula}; unknown: {', '.join(missing_rates)}",
+        price_sheet_date=sheet.date,
     )
 
 
@@ -389,7 +411,7 @@ def register_routes(
         status: int,
         decision: Decision,
     ) -> None:
-        cost = pricing.compute_cost(model_used, usage, sheet)
+        cost = cost_for_anthropic(model_used, usage, sheet)
         store.log_request(
             datetime.now(UTC).isoformat(timespec="milliseconds"),
             session_id,

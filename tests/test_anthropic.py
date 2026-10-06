@@ -308,7 +308,7 @@ def test_stream_collector_ignores_anything_that_is_not_a_data_frame() -> None:
 
 
 def test_cost_of_the_total_prompt(sheet: PriceSheet) -> None:
-    cost = pricing.compute_cost(MODEL_CACHED, FULL_USAGE, sheet)
+    cost = anthropic_adapter.cost_for_anthropic(MODEL_CACHED, FULL_USAGE, sheet)
 
     # The total is what makes this arithmetic possible: 100 uncached input at 3.0,
     # 800 cached reads at 0.3, 60 5m writes and 40 1h writes at 3.75, and 42
@@ -319,6 +319,18 @@ def test_cost_of_the_total_prompt(sheet: PriceSheet) -> None:
     assert "cached_input 800" in cost.formula
     assert "1h_writes 40" in cost.formula
     assert cost.price_sheet_date == "2026-10-04"
+
+
+@pytest.mark.parametrize("missing_rate", ["cached_input", "cache_write"])
+def test_cache_usage_without_a_cache_rate_is_unknown(missing_rate: str) -> None:
+    prices = {"input": 3.0, "output": 15.0, "cached_input": 0.3, "cache_write": 3.75}
+    prices[missing_rate] = None
+    sheet = PriceSheet(date="2026-10-06", models={MODEL_CACHED: ModelPrice(**prices)})
+
+    cost = anthropic_adapter.cost_for_anthropic(MODEL_CACHED, FULL_USAGE, sheet)
+
+    assert cost.usd is None
+    assert missing_rate + "_rate" in cost.formula
 
 
 async def test_body_forwarded_byte_identical(client: httpx.AsyncClient, store: FakeStore) -> None:
@@ -440,7 +452,7 @@ async def test_stream_usage_and_cost_are_logged(
     assert row["model_requested"] == row["model_used"] == MODEL_CACHED
     assert row["status"] == "200"
     assert row["latency_ms"] >= 0
-    assert row["cost"] == pricing.compute_cost(MODEL_CACHED, FULL_USAGE, sheet)
+    assert row["cost"] == anthropic_adapter.cost_for_anthropic(MODEL_CACHED, FULL_USAGE, sheet)
     assert row["cost"].usd == pytest.approx(0.001545)
 
 
