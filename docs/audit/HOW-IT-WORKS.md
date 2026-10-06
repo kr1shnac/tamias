@@ -32,7 +32,7 @@
 | **Router**              | `router.decide(body, state, config)`     | Pure function: reads body + session state, returns `Decision(action, target_model, reason)`. Never mutates body. Rules: user turn → STAY, tool error → STAY, easy tool after hysteresis → SWITCH, default → STAY. |
 | **Proxy**               | `proxy.create_app(upstream, store, sheet, mode)` | Creates FastAPI app. Registers `/v1/chat/completions` and `/v1/matches` routes. In shadow mode: records decision, forwards body unchanged. In active mode: rewrites `model` on SWITCH. In off mode: disables router. |
 | **Forward / Relay**     | `forward_headers(request)`, `outbound(raw, body, decision)` | Forwards headers hop-by-hop-free. `outbound()`: shadow returns raw bytes unchanged; active mode rewrites `model`; `--inject-usage` adds `stream_options.include_usage=true`. |
-| **Store**               | `store.log_request(ts, session_id, ...)`   | Appends one row per request to SQLite. Columns: `ts, session_id, model_requested, model_used, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cost_usd, price_sheet_date, latency_ms, status, decision_action, decision_target_model, decision_reason`. NULL = UNKNOWN, never 0. |
+| **Store**               | `store.log_request(ts, session_id, ...)`   | Appends one row per request to SQLite. Columns: `ts, session_id, model_requested, model_used, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cost_usd, price_sheet_date, latency_ms, status, decision_action, decision_target_model, decision_reason, price_sheet, price_simulated, provider_cost_usd, generation_id, project`. NULL = UNKNOWN, never 0. |
 | **Pricing**             | `pricing.compute_cost(model, usage, sheet)` | Arithmetic: (uncached*input + cached*cached_input + 5m_writes*cache_write + 1h_writes*cache_write_1h + output*output) / 1_000_000. usd=None if model missing or needed field is None. A rate of 0 is free; omitted is UNKNOWN. |
 | **CLI: `tamias serve`** | `cli.serve(args)`                         | Starts uvicorn on `--host` (default 127.0.0.1): `--upstream`, `--prices`, `--db`, `--port`, `--router-mode {shadow,active,off}`, `--cheap-model`, `--strong-model`, `--min-gap`, `--inject-usage`, `--verbose`. |
 | **CLI: `tamias report`**| `cli.report(db_path, prices_path)`        | Reads SQLite log read-only. Prints: request count, total cost (KNOWN/UNKNOWN), realised saving (active SWITCH rows), hypothetical saving (shadow SWITCH rows), switch count, cheap model assumed, price sheet path/date. |
@@ -58,6 +58,11 @@ table: requests
   decision_action TEXT NOT NULL -- "STAY" or "SWITCH"
   decision_target_model TEXT   -- NULL for STAY, model id for SWITCH
   decision_reason TEXT NOT NULL
+  price_sheet TEXT              -- path of the sheet that priced the row
+  price_simulated INTEGER       -- 1 when the sheet is a simulated one
+  provider_cost_usd REAL        -- NULL when the provider reported no cost
+  generation_id TEXT            -- provider generation, NULL when not reported
+  project TEXT                  -- NULL when the run had no --project
 ```
 
 ## CLI Commands
