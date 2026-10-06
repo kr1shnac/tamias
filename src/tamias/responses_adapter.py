@@ -39,7 +39,8 @@ HOP_BY_HOP = frozenset(
         "upgrade",
     }
 )
-DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding"}
+PROJECT_HEADER = "x-tamias-project"
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER}
 
 
 class RequestLog(Protocol):
@@ -58,6 +59,7 @@ class RequestLog(Protocol):
         price_sheet: str | None = None,
         price_simulated: bool | None = None,
         generation_id: object = None,
+        project: object = None,
     ) -> int: ...
 
 
@@ -142,6 +144,7 @@ def register_routes(
         started: float,
         status: int,
         generation_id: object = None,
+        project: object = None,
     ) -> None:
         store.log_request(
             datetime.now(UTC).isoformat(timespec="milliseconds"),
@@ -156,10 +159,15 @@ def register_routes(
             price_sheet=sheet.source,
             price_simulated=sheet.simulated,
             generation_id=generation_id,
+            project=project,
         )
 
     async def stream_response(
-        upstream: httpx.Response, session_id: str, model_requested: str, started: float
+        upstream: httpx.Response,
+        session_id: str,
+        model_requested: str,
+        started: float,
+        project: object,
     ) -> AsyncIterator[bytes]:
         model_used: Any = None
         completed_usage: Any = None
@@ -200,6 +208,7 @@ def register_routes(
                 started,
                 upstream.status_code,
                 generation_id,
+                project,
             )
 
     @app.post(RESPONSES_PATH)
@@ -234,6 +243,7 @@ def register_routes(
                 started,
                 upstream.status_code,
                 details.get("id"),
+                getattr(request.state, "project", None),
             )
             return Response(
                 content=upstream.content,
@@ -243,7 +253,13 @@ def register_routes(
 
         upstream = await client.send(outgoing, stream=True)
         return StreamingResponse(
-            stream_response(upstream, session_id, model_requested, started),
+            stream_response(
+                upstream,
+                session_id,
+                model_requested,
+                started,
+                getattr(request.state, "project", None),
+            ),
             status_code=upstream.status_code,
             headers=forward_response_headers(upstream.headers),
         )

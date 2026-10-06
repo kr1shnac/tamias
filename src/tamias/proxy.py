@@ -513,6 +513,7 @@ def create_app(
                     started,
                     500,
                     decision,
+                    project=request.state.project,
                 )
                 advance(session_id, model_used)
                 return JSONResponse(

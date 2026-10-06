@@ -70,7 +70,8 @@ HOP_BY_HOP = frozenset(
         "upgrade",
     }
 )
-DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding"}
+PROJECT_HEADER = "x-tamias-project"
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER}
 
 DATA_PREFIX = b"data:"
 
@@ -101,6 +102,7 @@ class RequestLog(Protocol):
         *,
         price_sheet: str | None = None,
         price_simulated: bool | None = None,
+        project: object = None,
     ) -> int: ...
 
 
@@ -411,6 +413,7 @@ def register_routes(
         started: float,
         status: int,
         decision: Decision,
+        project: object = None,
     ) -> None:
         cost = cost_for_anthropic(model_used, usage, sheet)
         store.log_request(
@@ -425,6 +428,7 @@ def register_routes(
             decision,
             price_sheet=sheet.source,
             price_simulated=sheet.simulated,
+            project=project,
         )
 
     async def _stream_messages(
@@ -433,6 +437,7 @@ def register_routes(
         model_requested: str,
         decision: Decision,
         started: float,
+        project: object,
     ) -> AsyncIterator[bytes]:
         collector = AnthropicStreamUsage()
         try:
@@ -450,6 +455,7 @@ def register_routes(
                 started,
                 upstream.status_code,
                 decision,
+                project,
             )
             advance(session_id, model_used)
 
@@ -492,6 +498,7 @@ def register_routes(
                 started,
                 upstream.status_code,
                 decision,
+                getattr(request.state, "project", None),
             )
             advance(session_id, model_used)
             return Response(
@@ -502,7 +509,14 @@ def register_routes(
 
         upstream = await client.send(outgoing, stream=True)
         return StreamingResponse(
-            _stream_messages(upstream, session_id, model_requested, decision, started),
+            _stream_messages(
+                upstream,
+                session_id,
+                model_requested,
+                decision,
+                started,
+                getattr(request.state, "project", None),
+            ),
             status_code=upstream.status_code,
             headers=forward_response_headers(upstream.headers),
         )
