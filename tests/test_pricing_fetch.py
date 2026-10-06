@@ -7,13 +7,27 @@ tested without fetching anything.
 
 from __future__ import annotations
 
+import io
+import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
-from tamias.pricing_fetch import ParseResult, parse_models
+from tamias.pricing import ModelPrice, compute_cost, load_price_sheet
+from tamias.pricing_fetch import (
+    OPENROUTER_MODELS_URL,
+    ParseResult,
+    fetch_models,
+    parse_models,
+    render_sheet,
+)
+from tamias.types import Usage
 
 PER_MILLION = Decimal(1_000_000)
+
+FETCHED_AT = "2026-10-06T12:00:00Z"
+SOURCE_URL = "https://openrouter.ai/api/v1/models"
 
 
 def ids(result: ParseResult) -> list[str]:
@@ -242,3 +256,154 @@ def test_a_payload_without_a_data_list_is_rejected_outright() -> None:
         parse_models({})
     with pytest.raises(ValueError):
         parse_models([{"id": "x"}])
+
+
+# --- rendering a sheet --------------------------------------------------------
+
+CATALOGUE = {
+    "data": [
+        {
+            "id": "paid/with-cache",
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000002",
+                "input_cache_read": "0.0000001",
+                "input_cache_write": "0.00000125",
+            },
+        },
+        {"id": "zzz/free-model", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "paid/plain", "pricing": {"prompt": "0.000003", "completion": "0.000015"}},
+    ]
+}
+
+
+def catalogue_models() -> dict[str, ModelPrice]:
+    return parse_models(CATALOGUE).models
+
+
+def model_block(rendered: str, model_id: str) -> str:
+    """The lines of one model's table, without the ones that follow it."""
+    tail = rendered.split(f'["{model_id}"]', 1)[1]
+    return tail.split("\n\n[", 1)[0]
+
+
+def test_render_sheet_round_trips_through_the_existing_loader(tmp_path: Path) -> None:
+    """What the fetcher renders is a sheet the shipped loader can read back."""
+    rendered = render_sheet(catalogue_models(), FETCHED_AT, SOURCE_URL)
+    path = tmp_path / "prices.toml"
+    path.write_text(rendered, encoding="utf-8")
+
+    sheet = load_price_sheet(path)
+    assert sheet.date == "2026-10-06"
+    assert sheet.simulated is False
+    assert sheet.provenance == {
+        "source": "openrouter-models-api",
+        "url": SOURCE_URL,
+        "fetched_at": FETCHED_AT,
+    }
+
+    assert set(sheet.models) == {"paid/with-cache", "paid/plain", "zzz/free-model"}
+    with_cache = sheet.get("paid/with-cache")
+    assert (with_cache.input, with_cache.output) == (1.0, 2.0)
+    assert (with_cache.cached_input, with_cache.cache_write) == (0.1, 1.25)
+    # The catalogue has no 1h write rate, so the sheet quotes none and the
+    # loader falls back to the ordinary write rate.
+    assert with_cache.cache_write_1h == with_cache.cache_write
+
+    plain = sheet.get("paid/plain")
+    assert (plain.input, plain.output) == (3.0, 15.0)
+    assert plain.cached_input is None
+    assert plain.cache_write is None
+
+    free = sheet.get("zzz/free-model")
+    assert (free.input, free.output, free.cached_input, free.cache_write) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_render_sheet_is_deterministic_and_sorted_by_model_id() -> None:
+    """The same catalogue renders byte for byte the same sheet, in id order."""
+    models = catalogue_models()
+    shuffled = dict(reversed(list(models.items())))
+    first = render_sheet(models, FETCHED_AT, SOURCE_URL)
+    second = render_sheet(shuffled, FETCHED_AT, SOURCE_URL)
+    assert first == second
+    positions = [first.index(f'["{model_id}"') for model_id in sorted(models)]
+    assert positions == sorted(positions)
+
+
+def test_render_sheet_labels_the_sheet_with_its_provenance_and_flags() -> None:
+    """A fetched sheet says where it came from and that it is not simulated."""
+    rendered = render_sheet(catalogue_models(), FETCHED_AT, SOURCE_URL)
+    assert "simulated = false" in rendered
+    assert 'source = "openrouter-models-api"' in rendered
+    assert f'url = "{SOURCE_URL}"' in rendered
+    assert f'fetched_at = "{FETCHED_AT}"' in rendered
+    assert 'date = "2026-10-06"' in rendered
+    assert "EXAMPLE" not in rendered
+
+
+def test_render_sheet_omits_unpublished_cache_rates_and_keeps_free_zeros() -> None:
+    """Absence survives the round trip: no price, no line, never a zero."""
+    rendered = render_sheet(catalogue_models(), FETCHED_AT, SOURCE_URL)
+    plain_block = model_block(rendered, "paid/plain")
+    assert "cached_input" not in plain_block
+    assert "cache_write" not in plain_block
+    free_block = model_block(rendered, "zzz/free-model")
+    assert "cached_input = 0.0" in free_block
+    assert "cache_write = 0.0" in free_block
+
+
+def test_render_sheet_quotes_ids_that_bare_toml_keys_cannot_hold() -> None:
+    """Model ids carry '/' and ':', so the table names must be quoted."""
+    rendered = render_sheet(catalogue_models(), FETCHED_AT, SOURCE_URL)
+    assert '["paid/with-cache"]' in rendered
+
+
+def test_rendered_free_model_still_costs_nothing_after_the_round_trip(tmp_path: Path) -> None:
+    """The zero a free model was rendered with is the zero the arithmetic reads."""
+    path = tmp_path / "prices.toml"
+    path.write_text(render_sheet(catalogue_models(), FETCHED_AT, SOURCE_URL), encoding="utf-8")
+    sheet = load_price_sheet(path)
+    usage = Usage(
+        input_tokens=None,
+        output_tokens=None,
+        cached_input_tokens=None,
+        cache_write_tokens=None,
+    )
+    assert compute_cost("zzz/free-model", usage, sheet).usd == 0.0
+
+
+# --- fetching through an injected opener --------------------------------------
+
+
+class FakeOpener:
+    """An opener that answers from a fixture instead of the network."""
+
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.requested: list[str] = []
+
+    def open(self, url: str) -> io.BytesIO:
+        self.requested.append(url)
+        return io.BytesIO(self.payload)
+
+
+def test_fetch_models_reads_through_the_injected_opener() -> None:
+    """The only bytes the fetcher sees come from the opener it was handed."""
+    opener = FakeOpener(json.dumps(CATALOGUE).encode("utf-8"))
+    result = fetch_models(opener)
+    assert opener.requested == [OPENROUTER_MODELS_URL]
+    assert list(result.models) == ["paid/with-cache", "zzz/free-model", "paid/plain"]
+    assert result.skipped == []
+
+
+def test_fetch_models_can_target_a_different_url() -> None:
+    opener = FakeOpener(json.dumps(CATALOGUE).encode("utf-8"))
+    fetch_models(opener, url="https://example.test/models")
+    assert opener.requested == ["https://example.test/models"]
+
+
+def test_fetch_models_rejects_a_payload_without_a_data_list() -> None:
+    """A truncated answer is an error, not a sheet with no models in it."""
+    opener = FakeOpener(b'{"error": "rate limited"}')
+    with pytest.raises(ValueError, match="data"):
+        fetch_models(opener)

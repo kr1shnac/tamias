@@ -12,6 +12,10 @@ __all__ = ["ModelPrice", "PriceSheet", "load_price_sheet", "compute_cost"]
 TOKENS_PER_RATE_UNIT = 1_000_000
 UNKNOWN = "?"
 RATE_FIELDS = ("input", "output", "cached_input", "cache_write", "cache_write_1h")
+# The only keys a `[provenance]` block may carry: who published the rates, at
+# what URL, and when the sheet was fetched.  Anything else there would be a
+# claim the report cannot audit, so it is refused rather than ignored.
+PROVENANCE_FIELDS = ("source", "url", "fetched_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +42,7 @@ class PriceSheet:
     models: dict[str, ModelPrice]
     simulated: bool = False
     source: str | None = None
+    provenance: dict[str, str] | None = None
 
     def get(self, model: str) -> ModelPrice | None:
         return self.models.get(model)
@@ -57,8 +62,30 @@ def load_price_sheet(path: str | Path) -> PriceSheet:
             f"{source}: top-level `simulated` must be true or false, got {simulated!r}"
         )
 
+    provenance = _parse_provenance(source, document.pop("provenance", None))
+
     models = {model: _parse_model(source, model, table) for model, table in document.items()}
-    return PriceSheet(date=date, models=models, simulated=simulated, source=str(source))
+    return PriceSheet(
+        date=date, models=models, simulated=simulated, source=str(source), provenance=provenance
+    )
+
+
+def _parse_provenance(source: Path, raw: Any) -> dict[str, str] | None:
+    if raw is None:
+        return None  # a sheet written before provenance existed: no claim at all
+    if not isinstance(raw, dict):
+        raise ValueError(f"{source}: `provenance` must be a table of strings, got {raw!r}")
+
+    unexpected = sorted(set(raw) - set(PROVENANCE_FIELDS))
+    if unexpected:
+        names = ", ".join(str(key) for key in unexpected)
+        raise ValueError(f"{source}: `provenance` has unknown key(s): {names}")
+    for key, value in raw.items():
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"{source}: `provenance.{key}` must be a non-empty string, got {value!r}"
+            )
+    return {key: str(raw[key]) for key in PROVENANCE_FIELDS if key in raw}
 
 
 def _parse_model(source: Path, model: str, table: Any) -> ModelPrice:

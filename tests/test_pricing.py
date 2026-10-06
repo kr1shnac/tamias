@@ -169,3 +169,69 @@ def test_the_shipped_openrouter_simulated_sheet_is_simulated_with_invented_price
     for model in (ultra, lightning):
         assert sheet.get(model).cache_write == 0
         assert compute_cost(model, usage, sheet).usd is not None
+
+
+PROVENANCE_SHEET = """date = "2026-10-06"
+simulated = false
+
+[provenance]
+source = "openrouter-models-api"
+url = "https://openrouter.ai/api/v1/models"
+fetched_at = "2026-10-06T12:00:00Z"
+
+[gpt-4o]
+input = 3.0
+output = 15.0
+"""
+
+
+def test_loader_reads_the_provenance_block(tmp_path):
+    """A fetched sheet carries where its rates came from and when."""
+    path = tmp_path / "prices.toml"
+    path.write_text(PROVENANCE_SHEET, encoding="utf-8")
+
+    sheet = load_price_sheet(path)
+    assert sheet.provenance == {
+        "source": "openrouter-models-api",
+        "url": "https://openrouter.ai/api/v1/models",
+        "fetched_at": "2026-10-06T12:00:00Z",
+    }
+    assert sheet.simulated is False
+    assert sheet.get("gpt-4o") == ModelPrice(input=3.0, output=15.0)
+
+
+def test_a_sheet_without_provenance_still_loads(tmp_path):
+    """Provenance is optional: every sheet written before it existed still reads."""
+    path = tmp_path / "prices.toml"
+    path.write_text('date = "2026-10-04"\n\n[gpt-4o]\ninput = 3.0\noutput = 15.0\n', "utf-8")
+    assert load_price_sheet(path).provenance is None
+
+
+def test_an_unknown_provenance_key_is_rejected(tmp_path):
+    """The schema is fixed: a key nobody understands is an error, not a claim."""
+    path = tmp_path / "prices.toml"
+    path.write_text(
+        PROVENANCE_SHEET.replace('url = "https://openrouter.ai/api/v1/models"', 'vendor = "x"'),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="provenance"):
+        load_price_sheet(path)
+
+
+def test_provenance_values_must_be_strings(tmp_path):
+    """Provenance is metadata a report quotes; a number there is not a source."""
+    path = tmp_path / "prices.toml"
+    path.write_text(
+        PROVENANCE_SHEET.replace('source = "openrouter-models-api"', "source = 1"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="provenance"):
+        load_price_sheet(path)
+
+
+def test_provenance_must_be_a_table(tmp_path):
+    """`provenance` is a table of strings, never a bare scalar."""
+    path = tmp_path / "prices.toml"
+    path.write_text('date = "2026-10-06"\nprovenance = 3\n\n[gpt-4o]\ninput = 3.0\n', "utf-8")
+    with pytest.raises(ValueError, match="provenance"):
+        load_price_sheet(path)
