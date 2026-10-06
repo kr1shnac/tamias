@@ -95,3 +95,5 @@ If an agent's tools return `Error: ...`, configure `error_markers`; see
   figure, and when the answer is UNKNOWN.
 - [`demo/RUNBOOK.md`](demo/RUNBOOK.md) — how to produce and read the two-arm
   demo, including its known limits.
+- [`DEMO.md`](DEMO.md) — the demo script: three offline acts, exact commands,
+  output captured on a real run.
