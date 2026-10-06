@@ -106,12 +106,14 @@ def upstream() -> FastAPI:
         body = json.loads(raw)
         model = body.get("model", MODEL)
         if body.get("stream") == "truncated":
+
             async def truncated() -> AsyncIterator[bytes]:
                 yield sse("response.created", {"response": {"model": model}})
                 yield b"data: {"
 
             return StreamingResponse(truncated(), media_type="text/event-stream")
         if body.get("stream") == "no_completed":
+
             async def unfinished() -> AsyncIterator[bytes]:
                 yield sse(
                     "response.in_progress",
@@ -120,6 +122,7 @@ def upstream() -> FastAPI:
 
             return StreamingResponse(unfinished(), media_type="text/event-stream")
         if body.get("stream"):
+
             async def stream() -> AsyncIterator[bytes]:
                 yield sse("response.created", {"response": {"id": "resp-stream", "model": model}})
                 yield sse(
@@ -250,9 +253,7 @@ async def test_missing_usage_stays_unknown_and_route_never_rewrites_model(
 async def test_proxy_app_registers_the_metered_responses_route(
     upstream: FastAPI, store: FakeStore, sheet: PriceSheet
 ) -> None:
-    app = proxy.create_app(
-        UPSTREAM_URL, store, sheet, transport=StreamingASGITransport(upstream)
-    )
+    app = proxy.create_app(UPSTREAM_URL, store, sheet, transport=StreamingASGITransport(upstream))
     async with httpx.AsyncClient(
         transport=StreamingASGITransport(app), base_url="http://proxy.test", timeout=None
     ) as client:

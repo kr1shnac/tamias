@@ -39,9 +39,7 @@ def _number(value: object) -> float | None:
     return None
 
 
-def fetch_models(
-    url: str = DEFAULT_URL, *, opener: Callable[..., Any] = urlopen
-) -> FetchResult:
+def fetch_models(url: str = DEFAULT_URL, *, opener: Callable[..., Any] = urlopen) -> FetchResult:
     """Load models from ``url`` without treating absent prices as free.
 
     The OpenRouter listing expresses rates as USD per token; Tamias sheets use

@@ -40,28 +40,36 @@ async def test_proxy_propagates_projects_without_forwarding_or_logging_prompts(
         body = json.loads(await request.body())
         if path == "v1/responses":
             if body.get("stream"):
-                payload = b"data: " + json.dumps(
-                    {
-                        "type": "response.completed",
-                        "response": {
-                            "id": "resp-1",
-                            "model": "model",
-                            "usage": {"input_tokens": 1, "output_tokens": 1},
-                        },
-                    }
-                ).encode() + b"\n\n"
+                payload = (
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp-1",
+                                "model": "model",
+                                "usage": {"input_tokens": 1, "output_tokens": 1},
+                            },
+                        }
+                    ).encode()
+                    + b"\n\n"
+                )
                 return StreamingResponse(iter([payload]), media_type="text/event-stream")
             return JSONResponse(
                 {"id": "resp-1", "model": "model", "usage": {"input_tokens": 1, "output_tokens": 1}}
             )
         if body.get("stream"):
-            payload = b"data: " + json.dumps(
-                {
-                    "id": "chat-1",
-                    "model": "model",
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-                }
-            ).encode() + b"\n\n"
+            payload = (
+                b"data: "
+                + json.dumps(
+                    {
+                        "id": "chat-1",
+                        "model": "model",
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                    }
+                ).encode()
+                + b"\n\n"
+            )
             return StreamingResponse(iter([payload]), media_type="text/event-stream")
         return JSONResponse(
             {
