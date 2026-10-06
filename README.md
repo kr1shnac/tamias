@@ -67,6 +67,12 @@ flags are `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--router-config`, `--cheap-model`, `--strong-model`, `--min-gap`,
 `--inject-usage`, `--request-usage-cost`, and `--verbose`.
 
+`--effort-policy easy-low` is opt-in. In active router mode it asks the upstream
+for high reasoning effort on planning or tool-error turns and low effort on easy
+tool turns. `--effort-style` chooses OpenRouter's `reasoning.effort` field or
+OpenAI's `reasoning_effort` field. The log records the requested and forwarded
+setting; it does not prove the provider applied it.
+
 If an agent's tools return `Error: ...`, configure `error_markers`; see
 [`examples/router.example.toml`](examples/router.example.toml).
 
@@ -74,8 +80,8 @@ If an agent's tools return `Error: ...`, configure `error_markers`; see
 
 - Metered: tokens and cost are recorded per request; cost is exact or UNKNOWN,
   never guessed.
-- Routed: model switching is rule-based only. Effort switching is NOT
-  implemented.
+- Routed: model switching is rule-based. Optional effort switching is fixture
+  tested only; provider behaviour remains unverified.
 - Tested on fixtures only: live provider behaviour and real Codex and Claude
   Code traffic are unverified.
 - Evidence: dry runs on free models with simulated prices. The two arms did
@@ -93,6 +99,7 @@ If an agent's tools return `Error: ...`, configure `error_markers`; see
   TOML keys.
 - [`docs/PRICING.md`](docs/PRICING.md) — how token counts become a dollar
   figure, and when the answer is UNKNOWN.
+- [`docs/EFFORT.md`](docs/EFFORT.md) — optional reasoning-effort switching.
 - [`demo/RUNBOOK.md`](demo/RUNBOOK.md) — how to produce and read the two-arm
   demo, including its known limits.
 - [`DEMO.md`](DEMO.md) — the demo script: three offline acts, exact commands,

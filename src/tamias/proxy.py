@@ -44,6 +44,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import anthropic_adapter, pricing, responses_adapter, router
+from tamias.effort import apply_effort
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
 from tamias.store import sanitize_generation_id, sanitize_project
@@ -336,6 +337,7 @@ def create_app(
     request_usage_cost: bool = False,
     config: RouterConfig | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    effort_style: str = "openrouter",
 ) -> FastAPI:
     base = upstream_url.rstrip("/")
     timeout = upstream_timeout_seconds()
@@ -365,6 +367,7 @@ def create_app(
     app.state.router_config = routing
     app.state.inject_usage = inject_usage
     app.state.request_usage_cost = request_usage_cost
+    app.state.effort_style = effort_style
     app.state.sessions = table
 
     @app.middleware("http")
@@ -415,8 +418,9 @@ def create_app(
         """The exact bytes to send upstream.
 
         Shadow mode returns ``raw`` unchanged: the decision is recorded, never
-        applied.  Only ``router_mode == "active"`` may rewrite ``model``, and only
-        the opt-in ``inject_usage`` may add ``stream_options``.
+        applied.  Only ``router_mode == "active"`` may rewrite ``model`` or add
+        a router-selected reasoning effort; only the opt-in ``inject_usage`` may
+        add ``stream_options``.
         """
         if (
             router_mode == "active"
@@ -425,6 +429,9 @@ def create_app(
             and decision.target_model != body.get("model")
         ):
             body = {**body, "model": decision.target_model}
+            raw = json.dumps(body).encode()
+        if router_mode == "active" and decision.target_effort is not None:
+            body = apply_effort(body, decision.target_effort, style=app.state.effort_style)
             raw = json.dumps(body).encode()
         if request_usage_cost:
             raw = with_usage_cost_included(body)
@@ -449,6 +456,8 @@ def create_app(
         decision: Decision,
         generation_id: object = None,
         project: object = None,
+        effort_requested: str | None = None,
+        effort_used: str | None = None,
     ) -> None:
         cost = pricing.compute_cost(model_used, usage, sheet)
         store.log_request(
@@ -468,6 +477,9 @@ def create_app(
             # becomes NULL instead of text in the log.
             generation_id=sanitize_generation_id(generation_id),
             project=project,
+            effort_requested=effort_requested,
+            effort_used=effort_used,
+            decision_target_effort=decision.target_effort,
         )
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
@@ -490,7 +502,21 @@ def create_app(
         session_id = derive_session_id(dict(request.headers.items()), body, _SALT)
         model_requested = _model_name(body.get("model"))
         streaming = bool(body.get("stream"))
+        requested_reasoning = body.get("reasoning")
+        effort_requested = (
+            requested_reasoning.get("effort")
+            if isinstance(requested_reasoning, dict)
+            and isinstance(requested_reasoning.get("effort"), str)
+            else body.get("reasoning_effort")
+        )
+        if not isinstance(effort_requested, str):
+            effort_requested = None
         decision = plan(session_id, body, model_requested)
+        effort_used = (
+            decision.target_effort
+            if router_mode == "active" and decision.target_effort is not None
+            else effort_requested
+        )
 
         outgoing = client.build_request(
             "POST",
@@ -514,6 +540,8 @@ def create_app(
                     500,
                     decision,
                     project=request.state.project,
+                    effort_requested=effort_requested,
+                    effort_used=effort_used,
                 )
                 advance(session_id, model_used)
                 return JSONResponse(
@@ -537,6 +565,8 @@ def create_app(
                 decision,
                 details.get("id"),
                 request.state.project,
+                effort_requested,
+                effort_used,
             )
             advance(session_id, model_used)
             return Response(
@@ -548,7 +578,14 @@ def create_app(
         upstream = await client.send(outgoing, stream=True)
         return StreamingResponse(
             _stream_chat(
-                upstream, session_id, model_requested, decision, started, request.state.project
+                upstream,
+                session_id,
+                model_requested,
+                decision,
+                started,
+                request.state.project,
+                effort_requested,
+                effort_used,
             ),
             status_code=upstream.status_code,
             headers=forward_response_headers(upstream.headers),
@@ -561,6 +598,8 @@ def create_app(
         decision: Decision,
         started: float,
         project: object,
+        effort_requested: str | None,
+        effort_used: str | None,
     ) -> AsyncIterator[bytes]:
         seen_model: Any = None
         seen_usage: Any = None
@@ -602,6 +641,8 @@ def create_app(
                 decision,
                 seen_generation_id,
                 project,
+                effort_requested,
+                effort_used,
             )
             advance(session_id, model_used)
 

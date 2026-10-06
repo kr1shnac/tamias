@@ -7,7 +7,7 @@ agree on what the decision was.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from tamias.types import Decision, SessionState, ToolClass
@@ -109,6 +109,7 @@ class RouterConfig:
     shell_tools: frozenset[str] = frozenset()
     error_markers: tuple[str, ...] | None = None
     big_output_chars: int | None = None
+    effort_policy: bool = False
 
     def __post_init__(self) -> None:
         if self.profile not in ("generic", "legacy"):
@@ -231,43 +232,62 @@ def decide(
 
     # Rule 1: the user is talking; nothing about the last turn is routable.
     if role == "user":
-        return _stay("user turn: planning")
+        decision = _stay("user turn: planning")
 
-    if role == "tool":
+    elif role == "tool":
         # Rule 2: a failed tool call is exactly what needs the strong model.
         text = _text_of(last.get("content"))
         markers = config.error_markers if config.error_markers is not None else ERROR_MARKERS
         if any(marker in text for marker in markers):
-            return _stay("tool error: needs strong model")
-
-        # Rule 3: cheap mechanical work.
-        tool = _tool_name(messages, last)
-        if tool is not None:
-            tool_class = _tool_class(tool, config)
-            if (
-                tool_class == "shell"
-                and config.big_output_chars is not None
-                and len(text) >= config.big_output_chars
-            ):
-                return _stay(
-                    f"shell output too large: {len(text)} >= {config.big_output_chars} chars"
-                )
-            if _is_easy(tool, config):
-                # Hysteresis: while we are already on the cheap model the gap
-                # since the last switch is zero, so we stay put until it grows
-                # again.
-                gap = 0 if state.current_model == config.cheap_model else state.request_index
-                if gap >= config.min_gap:
-                    return Decision(
-                        action="SWITCH",
-                        target_model=config.cheap_model,
-                        reason=f"easy tool: {tool}",
+            decision = _stay("tool error: needs strong model")
+        else:
+            # Rule 3: cheap mechanical work.
+            tool = _tool_name(messages, last)
+            if tool is not None:
+                tool_class = _tool_class(tool, config)
+                if (
+                    tool_class == "shell"
+                    and config.big_output_chars is not None
+                    and len(text) >= config.big_output_chars
+                ):
+                    decision = _stay(
+                        f"shell output too large: {len(text)} >= {config.big_output_chars} chars"
                     )
-                return _stay(
-                    f"hysteresis: {gap} of {config.min_gap} requests since last switch"
-                )
+                elif _is_easy(tool, config):
+                    # Hysteresis: while we are already on the cheap model the gap
+                    # since the last switch is zero, so we stay put until it grows
+                    # again.
+                    gap = 0 if state.current_model == config.cheap_model else state.request_index
+                    if gap >= config.min_gap:
+                        decision = Decision(
+                            action="SWITCH",
+                            target_model=config.cheap_model,
+                            reason=f"easy tool: {tool}",
+                            target_effort="low" if config.effort_policy else None,
+                        )
+                    else:
+                        decision = _stay(
+                            f"hysteresis: {gap} of {config.min_gap} requests since last switch"
+                        )
+                else:
+                    decision = _stay(f"no rule matched: keep {requested_model}")
+            else:
+                decision = _stay(f"no rule matched: keep {requested_model}")
+    else:
+        decision = _stay(
+            f"no rule matched: keep {requested_model}"
+            if isinstance(requested_model, str) and requested_model
+            else "no rule matched"
+        )
 
-    # Rule 4: default.
-    if isinstance(requested_model, str) and requested_model:
-        return _stay(f"no rule matched: keep {requested_model}")
-    return _stay("no rule matched")
+    if config.effort_policy and decision.target_effort is None:
+        is_error = role == "tool" and any(
+            marker in _text_of(last.get("content")) for marker in markers
+        )
+        if role == "user" or is_error:
+            decision = replace(decision, target_effort="high")
+        elif role == "tool":
+            tool = _tool_name(messages, last)
+            if tool is not None and _is_easy(tool, config):
+                decision = replace(decision, target_effort="low")
+    return decision

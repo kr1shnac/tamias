@@ -49,6 +49,9 @@ def log(
     latency_ms: int | None = 120,
     ts: str = TS,
     generation_id: str | None = None,
+    effort_requested: str | None = None,
+    effort_used: str | None = None,
+    decision_target_effort: str | None = None,
 ) -> int:
     return store.log_request(
         ts,
@@ -63,6 +66,9 @@ def log(
         price_sheet=SHEET_DATE,
         price_simulated=False,
         generation_id=generation_id,
+        effort_requested=effort_requested,
+        effort_used=effort_used,
+        decision_target_effort=decision_target_effort,
     )
 
 
@@ -296,6 +302,9 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "provider_cost_usd",
         "generation_id",
         "project",
+        "effort_requested",
+        "effort_used",
+        "decision_target_effort",
     )
 
 
@@ -334,4 +343,26 @@ def test_reopening_an_old_schema_adds_nullable_audit_columns(tmp_path: Path) -> 
     finally:
         opened.close()
 
-    assert {"price_sheet", "price_simulated", "provider_cost_usd", "generation_id"} <= columns
+    assert {
+        "price_sheet",
+        "price_simulated",
+        "provider_cost_usd",
+        "generation_id",
+        "effort_requested",
+        "effort_used",
+        "decision_target_effort",
+    } <= columns
+
+
+def test_effort_fields_are_nullable_and_persisted(store: Store) -> None:
+    log(
+        store,
+        effort_requested="high",
+        effort_used="low",
+        decision_target_effort="low",
+    )
+
+    (row,) = store.rows()
+    assert row["effort_requested"] == "high"
+    assert row["effort_used"] == "low"
+    assert row["decision_target_effort"] == "low"

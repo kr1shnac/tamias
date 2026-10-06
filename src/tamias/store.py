@@ -82,6 +82,9 @@ COLUMNS = (
     "provider_cost_usd",
     "generation_id",
     "project",
+    "effort_requested",
+    "effort_used",
+    "decision_target_effort",
 )
 
 _CREATE_TABLE = f"""
@@ -106,7 +109,10 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     price_simulated INTEGER,
     provider_cost_usd REAL,
     generation_id TEXT,
-    project TEXT
+    project TEXT,
+    effort_requested TEXT,
+    effort_used TEXT,
+    decision_target_effort TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_session ON {TABLE}(session_id);
 """
@@ -145,6 +151,9 @@ class Store:
             ("provider_cost_usd", "REAL"),
             ("generation_id", "TEXT"),
             ("project", "TEXT"),
+            ("effort_requested", "TEXT"),
+            ("effort_used", "TEXT"),
+            ("decision_target_effort", "TEXT"),
         ):
             if name not in present:
                 self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
@@ -165,6 +174,9 @@ class Store:
         price_simulated: bool | None = None,
         generation_id: object = None,
         project: object = None,
+        effort_requested: str | None = None,
+        effort_used: str | None = None,
+        decision_target_effort: str | None = None,
     ) -> int:
         """Append one request and return its row id.
 
@@ -195,6 +207,9 @@ class Store:
             usage.provider_cost_usd,
             sanitize_generation_id(generation_id),
             sanitize_project(project),
+            effort_requested,
+            effort_used,
+            decision_target_effort,
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)

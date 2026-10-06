@@ -468,6 +468,7 @@ def build_serve_app(
     request_usage_cost: bool = False,
     router_config: RouterConfig | None = None,
     transport: Any | None = None,
+    effort_style: str = "openrouter",
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
@@ -495,6 +496,7 @@ def build_serve_app(
         inject_usage=inject_usage,
         request_usage_cost=request_usage_cost,
         transport=transport,
+        effort_style=effort_style,
     )
     app.state.store = store
     return app
@@ -519,6 +521,7 @@ def serve(args: argparse.Namespace) -> int:
         inject_usage=args.inject_usage,
         request_usage_cost=args.request_usage_cost,
         router_config=_serve_router_config(args),
+        effort_style=args.effort_style,
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -650,6 +653,7 @@ def _serve_router_config(args: argparse.Namespace) -> RouterConfig:
         shell_tools=config.shell_tools,
         error_markers=config.error_markers,
         big_output_chars=config.big_output_chars,
+        effort_policy=args.effort_policy == "easy-low",
         cheap_model=args.cheap_model or config.cheap_model,
         strong_model=args.strong_model or config.strong_model,
         min_gap=args.min_gap if args.min_gap is not None else config.min_gap,
@@ -859,6 +863,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ROUTER_MODES,
         default="shadow",
         help="shadow records the routing decision, active also applies it (default: shadow)",
+    )
+    serve_parser.add_argument(
+        "--effort-policy",
+        choices=("off", "easy-low"),
+        default="off",
+        help="apply high effort to planning/errors and low effort to easy tools (default: off)",
+    )
+    serve_parser.add_argument(
+        "--effort-style",
+        choices=("openrouter", "openai"),
+        default="openrouter",
+        help="request-field style used when the effort policy is active (default: openrouter)",
     )
     serve_parser.add_argument(
         "--cheap-model",
