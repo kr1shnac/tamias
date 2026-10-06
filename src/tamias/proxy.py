@@ -82,6 +82,8 @@ HOP_BY_HOP = frozenset(
 DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding"}
 
 PASSTHROUGH_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+UPSTREAM_TIMEOUT_ENV = "TAMIAS_UPSTREAM_TIMEOUT_SECONDS"
+DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 600.0
 
 
 class RequestLog(Protocol):
@@ -149,6 +151,16 @@ def forward_response_headers(headers: httpx.Headers) -> dict[str, str]:
     }
     dropped = HOP_BY_HOP | connection_named
     return {key: value for key, value in headers.items() if key.lower() not in dropped}
+
+
+def upstream_timeout_seconds() -> float:
+    """Return the configured upstream timeout, falling back safely to 600 seconds."""
+    value = os.getenv(UPSTREAM_TIMEOUT_ENV, str(DEFAULT_UPSTREAM_TIMEOUT_SECONDS))
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_UPSTREAM_TIMEOUT_SECONDS
+    return timeout if timeout > 0 else DEFAULT_UPSTREAM_TIMEOUT_SECONDS
 
 
 def with_usage_included(body: dict[str, Any]) -> bytes:
@@ -324,7 +336,8 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     base = upstream_url.rstrip("/")
-    client = httpx.AsyncClient(timeout=None, transport=transport)
+    timeout = upstream_timeout_seconds()
+    client = httpx.AsyncClient(timeout=timeout, transport=transport)
     routing = router.DEFAULT_CONFIG if config is None else config
     table = SessionTable()
 
@@ -345,6 +358,7 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
     app.state.upstream_client = client
+    app.state.upstream_timeout_seconds = timeout
     app.state.router_mode = router_mode
     app.state.router_config = routing
     app.state.inject_usage = inject_usage

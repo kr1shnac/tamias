@@ -124,6 +124,17 @@ def send_headers(session: str) -> dict[str, str]:
     return {"content-type": "application/json", proxy.SESSION_HEADER: session}
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"), [(None, 600.0), ("45", 45.0), ("nonsense", 600.0), ("0", 600.0)]
+)
+def test_upstream_timeout_comes_from_its_documented_setting(
+    monkeypatch: pytest.MonkeyPatch, configured: str | None, expected: float
+) -> None:
+    monkeypatch.setattr(proxy.os, "getenv", lambda _name, _default: configured)
+
+    assert proxy.upstream_timeout_seconds() == expected
+
+
 def status_of(store: Store) -> list[str]:
     return [str(row["status"]) for row in store.rows()]
 

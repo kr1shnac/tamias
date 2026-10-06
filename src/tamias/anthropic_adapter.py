@@ -335,7 +335,8 @@ def register_routes(
 
     client = getattr(app.state, "upstream_client", None)
     if not isinstance(client, httpx.AsyncClient):
-        client = httpx.AsyncClient(timeout=None, transport=transport)
+        timeout = getattr(app.state, "upstream_timeout_seconds", 600.0)
+        client = httpx.AsyncClient(timeout=timeout, transport=transport)
         app.state.upstream_client = client
 
     def current(session_id: str, model: str) -> SessionState:
