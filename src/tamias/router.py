@@ -78,6 +78,11 @@ class RouterConfig:
     recognises tool names from any agent through :func:`classify_tool`;
     ``legacy`` is exactly the v1 behaviour, exact-name matching against
     ``easy_tools`` only.  Any other value is rejected.
+
+    ``edit_tools`` and ``shell_tools`` are extra exact names for those
+    families, ``error_markers`` are the substrings that make a tool result a
+    failure (None means "profile default"), and ``big_output_chars`` caps how
+    large a shell result may be and still be easy (None means no cap).
     """
 
     easy_tools: frozenset[str] = EASY_TOOLS
@@ -85,6 +90,10 @@ class RouterConfig:
     strong_model: str = ""
     min_gap: int = 3
     profile: str = "generic"
+    edit_tools: frozenset[str] = frozenset()
+    shell_tools: frozenset[str] = frozenset()
+    error_markers: tuple[str, ...] | None = None
+    big_output_chars: int | None = None
 
     def __post_init__(self) -> None:
         if self.profile not in ("generic", "legacy"):
@@ -92,6 +101,12 @@ class RouterConfig:
                 f"profile must be 'generic' or 'legacy', got {self.profile!r}"
             )
         object.__setattr__(self, "easy_tools", frozenset(self.easy_tools))
+        object.__setattr__(self, "edit_tools", frozenset(self.edit_tools))
+        object.__setattr__(self, "shell_tools", frozenset(self.shell_tools))
+        if self.error_markers is None:
+            object.__setattr__(self, "error_markers", ERROR_MARKERS)
+        else:
+            object.__setattr__(self, "error_markers", tuple(self.error_markers))
 
 
 DEFAULT_CONFIG = RouterConfig()
@@ -143,6 +158,19 @@ def _tool_name(messages: list[Any], tool_message: dict[str, Any]) -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _tool_class(tool: str, config: RouterConfig) -> ToolClass:
+    """Classify ``tool``, letting the exact-name sets override the matcher.
+
+    ``shell_tools`` and ``edit_tools`` are the operator's way of pinning a
+    name to a family the token matcher cannot see.
+    """
+    if tool in config.shell_tools:
+        return "shell"
+    if tool in config.edit_tools:
+        return "edit"
+    return classify_tool(tool)
+
+
 def _is_easy(tool: str, config: RouterConfig) -> bool:
     """Whether ``tool`` is cheap mechanical work the cheap model can handle.
 
@@ -155,7 +183,7 @@ def _is_easy(tool: str, config: RouterConfig) -> bool:
         return True
     if config.profile == "legacy":
         return False
-    return classify_tool(tool) in ("read", "shell")
+    return _tool_class(tool, config) in ("read", "shell")
 
 
 def decide(
@@ -189,7 +217,8 @@ def decide(
     if role == "tool":
         # Rule 2: a failed tool call is exactly what needs the strong model.
         text = _text_of(last.get("content"))
-        if any(marker in text for marker in ERROR_MARKERS):
+        markers = config.error_markers if config.error_markers is not None else ERROR_MARKERS
+        if any(marker in text for marker in markers):
             return _stay("tool error: needs strong model")
 
         # Rule 3: cheap mechanical work.
