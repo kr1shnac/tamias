@@ -80,3 +80,16 @@ If an agent's tools return `Error: ...`, configure `error_markers`; see
   Code traffic are unverified.
 - Evidence: one pair of runs on free models used simulated prices; the routed
   arm cost more than the baseline.
+
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the frozen architecture and
+  research design (v1.2, 2026-09-30). It is the spec; the code is an
+  implementation of a subset of it, and §7 of `HANDOFF-CODEX.md` records which
+  parts exist and which do not.
+- [`docs/ROUTING.md`](docs/ROUTING.md) — the router's matcher, profiles and
+  TOML keys.
+- [`docs/PRICING.md`](docs/PRICING.md) — how token counts become a dollar
+  figure, and when the answer is UNKNOWN.
+- [`demo/RUNBOOK.md`](demo/RUNBOOK.md) — how to produce and read the two-arm
+  demo, including its known limits.
