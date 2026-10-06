@@ -16,7 +16,13 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from tamias.store import COLUMNS, GENERATION_ID_MAX_CHARS, Store  # noqa: E402
+from tamias.store import (  # noqa: E402
+    COLUMNS,
+    EFFORT_VALUES,
+    GENERATION_ID_MAX_CHARS,
+    Store,
+    sanitize_effort,
+)
 from tamias.types import CostBreakdown, Decision, Usage  # noqa: E402
 
 SHEET_DATE = "2026-10-04"
@@ -366,3 +372,78 @@ def test_effort_fields_are_nullable_and_persisted(store: Store) -> None:
     assert row["effort_requested"] == "high"
     assert row["effort_used"] == "low"
     assert row["decision_target_effort"] == "low"
+
+
+# --- effort is a closed vocabulary, never request text ------------------------
+
+
+def test_every_known_effort_level_survives_the_round_trip(store: Store) -> None:
+    """The six admissible values are stored verbatim, so no real level is lost."""
+    for value in sorted(EFFORT_VALUES):
+        log(
+            store,
+            effort_requested=value,
+            effort_used=value,
+            decision_target_effort=value,
+        )
+        row = store.rows()[-1]
+        assert row["effort_requested"] == value, f"{value!r} was dropped"
+        assert row["effort_used"] == value
+        assert row["decision_target_effort"] == value
+    assert len(store.rows()) == len(EFFORT_VALUES)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ultra",
+        "HIGH",
+        "high priority",
+        "sk-or-v1-0123456789abcdef",
+        "SECRET-PROMPT",
+        "effort\nhigh",
+        "",
+        "a" * 4096,
+        None,
+        123,
+        ["high"],
+    ],
+    ids=[
+        "unknown-level",
+        "wrong-case",
+        "with-space",
+        "api-key",
+        "prompt-like",
+        "with-newline",
+        "empty",
+        "very-long",
+        "none-value",
+        "not-a-string",
+        "not-a-scalar",
+    ],
+)
+def test_effort_that_is_not_a_known_level_is_stored_as_null(
+    store: Store, value: object
+) -> None:
+    """The store refuses it, whatever the caller passes.
+
+    ``effort_requested`` comes from the client's request body, so this is the
+    only place that decides what may be written: no caller can put a prompt or
+    a credential into an effort column.  A fixed vocabulary rather than a
+    character class, because ``sk-or-v1-...`` has no space in it and would
+    pass a shape check.
+    """
+    log(store, effort_requested=value, effort_used=value, decision_target_effort=value)  # type: ignore[arg-type]
+
+    (row,) = store.rows()
+    assert row["effort_requested"] is None
+    assert row["effort_used"] is None
+    assert row["decision_target_effort"] is None
+
+
+def test_sanitize_effort_is_pure_and_type_tolerant() -> None:
+    """A non-string is never coerced into a level."""
+    assert sanitize_effort(None) is None
+    assert sanitize_effort(True) is None
+    assert sanitize_effort(b"high") is None
+    assert sanitize_effort("high") == "high"

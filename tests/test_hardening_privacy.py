@@ -247,6 +247,9 @@ EXPECTED_COLUMNS = (
     "provider_cost_usd",
     "generation_id",
     "project",
+    "effort_requested",
+    "effort_used",
+    "decision_target_effort",
 )
 
 # Every column whose declared SQL type can hold text, and the single thing allowed
@@ -295,6 +298,28 @@ TEXT_COLUMN_ALLOW_LIST = {
     # Filled only from client configuration (/p/<name> or X-Tamias-Project),
     # never from a prompt or response, and sanitized to a bounded identifier.
     "project": "client configuration project label, [A-Za-z0-9_.-]+, <= 64 chars or NULL",
+    # The three effort columns were added with the effort router and arrived
+    # raw: effort_requested comes straight from the request body's
+    # reasoning.effort / reasoning_effort with only an isinstance(str) check,
+    # so as shipped an unsanitised column was a way to write a prompt, a key
+    # or any other prose into the log.  store.sanitize_effort now admits the
+    # six literals in store.EFFORT_VALUES and NULLs everything else, so the
+    # column cannot hold arbitrary text by construction rather than by
+    # shape -- a character class would have let `sk-or-v1-abc123` through,
+    # since it has no space in it.  model_requested above sets the weaker
+    # precedent; these three are held to the stronger one.
+    "effort_requested": (
+        "request body's reasoning.effort / reasoning_effort, "
+        "store.sanitize_effort: one of store.EFFORT_VALUES or NULL"
+    ),
+    "effort_used": (
+        "the effort actually applied: effort_requested or the router's choice, "
+        "store.sanitize_effort: one of store.EFFORT_VALUES or NULL"
+    ),
+    "decision_target_effort": (
+        "the router's own target, "
+        "store.sanitize_effort: one of store.EFFORT_VALUES or NULL"
+    ),
 }
 
 TEXT_TYPES = ("CHAR", "CLOB", "TEXT")

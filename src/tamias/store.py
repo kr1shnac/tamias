@@ -20,7 +20,16 @@ from pathlib import Path
 
 from tamias.types import CostBreakdown, Decision, Usage
 
-__all__ = ["Store", "COLUMNS", "sanitize_generation_id", "GENERATION_ID_MAX_CHARS"]
+__all__ = [
+    "Store",
+    "COLUMNS",
+    "sanitize_generation_id",
+    "sanitize_project",
+    "sanitize_effort",
+    "GENERATION_ID_MAX_CHARS",
+    "EFFORT_MAX_CHARS",
+    "EFFORT_VALUES",
+]
 
 TABLE = "requests"
 
@@ -34,6 +43,23 @@ GENERATION_ID_MAX_CHARS = 128
 _GENERATION_ID = re.compile(r"[A-Za-z0-9_.:-]+")
 PROJECT_MAX_CHARS = 64
 _PROJECT = re.compile(r"[A-Za-z0-9_.-]+")
+# Effort reaches the log from the *client's* request body (reasoning.effort or
+# reasoning_effort), so unlike decision_target_effort it is caller-supplied.
+# It is therefore admitted by vocabulary rather than by shape: effort is a
+# closed set of short literals by specification, so only those literals can
+# ever reach the row. A prompt, a key, or any other string is stored as NULL.
+# Shape alone would not do this -- `sk-or-v1-abc123` has no spaces and would
+# pass a character class -- whereas a fixed set of six values cannot hold
+# arbitrary text by construction.
+EFFORT_VALUES = frozenset({"low", "medium", "high", "minimal", "none", "auto"})
+EFFORT_MAX_CHARS = max(len(value) for value in EFFORT_VALUES)
+
+
+def sanitize_effort(value: object) -> str | None:
+    """Return `value` when it names a known effort level, else None (SQL NULL)."""
+    if not isinstance(value, str):
+        return None
+    return value if value in EFFORT_VALUES else None
 
 
 def sanitize_project(value: object) -> str | None:
@@ -207,9 +233,9 @@ class Store:
             usage.provider_cost_usd,
             sanitize_generation_id(generation_id),
             sanitize_project(project),
-            effort_requested,
-            effort_used,
-            decision_target_effort,
+            sanitize_effort(effort_requested),
+            sanitize_effort(effort_used),
+            sanitize_effort(decision_target_effort),
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)
