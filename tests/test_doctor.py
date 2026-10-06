@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from tamias import cli
 from tamias.cli import doctor
 
 
@@ -19,6 +20,16 @@ class _Response:
 
 def _prices(path: Path, sheet_date: str) -> None:
     path.write_text(f'date = "{sheet_date}"\n[example]\ninput = 1\noutput = 1\n')
+
+
+def test_doctor_port_defaults_to_serve_and_can_be_overridden() -> None:
+    parser = cli.build_parser()
+    serve_port = parser.parse_args(
+        ["serve", "--upstream", "http://upstream.test", "--prices", "prices.toml", "--db", "log.db"]
+    ).port
+
+    assert parser.parse_args(["doctor"]).port == serve_port
+    assert parser.parse_args(["doctor", "--port", "8788"]).port == 8788
 
 
 def test_doctor_reports_offline_checks_with_tmp_paths(tmp_path: Path, capsys, monkeypatch) -> None:
