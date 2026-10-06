@@ -4,12 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tamias"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Local HTTP proxy that logs token usage and cost per request for OpenAI-compatible agents."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [
+    { name = "kr1shnac", email = "krishnacgowda10@gmail.com" },
+]
 keywords = [
     "llm",
     "proxy",
@@ -45,6 +48,12 @@ dev = [
 
 [project.scripts]
 tamias = "tamias.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kr1shnac/tamias"
+Repository = "https://github.com/kr1shnac/tamias"
+Issues = "https://github.com/kr1shnac/tamias/issues"
+Changelog = "https://github.com/kr1shnac/tamias/blob/master/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tamias"]
