@@ -23,18 +23,28 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+from urllib.request import build_opener, urlopen
 
 from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
-from tamias.pricing_fetch import DEFAULT_URL, fetch_models, render_sheet
+from tamias.pricing_fetch import (
+    OPENROUTER_MODELS_URL,
+    fetch_models,
+    render_sheet,
+)
 from tamias.router import EASY_TOOLS, RouterConfig
 from tamias.router_config import load_router_config
 from tamias.store import Store
 from tamias.types import Usage
+
+#: Default model-feed URL. Two argument parsers below refer to it; the constant
+#: itself now lives in :mod:`tamias.pricing_fetch`, alongside the Decimal-exact
+#: fetch implementation that replaced the older float one.
+DEFAULT_URL = OPENROUTER_MODELS_URL
 
 ESTIMATE_LABEL = "estimate; ignores cache rebuild cost; not measured"
 ROUTER_MODES = ("shadow", "active", "off")
@@ -931,16 +941,25 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         try:
-            result = fetch_models(args.url)
-            output.write_text(render_sheet(result), encoding="utf-8")
+            fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
+            result = fetch_models(build_opener(), args.url)
+            output.write_text(
+                render_sheet(result.models, fetched_at, args.url), encoding="utf-8"
+            )
         except (OSError, ValueError, UnicodeDecodeError) as exc:
             print(f"tamias prices fetch: {exc}", file=sys.stderr)
             return 1
+        reasons = Counter(entry.reason for entry in result.skipped)
         skipped = ", ".join(
-            f"{reason}: {count}" for reason, count in sorted(result.skipped.items())
+            f"{reason}: {count}" for reason, count in sorted(reasons.items())
+        )
+        free = sum(
+            1
+            for price in result.models.values()
+            if price.input == 0 and price.output == 0
         )
         print(f"models: {len(result.models)}")
-        print(f"free: {result.free}")
+        print(f"free: {free}")
         print(f"skipped by reason: {skipped or 'none'}")
         return 0
     if args.command == "report":

@@ -12,17 +12,28 @@ __all__ = ["ModelPrice", "PriceSheet", "load_price_sheet", "compute_cost"]
 TOKENS_PER_RATE_UNIT = 1_000_000
 UNKNOWN = "?"
 RATE_FIELDS = ("input", "output", "cached_input", "cache_write", "cache_write_1h")
+# The only keys a `[provenance]` block may carry: who published the rates, at
+# what URL, and when the sheet was fetched.  Anything else there would be a
+# claim the report cannot audit, so it is refused rather than ignored.
+PROVENANCE_FIELDS = ("source", "url", "fetched_at")
 
 
 @dataclass(frozen=True, slots=True)
 class ModelPrice:
-    """USD price per 1,000,000 tokens. A None rate means UNKNOWN, not free."""
+    """USD price per 1,000,000 tokens. A None rate means UNKNOWN, not free.
+
+    ``tiers`` holds the names of any tiered-pricing fields the sheet carried --
+    long-context tiers and the like.  Their rates are not understood by the
+    arithmetic, so an entry carrying one prices as UNKNOWN rather than at its
+    base rate.
+    """
 
     input: float | None = None
     output: float | None = None
     cached_input: float | None = None
     cache_write: float | None = None
     cache_write_1h: float | None = None
+    tiers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +49,7 @@ class PriceSheet:
     models: dict[str, ModelPrice]
     simulated: bool = False
     source: str | None = None
+    provenance: dict[str, str] | None = None
 
     def get(self, model: str) -> ModelPrice | None:
         return self.models.get(model)
@@ -57,15 +69,49 @@ def load_price_sheet(path: str | Path) -> PriceSheet:
             f"{source}: top-level `simulated` must be true or false, got {simulated!r}"
         )
 
+    provenance = _parse_provenance(source, document.pop("provenance", None))
+
     models = {model: _parse_model(source, model, table) for model, table in document.items()}
-    return PriceSheet(date=date, models=models, simulated=simulated, source=str(source))
+    return PriceSheet(
+        date=date, models=models, simulated=simulated, source=str(source), provenance=provenance
+    )
+
+
+def _parse_provenance(source: Path, raw: Any) -> dict[str, str] | None:
+    if raw is None:
+        return None  # a sheet written before provenance existed: no claim at all
+    if not isinstance(raw, dict):
+        raise ValueError(f"{source}: `provenance` must be a table of strings, got {raw!r}")
+
+    unexpected = sorted(set(raw) - set(PROVENANCE_FIELDS))
+    if unexpected:
+        names = ", ".join(str(key) for key in unexpected)
+        raise ValueError(f"{source}: `provenance` has unknown key(s): {names}")
+    for key, value in raw.items():
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"{source}: `provenance.{key}` must be a non-empty string, got {value!r}"
+            )
+    return {key: str(raw[key]) for key in PROVENANCE_FIELDS if key in raw}
+
+
+def _is_tier_field(name: Any) -> bool:
+    """Whether a model-table key declares a pricing tier rather than a rate.
+
+    Tiered long-context pricing is not supported, so the only honest reading of
+    ``tier_200k_input`` is "this model needs rates we do not model".  Every
+    other unrecognised key stays an error: a typo must not become a silent
+    UNKNOWN, it must fail loudly at load time.
+    """
+    return isinstance(name, str) and name.lower().startswith("tier")
 
 
 def _parse_model(source: Path, model: str, table: Any) -> ModelPrice:
     if not isinstance(table, dict):
         raise ValueError(f"{source}: [{model}] must be a table of rates")
 
-    unexpected = sorted(set(table) - set(RATE_FIELDS))
+    tiers = tuple(sorted(key for key in table if _is_tier_field(key)))
+    unexpected = sorted(set(table) - set(RATE_FIELDS) - set(tiers))
     if unexpected:
         raise ValueError(f"{source}: [{model}] has unknown rate(s): {', '.join(unexpected)}")
 
@@ -80,7 +126,7 @@ def _parse_model(source: Path, model: str, table: Any) -> ModelPrice:
             rates[field] = float(raw)
     if rates.get("cache_write_1h") is None:
         rates["cache_write_1h"] = rates.get("cache_write")
-    return ModelPrice(**rates)
+    return ModelPrice(**rates, tiers=tiers)
 
 
 def _show(value: float | int | None) -> str:
@@ -88,6 +134,19 @@ def _show(value: float | int | None) -> str:
 
 
 def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
+    # Rule -1: money the provider itself billed.  It is a measurement of what
+    # was charged, so it beats every sheet-derived number, including a model
+    # the sheet has never heard of.
+    if usage.provider_cost_usd is not None:
+        return CostBreakdown(
+            usd=float(usage.provider_cost_usd),
+            formula=(
+                f"usd = provider-billed {usage.provider_cost_usd!r} "
+                "(reported by the upstream; no sheet arithmetic applied)"
+            ),
+            price_sheet_date=sheet.date,
+        )
+
     price = sheet.get(model)
     if price is None:
         return CostBreakdown(
@@ -95,6 +154,20 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             formula=(
                 f"usd = unknown: model {model!r} is not in price sheet {sheet.date}, "
                 "so no rate is known"
+            ),
+            price_sheet_date=sheet.date,
+        )
+
+    # A tiered entry (long-context tiers and the like) is priced by rules this
+    # arithmetic does not implement.  Quoting its base rate would understate
+    # some requests and overstate others, so the cost is UNKNOWN instead.
+    if price.tiers:
+        fields = ", ".join(price.tiers)
+        return CostBreakdown(
+            usd=None,
+            formula=(
+                f"usd = unknown: model {model!r} in price sheet {sheet.date} declares "
+                f"tiered pricing field(s): {fields}; tiered pricing is unsupported"
             ),
             price_sheet_date=sheet.date,
         )
@@ -128,6 +201,29 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
         return CostBreakdown(
             usd=0.0,
             formula="free model: all prices are 0",
+            price_sheet_date=sheet.date,
+        )
+
+    # Rule 1b: a cache rate the sheet never quoted cannot price tokens that
+    # actually reached that bucket.  Falling back to the input rate (or to
+    # zero) would invent a price, so the field is named and the cost is left
+    # UNKNOWN.  A count of zero or an unreported count touches no such tokens,
+    # so it costs nothing here and is settled by the count rules below.
+    missing_cache_rates = []
+    if cached_p is None and usage.cached_input_tokens is not None:
+        if usage.cached_input_tokens > 0:
+            missing_cache_rates.append("cached_input_rate")
+    if cw_p is None and usage.cache_write_tokens is not None:
+        if usage.cache_write_tokens > 0:
+            missing_cache_rates.append("cache_write_rate")
+    if cw1h_p is None and usage.cache_write_1h_tokens is not None:
+        if usage.cache_write_1h_tokens > 0:
+            missing_cache_rates.append("cache_write_1h_rate")
+    if missing_cache_rates:
+        expr = _build_expr(usage, input_p, output_p, cached_p, cw_p, cw1h_p)
+        return CostBreakdown(
+            usd=None,
+            formula=f"{expr}; unknown: {', '.join(missing_cache_rates)}",
             price_sheet_date=sheet.date,
         )
 
