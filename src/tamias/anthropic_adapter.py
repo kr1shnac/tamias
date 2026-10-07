@@ -70,6 +70,12 @@ HOP_BY_HOP = frozenset(
         "upgrade",
     }
 )
+
+# Headers describing the byte stream the upstream produced. httpx has already
+# decoded it, so forwarding these would tell the client to decode again -- a
+# client that honours `content-encoding: gzip` then gunzips plain text and
+# fails the read, which surfaces as a connection error rather than a 502.
+DECODED_BODY_HEADERS = frozenset({"content-encoding"})
 PROJECT_HEADER = "x-tamias-project"
 DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER}
 
@@ -269,7 +275,7 @@ def forward_response_headers(headers: httpx.Headers) -> dict[str, str]:
         for token in value.split(",")
         if token.strip()
     }
-    dropped = HOP_BY_HOP | connection_named
+    dropped = HOP_BY_HOP | DECODED_BODY_HEADERS | connection_named
     return {key: value for key, value in headers.items() if key.lower() not in dropped}
 
 
