@@ -65,7 +65,8 @@ tamias dashboard --db requests.db --prices prices.toml
 `tamias serve` requires `--upstream`, `--prices`, and `--db`. Its available
 flags are `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--router-config`, `--cheap-model`, `--strong-model`, `--min-gap`,
-`--inject-usage`, `--request-usage-cost`, and `--verbose`.
+`--effort-policy`, `--effort-style`, `--inject-usage`,
+`--request-usage-cost`, and `--verbose`.
 
 `--effort-policy easy-low` is opt-in. In active router mode it asks the upstream
 for high reasoning effort on planning or tool-error turns and low effort on easy

@@ -234,12 +234,19 @@ Read this before quoting any number from this demo.
   are `:free` models, so the real billed cost is `$0`, and `tamias report` puts
   `[SIMULATED PRICES, NOT REAL SAVINGS]` beside each of them — copy the label
   along with the number.
-- **`--effort-policy` may not be wired up.** `config.env` has an `EFFORT_POLICY`
-  setting and the routed arm passes `--effort-policy "$EFFORT_POLICY"` when it is
-  non-empty — but if `tamias serve` on this branch has no such flag, setting it
-  makes the serve call exit 2 with `unrecognized arguments`. Check first with
-  `tamias serve --help | grep effort`; **leave `EFFORT_POLICY` empty** unless the
-  flag is listed there.
+- **`--effort-policy` is wired up on this branch.** `config.env`'s
+  `EFFORT_POLICY` setting is passed through by the routed arm and
+  `tamias serve --help` lists both `--effort-policy {off,easy-low}` and
+  `--effort-style {openrouter,openai}`, so leaving it empty is no longer
+  required. It stays opt-in: with it empty the proxy forwards the body
+  byte-for-byte. **What is verified:** with `--router-mode active
+  --effort-policy easy-low`, a live free-model run recorded
+  `effort_used = high` on the planning turn and `effort_used = low` on the
+  easy-tool turn, each matching `decision_target_effort`, and all three rows
+  returned 200 — so the policy is applied and persisted end to end. **What is
+  not:** whether the provider *honoured* the effort field. The log records the
+  requested and forwarded setting, not the provider's behaviour, so an effort
+  change is not evidence of an effort effect.
 - **The dashboard runs on this branch.** Section 5's
   `tamias dashboard --db … --prices …` (and the equivalent
   `python -m tamias.dashboard …`) both work. `tamias report` reads the same files
