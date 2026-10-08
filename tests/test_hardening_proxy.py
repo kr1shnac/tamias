@@ -88,8 +88,13 @@ def build_proxy(
     *,
     router_mode: str = "shadow",
     inject_usage: bool = False,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> tuple[FastAPI, Store]:
-    """The real proxy app, wired to ``upstream_app`` in place of a socket."""
+    """The real proxy app, wired to ``upstream_app`` in place of a socket.
+
+    ``transport`` overrides the default ``StreamingASGITransport(upstream_app)``
+    so a test can inject a failing or disconnecting upstream transport directly.
+    """
     store = Store(db_path)
     app = proxy.create_app(
         UPSTREAM_URL,
@@ -98,7 +103,9 @@ def build_proxy(
         router_mode,
         config=CONFIG,
         inject_usage=inject_usage,
-        transport=StreamingASGITransport(upstream_app),
+        transport=(
+            transport if transport is not None else StreamingASGITransport(upstream_app)
+        ),
     )
     return app, store
 
@@ -122,6 +129,24 @@ def user_body(model: str = STRONG, *, stream: bool = False, text: str = "hello")
 
 def send_headers(session: str) -> dict[str, str]:
     return {"content-type": "application/json", proxy.SESSION_HEADER: session}
+
+
+def responses_body(*, stream: bool = False) -> bytes:
+    return json.dumps(
+        {"model": STRONG, "input": "hi", "stream": stream}, separators=(",", ":")
+    ).encode()
+
+
+def messages_body(*, stream: bool = False) -> bytes:
+    return json.dumps(
+        {
+            "model": STRONG,
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": stream,
+        },
+        separators=(",", ":"),
+    ).encode()
 
 
 @pytest.mark.parametrize(
@@ -481,9 +506,202 @@ async def test_connection_refused_is_logged_and_service_resumes(
     assert len(rows) == 2, (
         f"both requests must be logged, got {len(rows)}: {[dict(r) for r in rows]}"
     )
-    assert status_of(store) == ["500", "200"], status_of(store)
+    assert status_of(store) == ["502", "200"], status_of(store)
+    assert rows[0]["failure_stage"] == "setup"
+    assert rows[0]["failure_type"] == "connect_error"
     assert rows[0]["input_tokens"] is None
     assert rows[0]["output_tokens"] is None
+    store.close()
+
+
+def _refusing_proxy(db_path: Path, prices_path: Path, transport: Any) -> tuple[FastAPI, Store]:
+    """A proxy whose only upstream transport raises on every send."""
+    store = Store(db_path)
+    app = proxy.create_app(
+        UPSTREAM_URL,
+        store,
+        load_price_sheet(prices_path),
+        "shadow",
+        config=CONFIG,
+        transport=transport,
+    )
+    return app, store
+
+
+class TimeoutTransport(httpx.AsyncBaseTransport):
+    """An upstream that never accepts: every send raises ConnectTimeout."""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connect timed out", request=request)
+
+
+class _DeadStream(httpx.AsyncByteStream):
+    """A byte stream that contains no bytes: dies on its first read."""
+
+    def __init__(self, request: httpx.Request) -> None:
+        self._request = request
+        self._raised = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        if not self._raised:
+            self._raised = True
+            raise httpx.ReadError("connection closed before the first byte", request=self._request)
+        return
+        yield b""  # pragma: no cover
+
+    async def aclose(self) -> None:
+        return None
+
+
+class CutOffStreamTransport(httpx.AsyncBaseTransport):
+    """An upstream that sends good headers, then dies before the first body byte."""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_DeadStream(request),
+            request=request,
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "make_body"),
+    [
+        ("/v1/responses", lambda: responses_body()),
+        ("/v1/responses", lambda: responses_body(stream=True)),
+        ("/v1/messages", lambda: messages_body()),
+        ("/v1/messages", lambda: messages_body(stream=True)),
+        (CHAT_PATH, lambda: user_body(stream=True)),
+    ],
+    ids=["responses", "responses-stream", "messages", "messages-stream", "chat-stream"],
+)
+async def test_refused_connection_is_a_coded_502_on_every_route(
+    db_path: Path, prices_path: Path, path: str, make_body: Any
+) -> None:
+    """The same coded 502 contract holds on every metered route, streaming or not.
+
+    §§6.1/6.4: a connection that never establishes is answered by the proxy
+    itself with a 502, and the ledger records *one* row whose only failure
+    detail is the coded pair (setup / connect_error) -- never the raw
+    exception text from the transport.
+    """
+    app, store = _refusing_proxy(db_path, prices_path, transport=RefusingTransport())
+
+    async with proxy_client(app) as client:
+        response = await client.post(path, content=make_body(), headers=send_headers("refused"))
+
+    assert response.status_code == 502
+    rows = store.rows()
+    assert len(rows) == 1, f"expected exactly one row, got {len(rows)}: {[dict(r) for r in rows]}"
+    row = rows[0]
+    assert row["status"] == "502"
+    assert row["failure_stage"] == "setup"
+    assert row["failure_type"] == "connect_error"
+    assert row["model_requested"] == STRONG
+    assert row["input_tokens"] is None
+    assert row["output_tokens"] is None
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "make_body"),
+    [
+        ("/v1/responses", lambda: responses_body()),
+        ("/v1/messages", lambda: messages_body()),
+        (CHAT_PATH, lambda: user_body()),
+    ],
+    ids=["responses", "messages", "chat"],
+)
+async def test_connect_timeout_is_a_coded_502_setup_row(
+    db_path: Path, prices_path: Path, path: str, make_body: Any
+) -> None:
+    """A connect timeout is its own coded failure, not a generic transport error."""
+    app, store = _refusing_proxy(db_path, prices_path, transport=TimeoutTransport())
+
+    async with proxy_client(app) as client:
+        response = await client.post(path, content=make_body(), headers=send_headers("refused"))
+
+    assert response.status_code == 502
+    rows = store.rows()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "502"
+    assert rows[0]["failure_stage"] == "setup"
+    assert rows[0]["failure_type"] == "connect_timeout"
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "make_body"),
+    [
+        ("/v1/responses", lambda: responses_body(stream=True)),
+        ("/v1/messages", lambda: messages_body(stream=True)),
+        (CHAT_PATH, lambda: user_body(stream=True)),
+    ],
+    ids=["responses", "messages", "chat"],
+)
+async def test_stream_that_dies_before_first_byte_is_a_coded_stream_row(
+    db_path: Path, prices_path: Path, path: str, make_body: Any
+) -> None:
+    """Headers arrived, bytes never did: one row, stage=stream, no raw text.
+
+    The response was already committed as a 200 by the time the body died, so
+    the client sees the stream abort; the ledger nevertheless records the
+    request as a failed 502 with a coded stage/type instead of leaving a silent
+    gap or echoing the transport's reason string.
+    """
+    app, store = _refusing_proxy(db_path, prices_path, transport=CutOffStreamTransport())
+
+    async with proxy_client(app) as client:
+        try:
+            async with client.stream(
+                "POST", path, content=make_body(), headers=send_headers("cut-off")
+            ) as response:
+                async for _chunk in response.aiter_bytes():
+                    break
+        except (httpx.HTTPError, StopAsyncIteration, RuntimeError):
+            pass
+
+    rows = store.rows()
+    assert len(rows) == 1, f"expected exactly one row, got {len(rows)}"
+    row = rows[0]
+    assert row["status"] == "502"
+    assert row["failure_stage"] == "stream"
+    assert row["failure_type"] == "read_error"
+    assert row["input_tokens"] is None
+    assert row["output_tokens"] is None
+    store.close()
+
+
+async def test_a_failure_row_never_stores_raw_exception_text(
+    db_path: Path, prices_path: Path
+) -> None:
+    """The coded failure columns must keep transport reason strings out of the DB.
+
+    The transport's exception carries a secret-shaped marker here; if any codec
+    path ever wrote the raw text to the ledger, this test would catch it.
+    """
+    marker = "sk-ant-leak-marker"
+
+    class SecretErrorTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError(f"[Errno 111] Connection refused {marker}", request=request)
+
+    app, store = _refusing_proxy(db_path, prices_path, transport=SecretErrorTransport())
+
+    async with proxy_client(app) as client:
+        response = await client.post(
+            CHAT_PATH, content=user_body(stream=True), headers=send_headers("leak")
+        )
+
+    assert response.status_code == 502
+    blob = " ".join(str(dict(r)) for r in store.rows())
+    assert marker not in blob
+    assert "Connection refused" not in blob
+    rows = store.rows()
+    assert len(rows) == 1
+    assert rows[0]["failure_stage"] == "setup"
+    assert rows[0]["failure_type"] == "connect_error"
     store.close()
 
 

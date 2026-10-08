@@ -19,6 +19,10 @@ provider reported it billed, an independent measurement.  The generic
 ``cost_usd`` column predates the split and is written only by older versions:
 new rows leave it NULL, and anything that reads it handles it as legacy data
 whose source cannot be proven.
+
+A failed upstream call is its own row, never a silent gap: ``failure_stage``
+and ``failure_type`` hold the coded (never raw) reason the request made it no
+further than ``status`` 502.
 """
 
 import os
@@ -122,6 +126,8 @@ COLUMNS = (
     "decision_target_effort",
     "computed_list_cost_usd",
     "cost_source",
+    "failure_stage",
+    "failure_type",
 )
 
 _CREATE_TABLE = f"""
@@ -151,7 +157,9 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     effort_used TEXT,
     decision_target_effort TEXT,
     computed_list_cost_usd REAL,
-    cost_source TEXT
+    cost_source TEXT,
+    failure_stage TEXT,
+    failure_type TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_session ON {TABLE}(session_id);
 """
@@ -201,6 +209,8 @@ class Store:
             ("decision_target_effort", "TEXT"),
             ("computed_list_cost_usd", "REAL"),
             ("cost_source", "TEXT"),
+            ("failure_stage", "TEXT"),
+            ("failure_type", "TEXT"),
         ):
             if name not in present:
                 self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
@@ -224,6 +234,8 @@ class Store:
         effort_requested: str | None = None,
         effort_used: str | None = None,
         decision_target_effort: str | None = None,
+        failure_stage: str | None = None,
+        failure_type: str | None = None,
     ) -> int:
         """Append one request and return its row id.
 
@@ -237,6 +249,12 @@ class Store:
         with its ``cost_source`` label; the provider-billed amount travels
         separately in ``usage.provider_cost_usd``.  The legacy ``cost_usd``
         column is left NULL so it can never be mistaken for either number.
+
+        The optional ``failure_stage``/``failure_type`` pair marks a request
+        that never produced an upstream response: ``setup`` or ``stream`` for
+        the stage, one of the coded types from :mod:`tamias.upstream` for the
+        kind.  Only coded values may be written here; a row with either set
+        records the proxy's own 502, never upstream text or credentials.
         """
         row = (
             ts,
@@ -264,6 +282,8 @@ class Store:
             sanitize_effort(decision_target_effort),
             cost.usd,
             cost.source,
+            failure_stage,
+            failure_type,
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)

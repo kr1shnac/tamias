@@ -48,6 +48,8 @@ from tamias import pricing, router, session
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
+from tamias.upstream import STREAM, UpstreamFailure, classify_http_error
+from tamias.upstream import send as upstream_send
 
 logger = logging.getLogger("tamias.anthropic")
 
@@ -291,6 +293,17 @@ def _bad_request(message: str) -> JSONResponse:
     )
 
 
+def _upstream_failure_response() -> JSONResponse:
+    """The deliberate 502-class answer for a request the upstream never served."""
+    return JSONResponse(
+        {
+            "type": "error",
+            "error": {"type": "upstream_error", "message": "upstream connection failed"},
+        },
+        status_code=502,
+    )
+
+
 def _promote_route(app: FastAPI, path: str) -> None:
     """Make sure ``path`` is matched before any catch-all route.
 
@@ -420,6 +433,8 @@ def register_routes(
         status: int,
         decision: Decision,
         project: object = None,
+        failure_stage: str | None = None,
+        failure_type: str | None = None,
     ) -> None:
         cost = cost_for_anthropic(model_used, usage, sheet)
         store.log_request(
@@ -435,6 +450,8 @@ def register_routes(
             price_sheet=sheet.source,
             price_simulated=sheet.simulated,
             project=project,
+            failure_stage=failure_stage,
+            failure_type=failure_type,
         )
 
     async def _stream_messages(
@@ -446,10 +463,16 @@ def register_routes(
         project: object,
     ) -> AsyncIterator[bytes]:
         collector = AnthropicStreamUsage()
+        failure: UpstreamFailure | None = None
         try:
             async for chunk in upstream.aiter_bytes():
                 yield chunk
                 collector.feed(chunk)
+        except httpx.HTTPError as exc:
+            # The response had already started; the meter still records the
+            # cancellation as one coded row rather than a silent gap.
+            failure = UpstreamFailure(STREAM, classify_http_error(exc))
+            raise
         finally:
             await upstream.aclose()
             model_used = _model_name(collector.model)
@@ -459,9 +482,11 @@ def register_routes(
                 model_used,
                 collector.usage(),
                 started,
-                upstream.status_code,
+                502 if failure is not None else upstream.status_code,
                 decision,
                 project,
+                failure_stage=failure.stage if failure is not None else None,
+                failure_type=failure.failure_type if failure is not None else None,
             )
             advance(session_id, model_used)
 
@@ -490,7 +515,23 @@ def register_routes(
         started = time.perf_counter()
 
         if not body.get("stream"):
-            upstream = await client.send(outgoing)
+            try:
+                upstream = await upstream_send(client, outgoing)
+            except UpstreamFailure as exc:
+                record(
+                    session_id,
+                    model_requested,
+                    model_requested,
+                    Usage(None, None, None, None),
+                    started,
+                    502,
+                    decision,
+                    getattr(request.state, "project", None),
+                    failure_stage=exc.stage,
+                    failure_type=exc.failure_type,
+                )
+                advance(session_id, model_requested)
+                return _upstream_failure_response()
             payload: Any = None
             try:
                 payload = upstream.json()
@@ -515,7 +556,23 @@ def register_routes(
                 headers=forward_response_headers(upstream.headers),
             )
 
-        upstream = await client.send(outgoing, stream=True)
+        try:
+            upstream = await upstream_send(client, outgoing, stream=True)
+        except UpstreamFailure as exc:
+            record(
+                session_id,
+                model_requested,
+                model_requested,
+                Usage(None, None, None, None),
+                started,
+                502,
+                decision,
+                getattr(request.state, "project", None),
+                failure_stage=exc.stage,
+                failure_type=exc.failure_type,
+            )
+            advance(session_id, model_requested)
+            return _upstream_failure_response()
         return StreamingResponse(
             _stream_messages(
                 upstream,

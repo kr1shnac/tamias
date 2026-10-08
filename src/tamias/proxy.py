@@ -49,6 +49,14 @@ from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
 from tamias.store import sanitize_generation_id, sanitize_project
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
+from tamias.upstream import (
+    STREAM,
+    UpstreamFailure,
+    classify_http_error,
+)
+from tamias.upstream import (
+    send as upstream_send,
+)
 
 logger = logging.getLogger("tamias.proxy")
 
@@ -202,6 +210,18 @@ def _model_name(value: Any) -> str:
 def _bad_request(message: str) -> JSONResponse:
     return JSONResponse(
         {"error": {"message": message, "type": "invalid_request_error"}}, status_code=400
+    )
+
+
+def _upstream_failure_response() -> JSONResponse:
+    """The deliberate 502-class answer for a request the upstream never served.
+
+    Kept beside the 400 helper so the three metered routes answer transport
+    failures with one consistent envelope rather than each inventing its own.
+    """
+    return JSONResponse(
+        {"error": {"message": "upstream connection failed", "type": "upstream_error"}},
+        status_code=502,
     )
 
 
@@ -405,6 +425,8 @@ def create_app(
         project: object = None,
         effort_requested: str | None = None,
         effort_used: str | None = None,
+        failure_stage: str | None = None,
+        failure_type: str | None = None,
     ) -> None:
         cost = pricing.compute_cost(model_used, usage, sheet)
         store.log_request(
@@ -427,6 +449,8 @@ def create_app(
             effort_requested=effort_requested,
             effort_used=effort_used,
             decision_target_effort=decision.target_effort,
+            failure_stage=failure_stage,
+            failure_type=failure_type,
         )
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
@@ -475,8 +499,8 @@ def create_app(
 
         if not streaming:
             try:
-                upstream = await client.send(outgoing)
-            except httpx.HTTPError:
+                upstream = await upstream_send(client, outgoing)
+            except UpstreamFailure as exc:
                 model_used = model_requested
                 record(
                     session_id,
@@ -484,17 +508,16 @@ def create_app(
                     model_used,
                     Usage(None, None, None, None),
                     started,
-                    500,
+                    502,
                     decision,
                     project=request.state.project,
                     effort_requested=effort_requested,
                     effort_used=effort_used,
+                    failure_stage=exc.stage,
+                    failure_type=exc.failure_type,
                 )
                 advance(session_id, model_used)
-                return JSONResponse(
-                    {"error": {"message": "upstream connection failed", "type": "upstream_error"}},
-                    status_code=502,
-                )
+                return _upstream_failure_response()
             payload: Any = None
             try:
                 payload = upstream.json()
@@ -522,7 +545,26 @@ def create_app(
                 headers=forward_response_headers(upstream.headers),
             )
 
-        upstream = await client.send(outgoing, stream=True)
+        try:
+            upstream = await upstream_send(client, outgoing, stream=True)
+        except UpstreamFailure as exc:
+            model_used = model_requested
+            record(
+                session_id,
+                model_requested,
+                model_used,
+                Usage(None, None, None, None),
+                started,
+                502,
+                decision,
+                project=request.state.project,
+                effort_requested=effort_requested,
+                effort_used=effort_used,
+                failure_stage=exc.stage,
+                failure_type=exc.failure_type,
+            )
+            advance(session_id, model_used)
+            return _upstream_failure_response()
         return StreamingResponse(
             _stream_chat(
                 upstream,
@@ -563,6 +605,7 @@ def create_app(
                 seen_generation_id = payload["id"]
 
         buffer = b""
+        failure: UpstreamFailure | None = None
         try:
             async for chunk in upstream.aiter_bytes():
                 yield chunk
@@ -575,6 +618,12 @@ def create_app(
             tail = sse_payload(buffer)
             if tail is not None:
                 absorb(tail)
+        except httpx.HTTPError as exc:
+            # The response had already started, so the client's byte stream ends
+            # here; the ledger still records the cancellation as one coded row
+            # rather than letting a failed request be silently absent.
+            failure = UpstreamFailure(STREAM, classify_http_error(exc))
+            raise
         finally:
             await upstream.aclose()
             model_used = _model_name(seen_model)
@@ -584,12 +633,14 @@ def create_app(
                 model_used,
                 to_usage(seen_usage),
                 started,
-                upstream.status_code,
+                502 if failure is not None else upstream.status_code,
                 decision,
                 seen_generation_id,
                 project,
                 effort_requested,
                 effort_used,
+                failure_stage=failure.stage if failure is not None else None,
+                failure_type=failure.failure_type if failure is not None else None,
             )
             advance(session_id, model_used)
 

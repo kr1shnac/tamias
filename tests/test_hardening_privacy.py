@@ -253,6 +253,8 @@ EXPECTED_COLUMNS = (
     "decision_target_effort",
     "computed_list_cost_usd",
     "cost_source",
+    "failure_stage",
+    "failure_type",
 )
 
 # Every column whose declared SQL type can hold text, and the single thing allowed
@@ -335,6 +337,22 @@ TEXT_COLUMN_ALLOW_LIST = {
     "cost_source": (
         "the pricing engine's own label, 'computed' or 'unknown', written from "
         "CostBreakdown.source and never from any request, response or header"
+    ),
+    # failure_stage and failure_type mark a request that never produced an
+    # upstream response.  They are written by the route handlers from
+    # tamias.upstream alone -- "setup" or "stream" for the stage, one of the
+    # short coded types classify_http_error produces -- so only the engine
+    # writes them and only coded literals are possible.  The raw exception
+    # text that originally caused them is deliberately *not* stored: a ledger
+    # row records where and how the upstream failed, never the reason string.
+    "failure_stage": (
+        "the route's own stage label, 'setup' or 'stream', written from "
+        "tamias.upstream on a transport failure and never from any request or response"
+    ),
+    "failure_type": (
+        "the route's own coded type (e.g. 'connect_error', 'read_timeout'), "
+        "written from tamias.upstream's classify_http_error on a transport "
+        "failure; never the exception text and never from any request or response"
     ),
 }
 

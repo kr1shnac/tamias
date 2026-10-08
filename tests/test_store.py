@@ -323,6 +323,8 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "decision_target_effort",
         "computed_list_cost_usd",
         "cost_source",
+        "failure_stage",
+        "failure_type",
     )
 
 
@@ -393,6 +395,8 @@ def test_reopening_an_old_schema_adds_nullable_audit_columns(tmp_path: Path) -> 
         "decision_target_effort",
         "computed_list_cost_usd",
         "cost_source",
+        "failure_stage",
+        "failure_type",
     } <= columns
 
 
