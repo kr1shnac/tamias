@@ -120,6 +120,10 @@ class RequestLog(Protocol):
     ) -> int: ...
 
 
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def to_usage(raw: Any) -> Usage:
     """Build a Usage from an OpenAI usage object; anything missing stays None."""
     if not isinstance(raw, dict):
@@ -131,12 +135,23 @@ def to_usage(raw: Any) -> Usage:
         )
     details = raw.get("prompt_tokens_details")
     cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    # Write counts arrive either inside prompt_tokens_details (the OpenAI/
+    # OpenRouter shape) or at the top level (the Anthropic-compatible shape).
+    # None -- never 0 -- when genuinely absent, so a model with a nonzero
+    # cache_write rate prices to UNKNOWN rather than silently undercharging.
+    writes = (
+        details.get("cache_creation_input_tokens")
+        if isinstance(details, dict)
+        else None
+    )
+    if writes is None:
+        writes = raw.get("cache_creation_input_tokens")
     provider_cost = raw.get("cost")
     return Usage(
         input_tokens=raw.get("prompt_tokens"),
         output_tokens=raw.get("completion_tokens"),
         cached_input_tokens=cached,
-        cache_write_tokens=None,
+        cache_write_tokens=_count(writes),
         provider_cost_usd=(
             float(provider_cost)
             if isinstance(provider_cost, int | float) and not isinstance(provider_cost, bool)

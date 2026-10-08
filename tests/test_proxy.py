@@ -46,6 +46,31 @@ def test_usage_cost_is_unknown_when_absent() -> None:
     assert proxy.to_usage(RAW_USAGE).provider_cost_usd is None
 
 
+def test_cache_write_is_read_from_prompt_details() -> None:
+    details = {**RAW_USAGE["prompt_tokens_details"], "cache_creation_input_tokens": 4}
+    usage = proxy.to_usage({**RAW_USAGE, "prompt_tokens_details": details})
+    assert usage.cache_write_tokens == 4
+
+
+def test_cache_write_is_read_from_top_level_usage() -> None:
+    usage = proxy.to_usage({**RAW_USAGE, "cache_creation_input_tokens": 4})
+    assert usage.cache_write_tokens == 4
+
+
+def test_cache_write_stays_none_when_genuinely_absent() -> None:
+    assert proxy.to_usage(RAW_USAGE).cache_write_tokens is None
+
+
+def test_cache_write_never_becomes_zero_or_coerced() -> None:
+    details = {"cached_tokens": 3, "cache_creation_input_tokens": 0}
+    assert proxy.to_usage({**RAW_USAGE, "prompt_tokens_details": details}).cache_write_tokens == 0
+    string_writes = {**RAW_USAGE, "cache_creation_input_tokens": "4"}
+    assert proxy.to_usage(string_writes).cache_write_tokens is None
+    assert proxy.to_usage(
+        {**RAW_USAGE, "cache_creation_input_tokens": True}
+    ).cache_write_tokens is None
+
+
 def test_final_stream_usage_cost_is_read_from_a_canned_chunk() -> None:
     payload = proxy.sse_payload(
         b'data: {"usage":{"prompt_tokens":11,"completion_tokens":7,"cost":0.0025}}'

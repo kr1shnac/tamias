@@ -80,12 +80,41 @@ cache_write=0.0
     assert "inconsistent" in c.formula
 
 
+def _cw_sheet(tmp_path: Path) -> PriceSheet:
+    """A sheet whose model charges for cache writes (P0-F)."""
+    data = """date="2026-10-04"
+[strong]
+input=3.0
+output=15.0
+cached_input=0.30
+cache_write=3.75
+"""
+    path = tmp_path / "cw.toml"
+    path.write_text(data)
+    return load_price_sheet(path)
+
+
+def test_cache_write_counts_are_priced_when_reported(tmp_path: Path):
+    """A chat row that reports write counts prices them at the cw rate."""
+    sheet = _cw_sheet(tmp_path)
+    c = compute_cost("strong", Usage(1_000_000, 0, 800_000, 100_000), sheet)
+    assert c.usd == pytest.approx(0.915)
+
+
+def test_cache_write_counts_omitted_on_a_cw_model_price_to_unknown(tmp_path: Path):
+    """Omitting write counts on a cw-nonzero model is UNKNOWN, not free."""
+    sheet = _cw_sheet(tmp_path)
+    c = compute_cost("strong", Usage(1_000_000, 0, 800_000, None), sheet)
+    assert c.usd is None
+    assert "unknown: cache_write_tokens" in c.formula
+
+
 def test_openai_style_usage_prices_against_the_example_sheet():
     """An unreported cache-write count must not make a cost UNKNOWN by itself.
 
-    proxy.to_usage always sets cache_write_tokens=None for the OpenAI
-    chat-completions path, so the shipped example sheet gives those models
-    cache_write = 0 and their requests still get a number.
+    The OpenAI chat-completions path sets cache_write_tokens=None when the
+    upstream never itemizes writes, so the shipped example sheet gives those
+    models cache_write = 0 and their requests still get a number.
     """
     sheet = load_price_sheet(Path(__file__).resolve().parents[1] / "prices.example.toml")
 

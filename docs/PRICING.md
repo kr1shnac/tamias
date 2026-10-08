@@ -100,6 +100,20 @@ A missing rate with a **zero** count costs nothing and stays known: the rate
 only matters if tokens reached that bucket. An unreported count with a rate of
 `0` is likewise known, because zero dollars times any count is zero dollars.
 
+## Where cache-write counts come from
+
+The chat route reads write counts from usage when a provider reports them —
+`prompt_tokens_details.cache_creation_input_tokens` (the OpenAI/OpenRouter
+shape) or a top-level `cache_creation_input_tokens` (the Anthropic-compatible
+shape) — and keeps the count `None`, never `0`, when they are genuinely absent.
+Cost arithmetic prices those counts via `cache_write_rate` / `cache_write_1h_rate`.
+
+Some OpenAI-style accounts bill cache writes automatically but never itemize
+them per request. There is nothing to add up, so the cost stays **UNKNOWN** and
+the formula names `cache_write_tokens`, exactly as it would for any other
+missing count. Tamias does not invent a surcharge estimate for writes the
+upstream chose not to itemize: an unverified number would read as money.
+
 ## Refreshing a sheet
 
 ```sh
