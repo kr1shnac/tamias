@@ -270,6 +270,10 @@ output = 0.0
 cached_input = 0.0
 cache_write = 0.0
 tier_200k_input = 0.0
+
+[free-no-cache]
+input = 0.0
+output = 0.0
 """
 
 
@@ -412,6 +416,33 @@ def test_a_tiered_model_is_unknown_even_when_every_rate_is_zero(tmp_path):
     assert "tier_200k_input" in breakdown.formula
 
 
+def test_a_free_model_with_unquoted_cache_rate_is_unknown_on_cache_use(tmp_path):
+    """Rule 1b outranks the free-model shortcut: an unquoted bucket in use is not $0.
+
+    This is B3: a model that quotes zero base rates but never quotes a cache
+    rate costs US$0.00 today even when the upstream reports hundreds of
+    thousands of cached-input tokens.  Zero is a claim those hanging tokens are
+    free, so when the bucket is actually touched the cost is UNKNOWN instead.
+    """
+    sheet = rules_sheet(tmp_path)
+    breakdown = compute_cost("free-no-cache", Usage(10_000, 2_000, 5_000, 0), sheet)
+    assert breakdown.usd is None
+    assert breakdown.source == "unknown"
+    assert "cached_input_rate" in breakdown.formula
+
+
+def test_a_free_model_with_unquoted_cache_rate_is_zero_when_the_bucket_is_empty(tmp_path):
+    """No tokens reached the unquoted bucket, so a free model costs exactly 0."""
+    sheet = rules_sheet(tmp_path)
+    breakdown = compute_cost("free-no-cache", Usage(10_000, 2_000, 0, 0), sheet)
+    assert breakdown.usd == 0.0
+    assert breakdown.source == "computed"
+    # An unreported count also touches the bucket with nothing: still free.
+    untouched = compute_cost("free-no-cache", Usage(10_000, 2_000, None, None), sheet)
+    assert untouched.usd == 0.0
+    assert untouched.source == "computed"
+
+
 def test_a_rate_key_that_is_not_a_tier_field_is_still_rejected(tmp_path):
     """Only names beginning with `tier` are tolerated; typos stay errors."""
     path = tmp_path / "prices.toml"
@@ -421,3 +452,49 @@ def test_a_rate_key_that_is_not_a_tier_field_is_still_rejected(tmp_path):
     )
     with pytest.raises(ValueError, match="unknown rate"):
         load_price_sheet(path)
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "[m]\ninput = -1.0\noutput = 15.0\n",
+        "[m]\ninput = 3.0\noutput = inf\n",
+        "[m]\ninput = 3.0\noutput = -inf\n",
+        "[m]\ninput = nan\noutput = 15.0\n",
+        "[m]\ninput = 3.0\noutput = 15.0\ncached_input = -0.5\n",
+        "[m]\ninput = 3.0\noutput = 15.0\ncache_write = nan\n",
+    ],
+    ids=[
+        "negative-input",
+        "positive-inf",
+        "negative-inf",
+        "nan-input",
+        "negative-cache",
+        "nan-write",
+    ],
+)
+def test_rates_must_be_finite_and_non_negative(tmp_path, table) -> None:
+    """A rate the arithmetic cannot trust is refused at load time, never later.
+
+    Negative would fabricate a credit, and NaN or +/-inf would poison every sum
+    it touched.  The loader rejects them up front so no price sitting in the
+    sheet can silently corrupt the audit trail.
+    """
+    path = tmp_path / "prices.toml"
+    path.write_text(f'date = "2026-10-04"\n\n{table}', encoding="utf-8")
+    with pytest.raises(ValueError, match="finite non-negative"):
+        load_price_sheet(path)
+
+
+def test_a_fully_specified_all_zero_model_still_returns_zero(tmp_path):
+    """Every bucket quoted at 0 is genuinely free: $0.00, exactly, not UNKNOWN."""
+    path = tmp_path / "prices.toml"
+    path.write_text(
+        'date = "2026-10-04"\n\n[free]\ninput = 0.0\noutput = 0.0\n'
+        "cached_input = 0.0\ncache_write = 0.0\n",
+        encoding="utf-8",
+    )
+    sheet = load_price_sheet(path)
+    breakdown = compute_cost("free", Usage(10_000, 2_000, 3_000, 500), sheet)
+    assert breakdown.usd == 0.0
+    assert breakdown.source == "computed"

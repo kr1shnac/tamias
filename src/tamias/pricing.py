@@ -1,5 +1,6 @@
 """Price sheet loading and cost arithmetic."""
 
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,7 +124,19 @@ def _parse_model(source: Path, model: str, table: Any) -> ModelPrice:
         elif isinstance(raw, bool) or not isinstance(raw, int | float):
             raise ValueError(f"{source}: [{model}].{field} must be a number, got {raw!r}")
         else:
-            rates[field] = float(raw)
+            value = float(raw)
+            # A rate is a non-negative finite number.  Negative, NaN and infinite
+            # rates are refused at load time rather than fed into arithmetic,
+            # where a NaN would poison every sum and a -1 would invent a credit.
+            # Zero stays a real rate throughout: it is distinct from a missing
+            # rate everywhere, and that distinction is what the free-model rule
+            # and the missing-cache-rate rule both rest on.
+            if value < 0.0 or math.isnan(value) or math.isinf(value):
+                raise ValueError(
+                    f"{source}: [{model}].{field} must be a finite non-negative "
+                    f"number, got {raw!r}"
+                )
+            rates[field] = value
     if rates.get("cache_write_1h") is None:
         rates["cache_write_1h"] = rates.get("cache_write")
     return ModelPrice(**rates, tiers=tiers)
@@ -192,20 +205,14 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             source="unknown",
         )
 
-    # Rule 0 is model missing (done). Rule 1: if every price is 0
-    all_prices = [input_p, output_p, cached_p, cw_p, cw1h_p]
-    if all(p == 0.0 for p in all_prices if p is not None):
-        return CostBreakdown(
-            usd=0.0,
-            formula="free model: all prices are 0",
-            price_sheet_date=sheet.date,
-        )
-
-    # Rule 1b: a cache rate the sheet never quoted cannot price tokens that
-    # actually reached that bucket.  Falling back to the input rate (or to
-    # zero) would invent a price, so the field is named and the cost is left
-    # UNKNOWN.  A count of zero or an unreported count touches no such tokens,
-    # so it costs nothing here and is settled by the count rules below.
+    # Rule 1b before the free-model shortcut: a cache rate the sheet never
+    # quoted cannot price tokens that actually reached that bucket.  Falling
+    # back to the input rate (or to zero) would invent a price, so the field is
+    # named and the cost is left UNKNOWN.  A count of zero or an unreported
+    # count touches no such tokens, so it costs nothing here and is settled by
+    # the count rules below.  This check must run before Rule 1 so that a model
+    # whose quoted base rates are all zero still prices as UNKNOWN, not $0.00,
+    # when its unquoted cache buckets were actually used.
     missing_cache_rates = []
     if cached_p is None and usage.cached_input_tokens is not None:
         if usage.cached_input_tokens > 0:
@@ -223,6 +230,20 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             formula=f"{expr}; unknown: {', '.join(missing_cache_rates)}",
             price_sheet_date=sheet.date,
             source="unknown",
+        )
+
+    # Rule 1: if every quoted price is 0, and Rule 1b found no unquoted bucket
+    # in use, the model is genuinely free at the quoted buckets: $0.00 is the
+    # exact number, not an absence.  Zero rates and missing rates stay distinct
+    # by construction: a None rate never appears in `all_prices`, so a model
+    # that never quoted its cache rate can only reach this rule when no tokens
+    # touched that bucket (Rule 1b already priced the alternative).
+    all_prices = [input_p, output_p, cached_p, cw_p, cw1h_p]
+    if all(p == 0.0 for p in all_prices if p is not None):
+        return CostBreakdown(
+            usd=0.0,
+            formula="free model: all quoted prices are 0 and no unquoted rate was used",
+            price_sheet_date=sheet.date,
         )
 
     def is_nonzero(p: float | None) -> bool:
