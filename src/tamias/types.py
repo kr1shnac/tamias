@@ -41,11 +41,19 @@ class CostBreakdown:
     the price sheet or a needed token count or rate was missing.  formula
     always states the arithmetic in readable form, even when it cannot be
     evaluated.
+
+    source says which observation usd is: ``computed`` for a list-price
+    arithmetic over logged token counts, ``unknown`` when it could not be
+    computed.  A provider-billed amount is never folded in here -- it is a
+    separate measurement carried by ``Usage.provider_cost_usd`` and stored in
+    its own column -- so a computed number is never labelled with money the
+    provider actually charged.
     """
 
     usd: float | None
     formula: str
     price_sheet_date: str
+    source: Literal["computed", "unknown"] = "computed"
 
 
 @dataclass(frozen=True, slots=True)

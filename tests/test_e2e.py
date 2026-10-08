@@ -242,7 +242,9 @@ def test_cost_is_unknown_never_zero(run_session: list[dict[str, Any]], prices_pa
     # cache_write_tokens is unknown, so the arithmetic cannot be completed.  A
     # cost of 0.0 here would be a fabricated number.
     for row in run_session:
-        assert row["cost_usd"] is None
+        assert row["computed_list_cost_usd"] is None
+        assert row["cost_source"] == "unknown"
+        assert row["cost_usd"] is None, "new rows never write the pre-split column"
         assert row["price_sheet_date"] == SHEET_DATE
 
 
@@ -358,7 +360,8 @@ def test_stored_cost_matches_the_pricing_module(
         expected = pricing.compute_cost(STRONG, MOCK_USAGE, sheet)
         assert expected.usd is None
         assert "cache_write" in expected.formula
-        assert row["cost_usd"] == expected.usd
+        assert row["computed_list_cost_usd"] == expected.usd
+        assert row["cost_source"] == expected.source
 
 
 def test_serve_defaults_to_shadow_mode_on_port_8000() -> None:

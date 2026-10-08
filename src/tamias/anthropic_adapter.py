@@ -175,6 +175,7 @@ def cost_for_anthropic(model: str, usage: Usage, sheet: PriceSheet) -> CostBreak
         usd=None,
         formula=f"{cost.formula}; unknown: {', '.join(missing_rates)}",
         price_sheet_date=sheet.date,
+        source="unknown",
     )
 
 

@@ -47,12 +47,15 @@ def compare_rows(rows: list[dict[str, Any]], tolerance: float = 1e-6) -> list[Co
         db = _number(row.get("provider_cost_usd"))
         lookup = _number(row.get("lookup_cost_usd"))
         difference = lookup - db if lookup is not None and db is not None else None
+        computed = _number(row.get("computed_list_cost_usd"))
+        if computed is None:
+            computed = _number(row.get("cost_usd"))
         compared.append(
             ComparedRow(
                 request=int(row["id"]),
                 billed_db=db,
                 billed_lookup=lookup,
-                computed=_number(row.get("cost_usd")),
+                computed=computed,
                 difference=difference,
                 matches=abs(difference) <= tolerance if difference is not None else None,
             )
@@ -74,10 +77,19 @@ def _rows(db_path: Path) -> list[dict[str, Any]]:
         missing = required - columns
         if missing:
             raise ValueError(f"request log lacks required columns: {', '.join(sorted(missing))}")
+        # Every new row writes the list-price computation to its own column; a
+        # pre-split log stores the same kind of number in the generic cost_usd.
+        # Either way the reconciliation compares provider-billed against a
+        # list-price computation, never the same value against itself.
+        if "computed_list_cost_usd" in columns:
+            computed_select = "computed_list_cost_usd"
+        else:
+            computed_select = "cost_usd AS computed_list_cost_usd"
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT id, generation_id, provider_cost_usd, cost_usd FROM requests "
+                "SELECT id, generation_id, provider_cost_usd, cost_usd, "
+                f"{computed_select} FROM requests "
                 "WHERE generation_id IS NOT NULL AND generation_id != '' ORDER BY id"
             )
         ]

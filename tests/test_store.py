@@ -31,7 +31,9 @@ TS = "2026-10-04T12:00:00Z"
 KNOWN_USAGE = Usage(1_000, 200, 200, 0)
 UNKNOWN_USAGE = Usage(None, None, None, None)
 KNOWN_COST = CostBreakdown(0.00246, "usd = (0.00246)", SHEET_DATE)
-UNKNOWN_COST = CostBreakdown(None, "usd = unknown: output", SHEET_DATE)
+UNKNOWN_COST = CostBreakdown(
+    None, "usd = unknown: output", SHEET_DATE, source="unknown"
+)
 STAY = Decision(action="STAY", target_model=None, reason="already on the cheap model")
 SWITCH = Decision(
     action="SWITCH", target_model="model-b", reason="request 3 of 3", persisted_only=True
@@ -91,7 +93,9 @@ def test_log_request_persists_every_field(store: Store) -> None:
     assert row["output_tokens"] == 200
     assert row["cached_input_tokens"] == 200
     assert row["cache_write_tokens"] == 0
-    assert row["cost_usd"] == 0.00246
+    assert row["cost_usd"] is None, "new rows never write the pre-split generic column"
+    assert row["computed_list_cost_usd"] == 0.00246
+    assert row["cost_source"] == "computed"
     assert row["price_sheet_date"] == SHEET_DATE
     assert row["latency_ms"] == 120
     assert row["status"] == "200"
@@ -151,6 +155,8 @@ def test_unknown_fields_are_stored_as_null_never_as_zero(store: Store) -> None:
         assert row[field] is None, f"{field} must be NULL, not 0"
         assert row[field] != 0
     assert row["cost_usd"] is None
+    assert row["computed_list_cost_usd"] is None
+    assert row["cost_source"] == "unknown"
     assert row["latency_ms"] is None
 
 
@@ -167,9 +173,10 @@ def test_nulls_survive_a_reopen_of_the_database_file(tmp_path: Path) -> None:
     with sqlite3.connect(path) as reader:
         stored = reader.execute(
             "SELECT input_tokens, output_tokens, cached_input_tokens, cache_write_tokens,"
-            " cost_usd, latency_ms, price_sheet_date FROM requests"
+            " cost_usd, latency_ms, price_sheet_date, computed_list_cost_usd, cost_source"
+            " FROM requests"
         ).fetchone()
-    assert stored == (None, None, None, None, None, None, SHEET_DATE)
+    assert stored == (None, None, None, None, None, None, SHEET_DATE, None, "unknown")
 
 
 def test_zero_fields_are_stored_as_zero_not_as_null(store: Store) -> None:
@@ -184,7 +191,9 @@ def test_zero_fields_are_stored_as_zero_not_as_null(store: Store) -> None:
     (row,) = store.rows()
     assert (row["input_tokens"], row["output_tokens"]) == (0, 0)
     assert (row["cached_input_tokens"], row["cache_write_tokens"]) == (0, 0)
-    assert row["cost_usd"] == 0.0
+    assert row["cost_usd"] is None
+    assert row["computed_list_cost_usd"] == 0.0
+    assert row["cost_source"] == "computed"
     assert row["latency_ms"] == 0
 
 
@@ -274,6 +283,7 @@ def test_schema_has_no_column_for_request_or_response_text(store: Store) -> None
         "status",
         "decision_action",
         "decision_reason",
+        "cost_source",
     }
     for forbidden in ("prompt", "content", "text", "message", "body", "completion"):
         assert forbidden not in " ".join(row.keys())
@@ -311,6 +321,8 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "effort_requested",
         "effort_used",
         "decision_target_effort",
+        "computed_list_cost_usd",
+        "cost_source",
     )
 
 
@@ -321,6 +333,7 @@ def test_price_provenance_is_persisted_with_the_number(store: Store) -> None:
     (row,) = store.rows()
     assert row["price_sheet"] == SHEET_DATE
     assert row["price_simulated"] == 0
+    assert row["cost_source"] == "computed"
 
 
 def test_provider_cost_is_nullable_and_persisted(store: Store) -> None:
@@ -328,6 +341,27 @@ def test_provider_cost_is_nullable_and_persisted(store: Store) -> None:
 
     (row,) = store.rows()
     assert row["provider_cost_usd"] == 0.0025
+
+
+def test_the_three_money_columns_stay_independent(store: Store) -> None:
+    """Billed, computed and the pre-split generic never share a meaning.
+
+    The provider may bill one number (0.0025), the sheet-computed list price is
+    another (0.00246), and the legacy ``cost_usd`` column must not read as
+    either of them -- new rows leave it NULL so nothing can mistake it for the
+    computed number the old engine used to store there.
+    """
+    log(
+        store,
+        usage=Usage(1_000, 200, 200, 0, provider_cost_usd=0.0025),
+        cost=CostBreakdown(0.00246, "usd = (0.00246)", SHEET_DATE),
+    )
+
+    (row,) = store.rows()
+    assert row["provider_cost_usd"] == 0.0025
+    assert row["computed_list_cost_usd"] == 0.00246
+    assert row["cost_source"] == "computed"
+    assert row["cost_usd"] is None
 
 
 def test_reopening_an_old_schema_adds_nullable_audit_columns(tmp_path: Path) -> None:
@@ -357,6 +391,8 @@ def test_reopening_an_old_schema_adds_nullable_audit_columns(tmp_path: Path) -> 
         "effort_requested",
         "effort_used",
         "decision_target_effort",
+        "computed_list_cost_usd",
+        "cost_source",
     } <= columns
 
 

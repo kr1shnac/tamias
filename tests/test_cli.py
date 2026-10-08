@@ -175,7 +175,7 @@ def test_report_prints_unknown_when_any_cost_is_missing(
     db = str(tmp_path / "log.db")
     log(db, BIG, BIG_ON_STRONG, "SWITCH")
     log(db, SMALL, SMALL_ON_STRONG, "STAY")
-    log(db, SMALL, None, "STAY")  # cost_usd is NULL => UNKNOWN
+    log(db, SMALL, None, "STAY")  # computed cost is NULL => UNKNOWN
     code, out = run(capsys, db, write_prices(tmp_path))
     assert code == 0
     assert "requests: 3" in out
@@ -371,7 +371,7 @@ def test_report_estimate_matches_the_proxys_own_arithmetic(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # The saving is priced with tamias.pricing, so it cannot silently drift
-    # away from the formula the proxy used to write cost_usd.
+    # away from the formula the proxy used to write the computed cost.
     prices = write_prices(tmp_path)
     sheet = load_price_sheet(prices)
     db = str(tmp_path / "log.db")

@@ -62,11 +62,21 @@ UPSTREAM_ENV_VAR = "TAMIAS_UPSTREAM"
 # store.Store owns the schema; these are the columns the report reads, with a
 # little tolerance for a renamed table or column.
 REQUEST_TABLES = ("requests",)
-COST_COLUMNS = ("cost_usd", "cost", "usd")
+COST_COLUMNS = ("computed_list_cost_usd", "cost_usd", "cost", "usd")
 PRICE_SHEET_COLUMNS = ("price_sheet",)
 PRICE_SIMULATED_COLUMNS = ("price_simulated",)
 DECISION_COLUMNS = ("decision_action", "decision")
 MODEL_USED_COLUMNS = ("model_used", "model")
+
+
+def _warn_if_exposed(host: str) -> None:
+    """Warn when a service is bound beyond loopback: it has no authentication."""
+    if host not in ("127.0.0.1", "localhost", "::1") and not host.startswith("127."):
+        print(
+            f"tamias: WARNING — binding to {host!r}; this service has no "
+            f"authentication, keep it on loopback unless you are on a trusted network",
+            file=sys.stderr,
+        )
 
 
 def _money(value: float) -> str:
@@ -117,10 +127,14 @@ def _read_rows(db_path: str) -> list[dict[str, Any]]:
 
 
 def _stored_cost(row: dict[str, Any]) -> float | None:
-    """The cost the proxy logged, or None when it is UNKNOWN.
+    """The computed list-price cost the proxy logged, or None when UNKNOWN.
 
-    A NULL cost_usd is UNKNOWN, never zero: the request may well have been
-    billed, we just cannot prove how much.
+    Prefers the named ``computed_list_cost_usd`` column that every new row is
+    written with.  A row that only carries the pre-split generic ``cost_usd``
+    is legacy data: the number is still read so an old log keeps working, but
+    its source cannot be proven, which the provenance lines below report.  A
+    NULL is UNKNOWN, never zero: the request may well have been billed, we just
+    cannot prove how much.
     """
     raw = _pick(row, COST_COLUMNS)
     if isinstance(raw, bool) or not isinstance(raw, int | float):
@@ -541,6 +555,7 @@ def serve(args: argparse.Namespace) -> int:
             "tamias serve: --request-usage-cost is ON: requests include usage.include=true",
             file=sys.stderr,
         )
+    _warn_if_exposed(args.host)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     store: Store | None = getattr(app.state, "store", None)
     if store is not None:

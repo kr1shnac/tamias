@@ -134,18 +134,12 @@ def _show(value: float | int | None) -> str:
 
 
 def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
-    # Rule -1: money the provider itself billed.  It is a measurement of what
-    # was charged, so it beats every sheet-derived number, including a model
-    # the sheet has never heard of.
-    if usage.provider_cost_usd is not None:
-        return CostBreakdown(
-            usd=float(usage.provider_cost_usd),
-            formula=(
-                f"usd = provider-billed {usage.provider_cost_usd!r} "
-                "(reported by the upstream; no sheet arithmetic applied)"
-            ),
-            price_sheet_date=sheet.date,
-        )
+    # Rule 0 begins here.  A provider-billed amount (usage.provider_cost_usd) is
+    # a measurement, never a substitute for this arithmetic: it is carried out
+    # separately in its own stored column, and the sheet calculation below is
+    # computed independently whenever the sheet knows enough.  Treating the
+    # billed number as the formula's result is exactly the conflation the
+    # billing/computed separation exists to prevent.
 
     price = sheet.get(model)
     if price is None:
@@ -156,6 +150,7 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
                 "so no rate is known"
             ),
             price_sheet_date=sheet.date,
+            source="unknown",
         )
 
     # A tiered entry (long-context tiers and the like) is priced by rules this
@@ -170,6 +165,7 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
                 f"tiered pricing field(s): {fields}; tiered pricing is unsupported"
             ),
             price_sheet_date=sheet.date,
+            source="unknown",
         )
 
     # Get effective prices
@@ -193,6 +189,7 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             usd=None,
             formula=f"{expr}; unknown: {', '.join(missing_rates)}",
             price_sheet_date=sheet.date,
+            source="unknown",
         )
 
     # Rule 0 is model missing (done). Rule 1: if every price is 0
@@ -225,6 +222,7 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             usd=None,
             formula=f"{expr}; unknown: {', '.join(missing_cache_rates)}",
             price_sheet_date=sheet.date,
+            source="unknown",
         )
 
     def is_nonzero(p: float | None) -> bool:
@@ -242,7 +240,10 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             usage, input_p, output_p, cached_p, cw_p, cw1h_p, cached_f=0, uncached_f=None
         )
         return CostBreakdown(
-            usd=None, formula=f"{expr}; unknown: cached_input_tokens", price_sheet_date=sheet.date
+            usd=None,
+            formula=f"{expr}; unknown: cached_input_tokens",
+            price_sheet_date=sheet.date,
+            source="unknown",
         )
     elif (
         cached_tokens is None
@@ -286,7 +287,10 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             uncached_f=None,
         )
         return CostBreakdown(
-            usd=None, formula=f"{expr}; inconsistent usage", price_sheet_date=sheet.date
+            usd=None,
+            formula=f"{expr}; inconsistent usage",
+            price_sheet_date=sheet.date,
+            source="unknown",
         )
 
     # Rule 2: determine missing needed fields
@@ -326,6 +330,7 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             usd=None,
             formula=f"{expr}; unknown: {', '.join(missing)}",
             price_sheet_date=sheet.date,
+            source="unknown",
         )
 
     # Compute

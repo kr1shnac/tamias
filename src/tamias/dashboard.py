@@ -60,6 +60,8 @@ COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("price_sheet", ("price_sheet",)),
     ("price_simulated", ("price_simulated",)),
     ("provider_cost_usd", ("provider_cost_usd",)),
+    ("computed_list_cost_usd", ("computed_list_cost_usd",)),
+    ("cost_source", ("cost_source",)),
     ("latency_ms", ("latency_ms",)),
     ("status", ("status",)),
     ("decision_target_model", ("decision_target_model",)),
@@ -192,7 +194,9 @@ def _price(row: dict[str, Any], sheet: PriceSheet) -> dict[str, Any]:
     priced = actual is not None and baseline is not None
 
     row["actual_cost"] = actual
-    stored_cost = row.get("cost_usd")
+    stored_cost = row.get("computed_list_cost_usd")
+    if stored_cost is None:
+        stored_cost = row.get("cost_usd")
     row["computed_cost_usd"] = (
         float(stored_cost)
         if isinstance(stored_cost, int | float) and not isinstance(stored_cost, bool)
@@ -1241,14 +1245,17 @@ tbody tr.new td { animation: flash 1s cubic-bezier(0.4, 0, 0.2, 1); }
     var csvContent = "data:text/csv;charset=utf-8,";
     var headers = COLUMNS.map(function(c) { return '"' + c.key + '"'; }).join(",");
     csvContent += headers + "\n";
+    function csvCell(value) {
+      if (value === null || value === undefined) return '""';
+      var text = String(value);
+      // Formula-injection guard: a leading = + - @ tab or CR would be
+      // evaluated as a spreadsheet formula by Excel/Sheets.  Prefixing a
+      // single quote turns the cell into inert text.
+      if (/^[=\-+@\t\r]/.test(text)) text = "'" + text;
+      return '"' + text.replace(/"/g, '""') + '"';
+    }
     state.rows.forEach(function(row) {
-      var r = COLUMNS.map(function(c) {
-        var val = row[c.key];
-        var quoted = val === null || val === undefined
-          ? ""
-          : String(val).replace(/"/g, '""');
-        return '"' + quoted + '"';
-      });
+      var r = COLUMNS.map(function(c) { return csvCell(row[c.key]); });
       csvContent += r.join(",") + "\n";
     });
     var encodedUri = encodeURI(csvContent);
@@ -1315,6 +1322,16 @@ tbody tr.new td { animation: flash 1s cubic-bezier(0.4, 0, 0.2, 1); }
 </html>
 """
 
+
+
+def _warn_if_exposed(host: str) -> None:
+    """Warn when the dashboard is bound beyond loopback: it is unauthenticated."""
+    if host not in ("127.0.0.1", "localhost", "::1") and not host.startswith("127."):
+        print(
+            f"tamias: WARNING — binding to {host!r}; this dashboard has no "
+            f"authentication, keep it on loopback unless you are on a trusted network",
+            file=sys.stderr,
+        )
 
 
 def create_dashboard_app(
@@ -1480,6 +1497,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.compare_db:
         print(f"tamias dashboard: comparing against {args.compare_db}", file=sys.stderr)
+
+    _warn_if_exposed(args.host)
 
     import uvicorn
 

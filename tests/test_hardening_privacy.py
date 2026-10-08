@@ -251,6 +251,8 @@ EXPECTED_COLUMNS = (
     "effort_requested",
     "effort_used",
     "decision_target_effort",
+    "computed_list_cost_usd",
+    "cost_source",
 )
 
 # Every column whose declared SQL type can hold text, and the single thing allowed
@@ -321,6 +323,18 @@ TEXT_COLUMN_ALLOW_LIST = {
     "decision_target_effort": (
         "the router's own target, "
         "store.sanitize_effort: one of store.EFFORT_VALUES or NULL"
+    ),
+    # cost_source is the label that rides next to computed_list_cost_usd and
+    # says which observation that dollar is: "computed" for the price-sheet
+    # arithmetic, "unknown" when it could not be computed.  It is written from
+    # the engine's own CostBreakdown.source alone -- never from any request or
+    # response field -- so there is no caller input to sanitise; the closed
+    # vocabulary is already enforced by the pricing module's type.  A value
+    # that is neither literal would still never carry user text, because the
+    # only writer is compute_cost itself.
+    "cost_source": (
+        "the pricing engine's own label, 'computed' or 'unknown', written from "
+        "CostBreakdown.source and never from any request, response or header"
     ),
 }
 

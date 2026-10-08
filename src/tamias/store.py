@@ -11,8 +11,17 @@ sheet the row was priced with, never from a request or a response -- and
 UNKNOWN token counts, costs and latencies are stored as SQL NULL.  They are
 never coerced to 0, so "the upstream did not say" stays distinguishable from
 "the upstream said zero" after the fact.
+
+Money has one named semantic per column.  ``computed_list_cost_usd`` holds the
+list-price arithmetic from the price sheet (or NULL/UNKNOWN); ``cost_source``
+labels it ``computed`` or ``unknown``.  ``provider_cost_usd`` holds what the
+provider reported it billed, an independent measurement.  The generic
+``cost_usd`` column predates the split and is written only by older versions:
+new rows leave it NULL, and anything that reads it handles it as legacy data
+whose source cannot be proven.
 """
 
+import os
 import re
 import sqlite3
 import threading
@@ -111,6 +120,8 @@ COLUMNS = (
     "effort_requested",
     "effort_used",
     "decision_target_effort",
+    "computed_list_cost_usd",
+    "cost_source",
 )
 
 _CREATE_TABLE = f"""
@@ -138,7 +149,9 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     project TEXT,
     effort_requested TEXT,
     effort_used TEXT,
-    decision_target_effort TEXT
+    decision_target_effort TEXT,
+    computed_list_cost_usd REAL,
+    cost_source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_session ON {TABLE}(session_id);
 """
@@ -167,6 +180,12 @@ class Store:
             self._conn.executescript(_CREATE_TABLE)
             self._migrate()
             self._conn.commit()
+        if target != ":memory:":
+            # The log holds per-session metering; keep it private to this user.
+            try:
+                os.chmod(self._path, 0o600)
+            except OSError:
+                pass
 
     def _migrate(self) -> None:
         """Add nullable audit fields to logs created by older tamias versions."""
@@ -180,6 +199,8 @@ class Store:
             ("effort_requested", "TEXT"),
             ("effort_used", "TEXT"),
             ("decision_target_effort", "TEXT"),
+            ("computed_list_cost_usd", "REAL"),
+            ("cost_source", "TEXT"),
         ):
             if name not in present:
                 self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
@@ -211,6 +232,11 @@ class Store:
         target_model of a STAY decision is NULL rather than the current model.
         `generation_id` is whatever the response carried: it is passed through
         :func:`sanitize_generation_id`, so only a bare id reaches the row.
+
+        The computed list-price value is written to ``computed_list_cost_usd``
+        with its ``cost_source`` label; the provider-billed amount travels
+        separately in ``usage.provider_cost_usd``.  The legacy ``cost_usd``
+        column is left NULL so it can never be mistaken for either number.
         """
         row = (
             ts,
@@ -221,7 +247,7 @@ class Store:
             usage.output_tokens,
             usage.cached_input_tokens,
             usage.cache_write_tokens,
-            cost.usd,
+            None,
             cost.price_sheet_date,
             latency_ms,
             status,
@@ -236,6 +262,8 @@ class Store:
             sanitize_effort(effort_requested),
             sanitize_effort(effort_used),
             sanitize_effort(decision_target_effort),
+            cost.usd,
+            cost.source,
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)

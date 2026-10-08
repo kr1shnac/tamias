@@ -279,37 +279,58 @@ def rules_sheet(tmp_path) -> PriceSheet:
     return load_price_sheet(path)
 
 
-def test_provider_billed_cost_wins_over_the_sheet_sum(tmp_path):
-    """The provider's own bill is the number; sheet arithmetic only fills gaps."""
+def test_provider_billed_cost_is_never_folded_into_the_sheet_arithmetic(tmp_path):
+    """Provider money is a measurement, not a substitute for list-price math.
+
+    ``usd`` is always the computed list price; the provider's billed amount is
+    carried separately in ``Usage.provider_cost_usd`` and stored in its own
+    column.  The sheet sum stands on its own and nothing rescues or replaces it.
+    """
     sheet = rules_sheet(tmp_path)
     usage = Usage(1_000_000, 100_000, 0, 0, provider_cost_usd=0.42)
     breakdown = compute_cost("strong", usage, sheet)
-    assert breakdown.usd == 0.42
+    assert breakdown.usd == pytest.approx(4.5)
+    assert breakdown.source == "computed"
+    assert "billed" not in breakdown.formula
+    assert usage.provider_cost_usd == 0.42
     assert compute_cost("strong", Usage(1_000_000, 100_000, 0, 0), sheet).usd == pytest.approx(4.5)
-    assert "billed" in breakdown.formula
 
 
-def test_provider_billed_cost_wins_even_when_the_model_is_not_in_the_sheet(tmp_path):
-    """A bill the provider sent is exact whatever the sheet does or does not know."""
+def test_provider_money_does_not_fill_an_unknown_model(tmp_path):
+    """A bill for an unpriced model does not make its list price computable."""
     sheet = rules_sheet(tmp_path)
     usage = Usage(1_000_000, 100_000, None, None, provider_cost_usd=0.001)
     breakdown = compute_cost("a-model-nobody-priced", usage, sheet)
-    assert breakdown.usd == 0.001
-    assert "a-model-nobody-priced" not in breakdown.formula
+    assert breakdown.usd is None
+    assert breakdown.source == "unknown"
+    assert "a-model-nobody-priced" in breakdown.formula
 
 
-def test_provider_billed_zero_is_a_known_number_not_unknown(tmp_path):
-    """Zero dollars billed is a measurement, so it prices as exactly zero."""
+def test_provider_billed_zero_cannot_mask_an_uncomputable_cost(tmp_path):
+    """A real zero-dollar bill and a missing list price stay distinguishable."""
     sheet = rules_sheet(tmp_path)
-    usage = Usage(1_000_000, 100_000, 0, 0, provider_cost_usd=0.0)
-    assert compute_cost("strong", usage, sheet).usd == 0.0
+    priced = compute_cost(
+        "strong", Usage(1_000_000, 100_000, 0, 0, provider_cost_usd=0.0), sheet
+    )
+    assert priced.usd == pytest.approx(4.5)
+    assert priced.source == "computed"
+    unknown = compute_cost(
+        "a-model-nobody-priced",
+        Usage(10_000, 2_000, None, None, provider_cost_usd=0.0),
+        sheet,
+    )
+    assert unknown.usd is None
+    assert unknown.source == "unknown"
 
 
-def test_provider_billed_cost_wins_over_a_tiered_model(tmp_path):
-    """Money already billed does not need the sheet's unsupported tiers."""
+def test_a_tiered_model_stays_unknown_even_with_provider_money(tmp_path):
+    """Sheet arithmetic does not quote unsupported tiers, bill or no bill."""
     sheet = rules_sheet(tmp_path)
     usage = Usage(10_000, 2_000, 0, 0, provider_cost_usd=0.5)
-    assert compute_cost("tiered", usage, sheet).usd == 0.5
+    breakdown = compute_cost("tiered", usage, sheet)
+    assert breakdown.usd is None
+    assert breakdown.source == "unknown"
+    assert usage.provider_cost_usd == 0.5
 
 
 def test_without_a_provider_price_the_exact_sheet_sum_is_used(tmp_path):
