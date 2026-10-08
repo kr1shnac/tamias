@@ -711,3 +711,61 @@ def test_serve_binds_loopback_by_default() -> None:
         ["serve", "--upstream", "http://x", "--prices", "p.toml", "--db", "d.db"]
     )
     assert ipaddress.ip_address(args.host).is_loopback, f"serve binds {args.host} by default"
+    assert args.allow_non_loopback is False, "a wider bind must require an explicit acknowledgement"
+
+
+@pytest.mark.parametrize(
+    "service,host",
+    [("serve", "127.0.0.1"), ("serve", "localhost"), ("serve", "::1"), ("dashboard", "127.0.0.1")],
+)
+def test_loopback_hosts_never_need_the_acknowledgement_flag(service: str, host: str) -> None:
+    """Loopback binds proceed without anyone opting out of security."""
+    from tamias.security import refuse_non_loopback
+
+    assert refuse_non_loopback(service, host, allow_non_loopback=False) == 0
+
+
+def test_non_loopback_hosts_are_refused_without_acknowledgement() -> None:
+    """0.0.0.0 is how a machine binds for the network; refuse it by default."""
+    from tamias.security import refuse_non_loopback
+
+    refused_serve = refuse_non_loopback("serve", "0.0.0.0", allow_non_loopback=False)
+    refused_dashboard = refuse_non_loopback("dashboard", "0.0.0.0", allow_non_loopback=False)
+    assert refused_serve == 1
+    assert refused_dashboard == 1
+
+
+def test_the_acknowledgement_flag_is_what_unlocks_a_wider_bind() -> None:
+    """With --allow-non-loopback the operator has said the host is trusted."""
+    from tamias.security import refuse_non_loopback
+
+    assert refuse_non_loopback("serve", "0.0.0.0", allow_non_loopback=True) == 0
+
+
+def test_serve_refuses_a_non_loopback_host_before_building_anything(monkeypatch) -> None:
+    """serve must refuse a wider bind before any server-side work starts."""
+    from tamias import cli
+
+    built = False
+
+    def boom(*args, **kwargs):
+        nonlocal built
+        built = True
+        raise AssertionError("build_serve_app must not run for a refused bind")
+
+    monkeypatch.setattr(cli, "build_serve_app", boom)
+    args = cli.build_parser().parse_args(
+        [
+            "serve",
+            "--upstream",
+            "http://x",
+            "--prices",
+            "p.toml",
+            "--db",
+            "d.db",
+            "--host",
+            "0.0.0.0",
+        ]
+    )
+    assert cli.serve(args) == 1
+    assert built is False

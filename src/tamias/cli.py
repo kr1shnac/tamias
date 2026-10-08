@@ -520,6 +520,12 @@ def serve(args: argparse.Namespace) -> int:
     """Run the proxy under uvicorn until interrupted."""
     import uvicorn
 
+    from tamias.security import refuse_non_loopback
+
+    refused = refuse_non_loopback("serve", args.host, args.allow_non_loopback)
+    if refused:
+        return refused
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -874,6 +880,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8000, help="port to listen on")
     serve_parser.add_argument("--host", default="127.0.0.1", help="address to bind")
     serve_parser.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="acknowledge the missing authentication and bind beyond loopback",
+    )
+    serve_parser.add_argument(
         "--router-mode",
         choices=ROUTER_MODES,
         default="shadow",
@@ -955,6 +966,11 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
     dashboard_parser.add_argument("--port", type=int, default=8000, help="port to listen on")
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="address to bind")
+    dashboard_parser.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="acknowledge the missing authentication and bind beyond loopback",
+    )
     agent_parser = sub.add_parser("agent-config", help="print an agent configuration snippet")
     agent_parser.add_argument("agent", choices=("claude-code", "codex", "opencode"))
     agent_parser.add_argument("--port", type=int, default=8000)
@@ -1033,6 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--port",
                 str(args.port),
             ]
+            + (["--allow-non-loopback"] if args.allow_non_loopback else [])
         )
     if args.command == "agent-config":
         print(agent_config(args.agent, args.port, args.project))

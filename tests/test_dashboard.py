@@ -1050,6 +1050,53 @@ def test_the_entry_point_binds_loopback_and_nothing_else() -> None:
     args = build_parser().parse_args(["--db", "r.db", "--prices", "p.toml"])
     assert args.host == "127.0.0.1"
     assert not hasattr(args, "compare_db") or args.compare_db is None
+    assert args.allow_non_loopback is False
+
+
+def test_non_loopback_binding_is_refused_not_merely_warned(capsys) -> None:
+    """The dashboard holds per-session metering; a wider bind must be refused.
+
+    The refusal must fire before any server work happens, so calling ``main``
+    with a non-loopback host returns 1 without touching a price sheet or a log.
+    """
+    from tamias.dashboard import main
+
+    code = main(["--db", "none.db", "--prices", "none.toml", "--host", "0.0.0.0"])
+    assert code == 1
+    assert "--allow-non-loopback" in capsys.readouterr().err
+
+
+def test_the_acknowledgement_flag_lets_a_wider_bind_proceed(
+    monkeypatch, sheet_path, capsys
+) -> None:
+    """--allow-non-loopback binds anywhere; the warning stays informative."""
+    import sys
+
+    from tamias.dashboard import main
+
+    calls: list[tuple[str, str, str]] = []
+
+    class _FakeUvicorn:
+        @staticmethod
+        def run(app, host: str, port: int, log_level: str) -> None:
+            calls.append((host, str(port), log_level))
+
+    monkeypatch.setitem(sys.modules, "uvicorn", _FakeUvicorn())
+    code = main(
+        [
+            "--db",
+            str(sheet_path.parent / "none.db"),
+            "--prices",
+            str(sheet_path),
+            "--host",
+            "0.0.0.0",
+            "--allow-non-loopback",
+        ]
+    )
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "0.0.0.0" in err
+    assert calls == [("0.0.0.0", "8010", "info")]
 
 
 def test_module_entry_point_exists() -> None:

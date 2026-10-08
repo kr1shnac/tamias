@@ -1452,6 +1452,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="127.0.0.1",
         help="address to bind; loopback only by default",
     )
+    parser.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="acknowledge the missing authentication and bind beyond loopback",
+    )
     return parser
 
 
@@ -1460,15 +1465,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     # The log holds one session's traffic and the page exposes its cost.  That
-    # belongs on loopback; binding it wider should be a deliberate act, so a
-    # non-loopback host has to be asked for by name.
-    if args.host not in ("127.0.0.1", "localhost", "::1"):
-        print(
-            f"tamias dashboard: refusing to bind {args.host}: the request log is "
-            "private to this machine. Pass --host 0.0.0.0 if you mean it.",
-            file=sys.stderr,
-        )
-        return 1
+    # belongs on loopback; binding it wider is a deliberate act that has to be
+    # acknowledged with --allow-non-loopback.
+    from tamias.security import refuse_non_loopback
+
+    refused = refuse_non_loopback("dashboard", args.host, args.allow_non_loopback)
+    if refused:
+        return refused
 
     try:
         sheet = load_price_sheet(args.prices)

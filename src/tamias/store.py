@@ -190,8 +190,16 @@ class Store:
             self._conn.commit()
         if target != ":memory:":
             # The log holds per-session metering; keep it private to this user.
+            # SQLite creates -wal/-shm/-journal sidecars with the same mode as
+            # the main database, so a 0600 main file governs new sidecars too;
+            # chmod any sidecars a prior run left behind as well.
+            self._restrict_permissions()
+
+    def _restrict_permissions(self) -> None:
+        sidecars = [Path(f"{self._path}{suffix}") for suffix in ("-wal", "-shm", "-journal")]
+        for path in [self._path, *sidecars]:
             try:
-                os.chmod(self._path, 0o600)
+                os.chmod(path, 0o600)
             except OSError:
                 pass
 

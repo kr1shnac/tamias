@@ -570,6 +570,24 @@ The product ledger never persists:
 
 The research harness is separate and may store experimental transcripts only under its own research data policy.
 
+### 6.3.1 Data handling limits
+
+The ledger is a local accounting log, **not** a governed audit log. Before
+relying on it as one, note the limits:
+
+- **Retention:** none. The log grows until the operator deletes the database
+  file; the proxy and dashboard apply no retention or compaction policy.
+- **Deletion:** the operator deletes the whole database file to purge a run
+  (`tamias run` keeps runs as `tamias-runs/*.db`; the dashboard is read-only
+  and cannot delete anything). There is no per-request delete API.
+- **Export:** the dashboard's CSV and `tamias report` are point-in-time
+  summaries priced by the configured price sheet; they never modify the log.
+- **Redaction:** the ledger stores only metadata (see §6.1) plus the value of
+  `price_simulated` and cost fields. Prompt text, tool arguments, assistant
+  text, credentials, and raw upstream error text are never written. Upstream
+  failures are recorded as a stage and a coded type, not as the exception
+  message.
+
 ## 6.4 Deduplication
 
 Primary key:

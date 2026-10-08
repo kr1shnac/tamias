@@ -45,8 +45,9 @@ Comparing against a real baseline run:
 It is drawn as a dashed third line, "actual baseline run".
 
 The server binds `127.0.0.1` only. The log holds one session's traffic and the
-page exposes its cost, so a wider bind has to be asked for by name
-(`--host 0.0.0.0`); anything else is refused.
+page exposes its cost, so a wider bind is refused unless the operator
+acknowledges the missing authentication with `--allow-non-loopback`
+(`--host 0.0.0.0 --allow-non-loopback`).
 
 ## What the numbers mean
 

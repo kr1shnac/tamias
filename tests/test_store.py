@@ -487,3 +487,27 @@ def test_sanitize_effort_is_pure_and_type_tolerant() -> None:
     assert sanitize_effort(True) is None
     assert sanitize_effort(b"high") is None
     assert sanitize_effort("high") == "high"
+
+
+def test_a_new_database_and_any_sidecars_are_private_to_the_user(tmp_path: Path) -> None:
+    """The log is per-session metering: the file, WAL, SHM and journal are 0600.
+
+    The chmod happens at open so an existing world-readable database is quietly
+    repaired; sqlite may not have written sidecars yet, so they are checked as
+    "not looser than 0600" when they exist rather than required to exist.
+    """
+    import os
+
+    db_path = tmp_path / "requests.sqlite"
+    for sidecar in (Path(f"{db_path}-wal"), Path(f"{db_path}-shm"), Path(f"{db_path}-journal")):
+        sidecar.write_bytes(b"")
+        sidecar.chmod(0o644)
+
+    db_path.write_bytes(b"")
+    db_path.chmod(0o644)
+    opened = Store(db_path)
+    opened.close()
+
+    for path in (db_path, *[Path(f"{db_path}{suffix}") for suffix in ("-wal", "-shm", "-journal")]):
+        if path.exists():
+            assert os.stat(path).st_mode & 0o777 == 0o600, f"{path.name} must be 0600"
