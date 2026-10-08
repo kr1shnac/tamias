@@ -29,7 +29,7 @@ import pytest
 from fastapi import FastAPI
 from mock_upstream import StreamingASGITransport, create_mock_upstream
 
-from tamias import cli, dashboard, pricing, proxy
+from tamias import cli, dashboard, pricing, proxy, session
 from tamias.pricing import load_price_sheet
 from tamias.router import EASY_TOOLS, RouterConfig
 from tamias.store import Store
@@ -184,7 +184,14 @@ async def run_session(
 
 def test_session_logs_exactly_ten_rows(run_session: list[dict[str, Any]]) -> None:
     assert len(run_session) == REQUESTS
-    assert [row["session_id"] for row in run_session] == [SESSION] * REQUESTS
+    session_ids = [row["session_id"] for row in run_session]
+    assert len(set(session_ids)) == 1
+    assert all(row_id.startswith(session.SESSION_ID_PREFIX) for row_id in session_ids)
+    assert all(
+        len(row_id) == len(session.SESSION_ID_PREFIX) + session.SESSION_ID_HEX_CHARS
+        for row_id in session_ids
+    )
+    assert all(SESSION not in row_id for row_id in session_ids)
 
 
 async def test_dashboard_updates_while_the_proxy_writes_rows(

@@ -12,11 +12,12 @@ to the upstream are the bytes that arrived.  Only ``router_mode="active"`` may
 rewrite ``model``, and only the opt-in ``inject_usage`` may add
 ``stream_options``.
 
-A request's session comes from the ``x-tamias-session`` header when the client
-sends one, and otherwise from :func:`derive_session_id`, which hashes a
-per-process salt together with the request's authorization header and its first
-system/developer and first user message.  Only the digest is kept, so the log
-records which conversation a request belonged to without recording any of the
+A request's session is a salted digest, produced by
+:func:`tamias.session.derive_session_id` from the request's authorization
+header and its first system/developer and first user message -- or, when the
+client sends ``x-tamias-session``, from that value, which is hashed the same
+way rather than trusted verbatim.  Only the digest is kept, so the log records
+which conversation a request belonged to without recording any of the
 conversation.
 
 :func:`create_app` also registers the Anthropic Messages route, by calling
@@ -27,7 +28,6 @@ through to the catch-all relay.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -43,7 +43,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from tamias import anthropic_adapter, pricing, responses_adapter, router
+from tamias import anthropic_adapter, pricing, responses_adapter, router, session
 from tamias.effort import apply_effort
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
@@ -53,18 +53,14 @@ from tamias.types import CostBreakdown, Decision, SessionState, Usage
 logger = logging.getLogger("tamias.proxy")
 
 CHAT_PATH = "/v1/chat/completions"
-SESSION_HEADER = "x-tamias-session"
+# Backwards-compatible names for the shared session constants; the canonical
+# definitions now live in tamias.session.
+SESSION_HEADER = session.SESSION_HEADER
+SESSION_ID_PREFIX = session.SESSION_ID_PREFIX
+SESSION_ID_HEX_CHARS = session.SESSION_ID_HEX_CHARS
 UNKNOWN_MODEL = "unknown"
 
-# Salt for deriving session IDs.  Created once per process, so a derived ID
-# identifies the same conversation for this process's lifetime but cannot be
-# recomputed -- or guessed -- by anything reading the request log.
-_SALT = os.urandom(16)
 _SESSION_CAP = 1000
-SESSION_ID_PREFIX = "auto-"
-SESSION_ID_HEX_CHARS = 12
-SYSTEM_ROLES = frozenset({"system", "developer"})
-USER_ROLES = frozenset({"user"})
 
 HOP_BY_HOP = frozenset(
     {
@@ -86,7 +82,7 @@ HOP_BY_HOP = frozenset(
 # client that honours `content-encoding: gzip` then gunzips plain text and
 # fails the read, which surfaces as a connection error rather than a 502.
 DECODED_BODY_HEADERS = frozenset({"content-encoding"})
-DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding"}
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", SESSION_HEADER}
 PROJECT_HEADER = "x-tamias-project"
 
 PASSTHROUGH_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
@@ -207,61 +203,6 @@ def _bad_request(message: str) -> JSONResponse:
     return JSONResponse(
         {"error": {"message": message, "type": "invalid_request_error"}}, status_code=400
     )
-
-
-def _first_content(messages: list[Any], roles: frozenset[str]) -> str:
-    """The content of the first message whose role is in ``roles``.
-
-    Returns "" when no such message exists, and "" for a content shape that
-    carries no flat text, so that an absent message and an unrecognised one
-    hash to the same value.
-    """
-    for message in messages:
-        if not isinstance(message, dict) or message.get("role") not in roles:
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return "\n".join(block for block in content if isinstance(block, str))
-        return ""
-    return ""
-
-
-def derive_session_id(headers: dict[str, str], body: dict[str, Any], salt: bytes) -> str:
-    """The session a request belongs to.
-
-    An explicit ``x-tamias-session`` header always wins.  Otherwise the id is
-    derived from the salted digest of the request's identity inputs: the
-    ``authorization`` header, the first system/developer message, and the first
-    user message.  Every step of one conversation repeats those same three
-    values, so every step of one conversation lands on one session; two
-    different conversations differ in at least one of them, so they get
-    different sessions.
-
-    Only the digest is kept.  The three inputs are hashed and never stored, so
-    the session id cannot be reversed back into conversation text.
-    """
-    explicit = headers.get(SESSION_HEADER)
-    if explicit:
-        return explicit
-
-    authorization = headers.get("authorization") or headers.get("Authorization") or ""
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        messages = []
-
-    identity = json.dumps(
-        [
-            authorization,
-            _first_content(messages, SYSTEM_ROLES),
-            _first_content(messages, USER_ROLES),
-        ],
-        sort_keys=True,
-        default=str,
-    )
-    digest = hashlib.sha256(salt + identity.encode("utf-8")).hexdigest()
-    return SESSION_ID_PREFIX + digest[:SESSION_ID_HEX_CHARS]
 
 
 class SessionRecord:
@@ -505,7 +446,7 @@ def create_app(
         if not isinstance(body, dict):
             return _bad_request("request body must be a JSON object")
 
-        session_id = derive_session_id(dict(request.headers.items()), body, _SALT)
+        session_id = session.derive_session_id(dict(request.headers.items()), body)
         model_requested = _model_name(body.get("model"))
         streaming = bool(body.get("stream"))
         requested_reasoning = body.get("reasoning")

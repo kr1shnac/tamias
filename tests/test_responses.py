@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from mock_upstream import StreamingASGITransport
 
-from tamias import proxy, responses_adapter
+from tamias import proxy, responses_adapter, session
 from tamias.pricing import ModelPrice, PriceSheet
 from tamias.types import CostBreakdown, Decision, Usage
 
@@ -180,6 +180,47 @@ async def test_non_stream_response_records_complete_usage(
     assert store.last["usage"] == FULL_USAGE
     assert store.last["status"] == "200"
     assert store.last["latency_ms"] is not None
+
+
+async def test_session_id_derives_or_hashes_the_header(
+    client: httpx.AsyncClient, store: FakeStore
+) -> None:
+    await client.post(
+        "/v1/responses",
+        content=body(),
+        headers={"content-type": "application/json", session.SESSION_HEADER: "resp-42"},
+    )
+    with_header = store.last["session_id"]
+    assert with_header.startswith(session.SESSION_ID_PREFIX)
+    assert "resp-42" not in with_header
+
+    await client.post(
+        "/v1/responses", content=body(), headers={"content-type": "application/json"}
+    )
+    without_header = store.last["session_id"]
+    assert without_header.startswith(session.SESSION_ID_PREFIX)
+    assert without_header != "default"
+    assert with_header != without_header
+
+
+def test_forward_headers_drop_session_project_and_accept_encoding() -> None:
+    request = httpx.Request(
+        "POST",
+        UPSTREAM_URL,
+        headers={
+            "x-test": "keep",
+            "accept-encoding": "gzip",
+            session.SESSION_HEADER: "sess-42",
+            "x-tamias-project": "proj",
+        },
+    )
+
+    forwarded = responses_adapter.forward_headers(request)
+
+    assert forwarded["x-test"] == "keep"
+    assert "accept-encoding" not in forwarded
+    assert session.SESSION_HEADER not in forwarded
+    assert "x-tamias-project" not in forwarded
 
 
 async def test_stream_relays_bytes_in_order_and_uses_response_completed(

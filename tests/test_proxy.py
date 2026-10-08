@@ -20,7 +20,7 @@ from mock_upstream import (
     create_mock_upstream,
 )
 
-from tamias import pricing, proxy
+from tamias import pricing, proxy, session
 from tamias import store as store_module
 from tamias.pricing import ModelPrice, PriceSheet
 from tamias.router import RouterConfig
@@ -258,12 +258,14 @@ async def test_headers_forwarded_without_hop_by_hop_or_accept_encoding(
             "content-type": "application/json",
             "x-agent-build": "cli/9.9",
             "accept-encoding": "gzip-not-forwarded",
+            session.SESSION_HEADER: "session-not-forwarded",
         },
     )
 
     seen = response.json()["echo"]["headers"]
     assert seen["x-agent-build"] == "cli/9.9"
     assert "not-forwarded" not in seen.get("accept-encoding", "")
+    assert session.SESSION_HEADER not in seen
 
 
 async def test_stream_options_not_injected_by_default(
@@ -506,12 +508,16 @@ async def test_session_id_from_header_else_derived(
     await client.post(
         "/v1/chat/completions",
         content=make_body("gpt-mock"),
-        headers={"x-tamias-session": "sess-42"},
+        headers={session.SESSION_HEADER: "sess-42"},
     )
-    assert store.last["session_id"] == "sess-42"
+    with_header = store.last["session_id"]
+    assert with_header.startswith(session.SESSION_ID_PREFIX)
+    assert "sess-42" not in with_header
 
     await client.post("/v1/chat/completions", content=make_body("gpt-mock"))
-    assert store.last["session_id"].startswith("auto-")
+    without_header = store.last["session_id"]
+    assert without_header.startswith(session.SESSION_ID_PREFIX)
+    assert with_header != without_header
 
 
 async def test_header_session_id_wins_over_the_derived_id(
@@ -523,7 +529,7 @@ async def test_header_session_id_wins_over_the_derived_id(
     await client.post(
         "/v1/chat/completions",
         content=json.dumps(body).encode(),
-        headers={**JSON_HEADERS, "x-tamias-session": "sess-explicit"},
+        headers={**JSON_HEADERS, session.SESSION_HEADER: "sess-explicit"},
     )
     with_header = store.last["session_id"]
 
@@ -532,8 +538,9 @@ async def test_header_session_id_wins_over_the_derived_id(
     )
     without_header = store.last["session_id"]
 
-    assert with_header == "sess-explicit"
-    assert without_header.startswith("auto-")
+    assert with_header.startswith(session.SESSION_ID_PREFIX)
+    assert "sess-explicit" not in with_header
+    assert without_header.startswith(session.SESSION_ID_PREFIX)
     assert with_header != without_header
 
 

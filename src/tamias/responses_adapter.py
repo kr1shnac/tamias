@@ -16,14 +16,13 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from tamias import pricing
+from tamias import pricing, session
 from tamias.pricing import PriceSheet
 from tamias.types import CostBreakdown, Decision, Usage
 
 RESPONSES_PATH = "/v1/responses"
-SESSION_HEADER = "x-tamias-session"
+SESSION_HEADER = session.SESSION_HEADER
 UNKNOWN_MODEL = "unknown"
-DEFAULT_SESSION = "default"
 
 HOP_BY_HOP = frozenset(
     {
@@ -46,7 +45,7 @@ HOP_BY_HOP = frozenset(
 # fails the read, which surfaces as a connection error rather than a 502.
 DECODED_BODY_HEADERS = frozenset({"content-encoding"})
 PROJECT_HEADER = "x-tamias-project"
-DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER}
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER, SESSION_HEADER}
 
 
 class RequestLog(Protocol):
@@ -227,7 +226,9 @@ def register_routes(
         if not isinstance(body, dict):
             return JSONResponse({"error": {"message": "request body must be a JSON object"}}, 400)
 
-        session_id = request.headers.get(SESSION_HEADER) or DEFAULT_SESSION
+        session_id = session.derive_session_id(
+            dict(request.headers.items()), body, wire=session.WIRE_RESPONSES
+        )
         model_requested = _model_name(body.get("model"))
         outgoing = client.build_request(
             "POST", base + RESPONSES_PATH, content=raw, headers=forward_headers(request)

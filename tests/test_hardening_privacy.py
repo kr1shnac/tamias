@@ -40,7 +40,8 @@ PROMPT_SECRET = "s3cr3t-user-prompt-7f2a91"
 SYSTEM_SECRET = "s3cr3t-system-prompt-4c18b0"
 REPLY_SECRET = "s3cr3t-assistant-reply-9de3f7"
 API_KEY = "sk-live-abcdef0123456789-do-not-store"
-ALL_SECRETS = (PROMPT_SECRET, SYSTEM_SECRET, REPLY_SECRET, API_KEY)
+SESSION_SECRET = "s3cr3t-explicit-session-b9d2c1"
+ALL_SECRETS = (PROMPT_SECRET, SYSTEM_SECRET, REPLY_SECRET, API_KEY, SESSION_SECRET)
 
 CHAT_PATH = proxy.CHAT_PATH
 STRONG = "gpt-strong"
@@ -259,8 +260,9 @@ EXPECTED_COLUMNS = (
 TEXT_COLUMN_ALLOW_LIST = {
     "ts": "the clock: datetime.now(UTC), formatted by the proxy",
     "session_id": (
-        "a salted digest of the credential and the first messages, or the "
-        "client's explicit x-tamias-session id; never the digest's inputs"
+        "a salted digest of the credential and the first messages, or of the "
+        "client's explicit x-tamias-session id; never a verbatim header and "
+        "never the digest's inputs"
     ),
     "model_requested": "the request body's `model` field, or the literal 'unknown'",
     "model_used": "the response's `model` field, or the requested one when absent",
@@ -606,6 +608,37 @@ async def test_a_different_api_key_is_a_different_session(db_path: Path, prices_
 
     first, second = (row["session_id"] for row in rows)
     assert first != second
+
+
+async def test_explicit_session_value_is_stored_as_a_digest_never_verbatim(
+    db_path: Path, prices_path: Path
+) -> None:
+    """A client-chosen session id is hashed, exactly like a derived one.
+
+    The header is the one place a caller can control the value of a text column
+    directly, so it is the most dangerous one to trust: a client that labels its
+    session ``no-proxy`` could otherwise stamp that string into every row.  The
+    promise is that the stored value is a digest and that the header text never
+    survives anywhere in the file.
+    """
+    app, request_log = build_proxy(db_path, prices_path)
+    async with proxy_client(app) as client:
+        response = await client.post(
+            CHAT_PATH,
+            content=secret_body(PROMPT_SECRET),
+            headers={**send(API_KEY), proxy.SESSION_HEADER: SESSION_SECRET},
+        )
+    assert response.status_code == 200
+    rows = request_log.rows()
+    request_log.close()
+
+    assert len(rows) == 1
+    session_id = rows[0]["session_id"]
+    assert session_id.startswith(proxy.SESSION_ID_PREFIX), session_id
+    digest = session_id.removeprefix(proxy.SESSION_ID_PREFIX)
+    assert all(character in "0123456789abcdef" for character in digest), session_id
+    assert SESSION_SECRET.encode() not in db_bytes(db_path)
+    assert SESSION_SECRET not in row_text(rows[0])
 
 
 # --- nothing is printed either -----------------------------------------------

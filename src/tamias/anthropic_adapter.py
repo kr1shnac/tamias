@@ -44,7 +44,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from tamias import pricing, router
+from tamias import pricing, router, session
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
@@ -52,8 +52,7 @@ from tamias.types import CostBreakdown, Decision, SessionState, Usage
 logger = logging.getLogger("tamias.anthropic")
 
 MESSAGES_PATH = "/v1/messages"
-SESSION_HEADER = "x-tamias-session"
-DEFAULT_SESSION = "default"
+SESSION_HEADER = session.SESSION_HEADER
 UNKNOWN_MODEL = "unknown"
 
 HOP_BY_HOP = frozenset(
@@ -77,7 +76,7 @@ HOP_BY_HOP = frozenset(
 # fails the read, which surfaces as a connection error rather than a 502.
 DECODED_BODY_HEADERS = frozenset({"content-encoding"})
 PROJECT_HEADER = "x-tamias-project"
-DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER}
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER, SESSION_HEADER}
 
 DATA_PREFIX = b"data:"
 
@@ -475,7 +474,9 @@ def register_routes(
         if not isinstance(body, dict):
             return _bad_request("request body must be a JSON object")
 
-        session_id = request.headers.get(SESSION_HEADER) or DEFAULT_SESSION
+        session_id = session.derive_session_id(
+            dict(request.headers.items()), body, wire=session.WIRE_ANTHROPIC
+        )
         model_requested = _model_name(body.get("model"))
         decision = plan(session_id, body, model_requested)
 

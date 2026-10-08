@@ -28,7 +28,7 @@ from mock_anthropic_upstream import (
 )
 from mock_upstream import StreamingASGITransport
 
-from tamias import anthropic_adapter, pricing, proxy
+from tamias import anthropic_adapter, pricing, proxy, session
 from tamias.anthropic_adapter import AnthropicStreamUsage, usage_from_anthropic
 from tamias.pricing import ModelPrice, PriceSheet
 from tamias.types import CostBreakdown, Decision, Usage
@@ -364,7 +364,11 @@ async def test_api_key_and_version_reach_the_upstream(client: httpx.AsyncClient)
     response = await client.post(
         "/v1/messages",
         content=make_body(MODEL_CACHED),
-        headers={**ANTHROPIC_HEADERS, "accept-encoding": "identity-not-forwarded"},
+        headers={
+            **ANTHROPIC_HEADERS,
+            "accept-encoding": "identity-not-forwarded",
+            session.SESSION_HEADER: "session-not-forwarded",
+        },
     )
 
     seen = response.json()["echo"]["headers"]
@@ -373,6 +377,7 @@ async def test_api_key_and_version_reach_the_upstream(client: httpx.AsyncClient)
     assert seen["anthropic-beta"] == "prompt-caching-2024-07-31"
     assert "not-forwarded" not in seen.get("accept-encoding", "")
     assert seen["content-type"] == "application/json"
+    assert session.SESSION_HEADER not in seen
 
 
 async def test_stream_events_are_relayed_unchanged_and_in_order(
@@ -629,18 +634,23 @@ async def test_router_off_records_a_stay(
     assert store.last["decision"].reason == "router disabled"
 
 
-async def test_session_id_from_header_else_default(
+async def test_session_id_from_header_else_derived(
     client: httpx.AsyncClient, store: FakeStore
 ) -> None:
     await client.post(
         "/v1/messages",
         content=make_body(MODEL_CACHED),
-        headers={**ANTHROPIC_HEADERS, "x-tamias-session": "sess-42"},
+        headers={**ANTHROPIC_HEADERS, session.SESSION_HEADER: "sess-42"},
     )
-    assert store.last["session_id"] == "sess-42"
+    with_header = store.last["session_id"]
+    assert with_header.startswith(session.SESSION_ID_PREFIX)
+    assert "sess-42" not in with_header
 
     await client.post("/v1/messages", content=make_body(MODEL_CACHED), headers=ANTHROPIC_HEADERS)
-    assert store.last["session_id"] == "default"
+    without_header = store.last["session_id"]
+    assert without_header.startswith(session.SESSION_ID_PREFIX)
+    assert without_header != "default"
+    assert with_header != without_header
 
 
 async def test_missing_model_is_logged_as_unknown(

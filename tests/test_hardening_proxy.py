@@ -182,8 +182,10 @@ async def test_fifty_concurrent_requests_over_five_sessions_log_fifty_rows(
     assert len(rows) == 50, f"expected 50 logged rows, got {len(rows)}"
     by_session: dict[str, int] = {}
     for row in rows:
-        by_session[str(row["session_id"])] = by_session.get(str(row["session_id"]), 0) + 1
-    assert by_session == {session: per_session for session in sessions}, by_session
+        session_id = str(row["session_id"])
+        assert session_id.startswith(proxy.SESSION_ID_PREFIX), session_id
+        by_session[session_id] = by_session.get(session_id, 0) + 1
+    assert sorted(by_session.values()) == [per_session] * len(sessions), by_session
     store.close()
 
 
