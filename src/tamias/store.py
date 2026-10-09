@@ -128,6 +128,7 @@ COLUMNS = (
     "cost_source",
     "failure_stage",
     "failure_type",
+    "router_mode",
 )
 
 _CREATE_TABLE = f"""
@@ -159,7 +160,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     computed_list_cost_usd REAL,
     cost_source TEXT,
     failure_stage TEXT,
-    failure_type TEXT
+    failure_type TEXT,
+    router_mode TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_session ON {TABLE}(session_id);
 """
@@ -219,6 +221,7 @@ class Store:
             ("cost_source", "TEXT"),
             ("failure_stage", "TEXT"),
             ("failure_type", "TEXT"),
+            ("router_mode", "TEXT"),
         ):
             if name not in present:
                 self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
@@ -244,6 +247,7 @@ class Store:
         decision_target_effort: str | None = None,
         failure_stage: str | None = None,
         failure_type: str | None = None,
+        router_mode: str | None = None,
     ) -> int:
         """Append one request and return its row id.
 
@@ -292,6 +296,7 @@ class Store:
             cost.source,
             failure_stage,
             failure_type,
+            router_mode,
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)

@@ -325,6 +325,7 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "cost_source",
         "failure_stage",
         "failure_type",
+        "router_mode",
     )
 
 

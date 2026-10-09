@@ -255,6 +255,7 @@ EXPECTED_COLUMNS = (
     "cost_source",
     "failure_stage",
     "failure_type",
+    "router_mode",
 )
 
 # Every column whose declared SQL type can hold text, and the single thing allowed
@@ -353,6 +354,10 @@ TEXT_COLUMN_ALLOW_LIST = {
         "the route's own coded type (e.g. 'connect_error', 'read_timeout'), "
         "written from tamias.upstream's classify_http_error on a transport "
         "failure; never the exception text and never from any request or response"
+    ),
+    "router_mode": (
+        "the proxy's router mode at record time, e.g. 'shadow', 'active' or 'off', "
+        "written from the running configuration alone and never from a request or response"
     ),
 }
 
