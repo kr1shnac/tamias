@@ -466,6 +466,7 @@ def create_app(
             decision_target_effort=decision.target_effort,
             failure_stage=failure_stage,
             failure_type=failure_type,
+            router_mode=router_mode,
         )
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
