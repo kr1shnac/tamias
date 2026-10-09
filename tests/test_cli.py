@@ -193,7 +193,7 @@ def test_report_counts_requests_shadow_would_have_switched(
     log(db, SMALL, SMALL_ON_STRONG, "STAY")
     log(db, SMALL, SMALL_ON_STRONG, "SWITCH")
     _, out = run(capsys, db, write_prices(tmp_path))
-    assert "requests shadow would have switched: 2" in out
+    assert "requests shadow mode would have switched: 2" in out
 
 
 def test_report_labels_the_saving_as_an_estimate(
@@ -219,7 +219,7 @@ def test_report_saving_is_zero_when_nothing_would_switch(
     log(db, BIG, BIG_ON_STRONG, "STAY")
     log(db, SMALL, SMALL_ON_STRONG, "STAY")
     _, out = run(capsys, db, write_prices(tmp_path))
-    assert "requests shadow would have switched: 0" in out
+    assert "requests shadow mode would have switched: 0" in out
     assert "estimated saving: $0.00" in out
 
 
@@ -230,7 +230,7 @@ def test_report_saving_is_zero_when_the_cheap_model_costs_the_same(
     db = str(tmp_path / "log.db")
     log(db, SMALL, SMALL_ON_CHEAP, "SWITCH", model_used="local-model")
     _, out = run(capsys, db, write_prices(tmp_path))
-    assert "requests shadow would have switched: 1" in out
+    assert "requests shadow mode would have switched: 1" in out
     assert "estimated saving: $0.00" in out
 
 
@@ -254,7 +254,7 @@ def test_report_flags_switched_requests_it_cannot_price(
     log(db, Usage(10_000, 2_000, None, 1_000), BIG_ON_STRONG, "SWITCH")
     log(db, BIG, BIG_ON_STRONG, "SWITCH")
     _, out = run(capsys, db, write_prices(tmp_path))
-    assert "requests shadow would have switched: 2" in out
+    assert "requests shadow mode would have switched: 2" in out
     assert "1 of 2 switched requests not priced" in out
     assert money(out, "estimated saving") == pytest.approx(BIG_SAVING, abs=1e-6)
 
@@ -265,7 +265,7 @@ def test_report_flags_switched_requests_whose_model_is_not_in_the_sheet(
     db = str(tmp_path / "log.db")
     log(db, BIG, BIG_ON_STRONG, "SWITCH", model_used="mystery-model")
     _, out = run(capsys, db, write_prices(tmp_path))
-    assert "requests shadow would have switched: 1" in out
+    assert "requests shadow mode would have switched: 1" in out
     assert "1 of 1 switched requests not priced" in out
     assert "estimated saving: $0.00" in out
 
@@ -303,7 +303,7 @@ def test_report_saving_is_unknown_when_no_request_has_token_counts(
 
     assert code == 0
     assert "requests: 8" in out
-    assert "requests shadow would have switched: 3" in out
+    assert "requests shadow mode would have switched: 3" in out
     line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
     assert line == (
         "estimated saving: UNKNOWN (0 of 8 requests have token counts)"
@@ -342,7 +342,7 @@ def test_report_saving_covers_only_the_requests_that_have_token_counts(
 
     assert code == 0
     assert "requests: 8" in out
-    assert "requests shadow would have switched: 3" in out
+    assert "requests shadow mode would have switched: 3" in out
     line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
     assert "estimated saving: UNKNOWN" not in line
     assert money(out, "estimated saving") == pytest.approx(2 * one_saving, abs=1e-6)

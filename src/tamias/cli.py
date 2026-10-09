@@ -348,7 +348,16 @@ def report(db_path: str, prices_path: str) -> None:
             f"free-model rows: {free_count} of {len(rows)}; "
             "real billed cost for those is $0, so dollar figures above are hypothetical"
         )
-    print(f"requests shadow would have switched: {switched}")
+    router_mode = "shadow"
+    for row in rows:
+        mode = row.get("router_mode") if isinstance(row, dict) else None
+        if isinstance(mode, str) and mode:
+            router_mode = mode
+            break
+    if router_mode == "active":
+        print(f"requests routed to the cheap model: {switched}")
+    else:
+        print(f"requests shadow mode would have switched: {switched}")
 
     billed_values: list[float] = []
     reconciled: list[tuple[float, float]] = []

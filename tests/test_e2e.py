@@ -301,7 +301,8 @@ def test_report_totals_the_session(
 
     assert code == 0
     assert f"requests: {REQUESTS}" in out
-    assert f"requests shadow would have switched: {len(EXPECTED_SWITCHES)}" in out
+    assert "requests shadow mode would have switched" in out
+    assert f"requests shadow mode would have switched: {len(EXPECTED_SWITCHES)}" in out
     assert f"cheap model assumed: {CHEAP}" in out
     assert (
         "sheet passed on the command line (used only for savings estimates): "
