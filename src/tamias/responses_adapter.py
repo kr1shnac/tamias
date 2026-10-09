@@ -17,6 +17,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import pricing, session
+from tamias import sse as sse_module
 from tamias.pricing import PriceSheet
 from tamias.types import CostBreakdown, Decision, Usage
 from tamias.upstream import STREAM, UpstreamFailure, classify_http_error
@@ -191,7 +192,7 @@ def register_routes(
         model_used: Any = None
         completed_usage: Any = None
         generation_id: Any = None
-        buffer = b""
+
 
         def absorb(payload: dict[str, Any]) -> None:
             nonlocal model_used, completed_usage, generation_id
@@ -205,19 +206,21 @@ def register_routes(
             if payload.get("type") == "response.completed" and response.get("usage") is not None:
                 completed_usage = response["usage"]
 
+        assembler = sse_module.SseAssembler()
         failure: UpstreamFailure | None = None
         try:
             async for chunk in upstream.aiter_bytes():
                 yield chunk
-                buffer += chunk
-                *lines, buffer = buffer.split(b"\n")
-                for line in lines:
-                    payload = _event_payload(line)
-                    if payload is not None:
-                        absorb(payload)
-            payload = _event_payload(buffer)
-            if payload is not None:
-                absorb(payload)
+                events = list(assembler.feed(chunk))
+                for event in events:
+                    data = event.data
+                    if isinstance(data, bytes):
+                        try:
+                            payload = json.loads(data.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            payload = None
+                        if payload is not None:
+                            absorb(payload)
         except httpx.HTTPError as exc:
             # The response had already started; the meter still records the
             # cancellation as one coded row rather than a silent gap.

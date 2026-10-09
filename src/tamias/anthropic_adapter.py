@@ -45,6 +45,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import pricing, router, session
+from tamias import sse as sse_module
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
@@ -208,6 +209,27 @@ class AnthropicStreamUsage:
         line, self._buffer = self._buffer, b""
         if line.strip():
             self.feed_line(line)
+
+    def _process_anthropic_payload_v2(self, payload: dict[str, Any]) -> None:
+        """Process a single JSON payload from an Anthropic SSE data field.
+
+        Handles the three Anthropic usage frames:
+        - message_start: sets model and prompt usage (cache reads/writes)
+        - message_delta: updates cumulative output usage
+        - anything else: ignored (e.g. ping, content_block_delta)
+        """
+        event_type = payload.get("type")
+        if event_type == "message_start":
+            msg = payload.get("message") or {}
+            if isinstance(msg, dict):
+                self.model = msg.get("model") or payload.get("model")
+                usage = msg.get("usage") or {}
+                if isinstance(usage, dict):
+                    self.fields = dict(usage)
+        elif event_type == "message_delta":
+            usage = payload.get("usage") or {}
+            if isinstance(usage, dict):
+                self._merge(usage)
 
     def feed_line(self, line: bytes) -> None:
         """Merge the usage of one SSE line; anything else is ignored.
@@ -467,7 +489,16 @@ def register_routes(
         try:
             async for chunk in upstream.aiter_bytes():
                 yield chunk
-                collector.feed(chunk)
+                events = list(sse_module.SseAssembler().feed(chunk))
+                for event in events:
+                    data = event.data
+                    if isinstance(data, bytes):
+                        try:
+                            payload = json.loads(data.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            payload = None
+                        if payload is not None:
+                            collector._process_anthropic_payload_v2(payload)
         except httpx.HTTPError as exc:
             # The response had already started; the meter still records the
             # cancellation as one coded row rather than a silent gap.

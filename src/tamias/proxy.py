@@ -44,6 +44,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import anthropic_adapter, pricing, responses_adapter, router, session
+from tamias import sse as sse_module
 from tamias.effort import apply_effort
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
@@ -341,7 +342,6 @@ def create_app(
             yield
         finally:
             await client.aclose()
-
     app = FastAPI(lifespan=lifespan)
     app.state.upstream_client = client
     app.state.upstream_timeout_seconds = timeout
@@ -620,20 +620,21 @@ def create_app(
             if seen_generation_id is None and isinstance(payload.get("id"), str):
                 seen_generation_id = payload["id"]
 
-        buffer = b""
+        assembler = sse_module.SseAssembler()
         failure: UpstreamFailure | None = None
         try:
             async for chunk in upstream.aiter_bytes():
                 yield chunk
-                buffer += chunk
-                *lines, buffer = buffer.split(b"\n")
-                for line in lines:
-                    payload = sse_payload(line)
-                    if payload is not None:
-                        absorb(payload)
-            tail = sse_payload(buffer)
-            if tail is not None:
-                absorb(tail)
+                events = list(assembler.feed(chunk))
+                for event in events:
+                    data = event.data
+                    if isinstance(data, bytes):
+                        try:
+                            payload = json.loads(data.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            payload = None
+                        if payload is not None:
+                            absorb(payload)
         except httpx.HTTPError as exc:
             # The response had already started, so the client's byte stream ends
             # here; the ledger still records the cancellation as one coded row
