@@ -546,3 +546,31 @@ def test_a_new_database_and_any_sidecars_are_private_to_the_user(tmp_path: Path)
     for path in (db_path, *[Path(f"{db_path}{suffix}") for suffix in ("-wal", "-shm", "-journal")]):
         if path.exists():
             assert os.stat(path).st_mode & 0o777 == 0o600, f"{path.name} must be 0600"
+
+
+def test_store_persists_salt_and_migrates_legacy_session_values(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE requests (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, "
+            "ts TEXT NOT NULL, model_requested TEXT NOT NULL, model_used TEXT NOT NULL, "
+            "input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER, "
+            "cache_write_tokens INTEGER, cost_usd REAL, price_sheet_date TEXT NOT NULL, "
+            "latency_ms INTEGER, status TEXT NOT NULL, decision_action TEXT NOT NULL, "
+            "decision_target_model TEXT, decision_reason TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO requests (id, session_id, ts, model_requested, model_used, "
+            "price_sheet_date, status, decision_action, decision_reason) VALUES "
+            "(1, 'raw-session', 'now', 'model', 'model', 'today', '200', 'STAY', 'ok')"
+        )
+    first = Store(path)
+    salt = first.session_salt
+    first.close()
+    second = Store(path)
+    try:
+        assert second.session_salt == salt
+        assert second.rows()[0]["session_id"].startswith("auto-")
+        assert second.rows()[0]["session_id"] != "raw-session"
+    finally:
+        second.close()
