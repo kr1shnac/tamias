@@ -147,6 +147,7 @@ def register_routes(
 ) -> FastAPI:
     """Add the meter-only ``POST /v1/responses`` route to ``app``."""
     base = upstream_url.rstrip("/")
+    session_salt = session_salt or getattr(store, "session_salt", None)
     client = getattr(app.state, "upstream_client", None)
     if not isinstance(client, httpx.AsyncClient):
         timeout = getattr(app.state, "upstream_timeout_seconds", 600.0)

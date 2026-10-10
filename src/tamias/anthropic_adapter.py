@@ -381,6 +381,7 @@ def register_routes(
     base = upstream_url.rstrip("/")
     sessions: dict[str, SessionState] = {}
     routing = router.DEFAULT_CONFIG if config is None else config
+    session_salt = session_salt or getattr(store, "session_salt", None)
 
     client = getattr(app.state, "upstream_client", None)
     if not isinstance(client, httpx.AsyncClient):
