@@ -47,7 +47,7 @@ from tamias.types import Usage
 DEFAULT_URL = OPENROUTER_MODELS_URL
 
 ESTIMATE_LABEL = "estimate; ignores cache rebuild cost; not measured"
-ROUTER_MODES = ("shadow", "active", "off")
+ROUTER_MODES = ("shadow", "off")
 SIMULATED_LABEL = "SIMULATED PRICES, NOT REAL SAVINGS"
 RUN_START_TIMEOUT_SECONDS = 15
 RUN_STOP_TIMEOUT_SECONDS = 5
@@ -129,14 +129,12 @@ def _read_rows(db_path: str) -> list[dict[str, Any]]:
 def _stored_cost(row: dict[str, Any]) -> float | None:
     """The computed list-price cost the proxy logged, or None when UNKNOWN.
 
-    Prefers the named ``computed_list_cost_usd`` column that every new row is
-    written with.  A row that only carries the pre-split generic ``cost_usd``
-    is legacy data: the number is still read so an old log keeps working, but
-    its source cannot be proven, which the provenance lines below report.  A
-    NULL is UNKNOWN, never zero: the request may well have been billed, we just
-    cannot prove how much.
+    Only the named ``computed_list_cost_usd`` column is trusted.  A row that
+    only carries the pre-split generic ``cost_usd`` is legacy data: its source
+    cannot be proven, so it remains UNKNOWN and is excluded from totals and
+    reconciliation.
     """
-    raw = _pick(row, COST_COLUMNS)
+    raw = row.get("computed_list_cost_usd")
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         return None
     return float(raw)
@@ -903,7 +901,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--router-mode",
         choices=ROUTER_MODES,
         default="shadow",
-        help="shadow records the routing decision, active also applies it (default: shadow)",
+        help="shadow records the routing decision; off disables routing (default: shadow)",
     )
     serve_parser.add_argument(
         "--effort-policy",

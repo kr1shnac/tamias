@@ -322,11 +322,16 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     effort_style: str = "openrouter",
 ) -> FastAPI:
+    if router_mode == "active":
+        raise ValueError("active routing is disabled for the public alpha; use shadow or off")
+    if router_mode not in ("shadow", "off"):
+        raise ValueError(f"unknown router mode: {router_mode}")
     base = upstream_url.rstrip("/")
     timeout = upstream_timeout_seconds()
     client = httpx.AsyncClient(timeout=timeout, transport=transport)
     routing = router.DEFAULT_CONFIG if config is None else config
     table = SessionTable()
+    session_salt = getattr(store, "session_salt", None)
 
     if router_mode != "off" and not routing.cheap_model:
         logger.warning(
@@ -486,7 +491,9 @@ def create_app(
         if not isinstance(body, dict):
             return _bad_request("request body must be a JSON object")
 
-        session_id = session.derive_session_id(dict(request.headers.items()), body)
+        session_id = session.derive_session_id(
+            dict(request.headers.items()), body, session_salt
+        )
         model_requested = _model_name(body.get("model"))
         streaming = bool(body.get("stream"))
         requested_reasoning = body.get("reasoning")
@@ -682,7 +689,9 @@ def create_app(
     # POST /v1/messages is logged rather than relayed unlogged.  It reuses the
     # client put on app.state above, so both routes share one connection pool
     # and one lifespan.
-    anthropic_adapter.register_routes(app, upstream_url, store, sheet, router_mode, config=routing)
-    responses_adapter.register_routes(app, upstream_url, store, sheet)
+    anthropic_adapter.register_routes(
+        app, upstream_url, store, sheet, router_mode, config=routing, session_salt=session_salt
+    )
+    responses_adapter.register_routes(app, upstream_url, store, sheet, session_salt=session_salt)
 
     return app

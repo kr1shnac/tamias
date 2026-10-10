@@ -25,6 +25,7 @@ and ``failure_type`` hold the coded (never raw) reason the request made it no
 further than ``status`` 502.
 """
 
+import hashlib
 import os
 import re
 import sqlite3
@@ -45,6 +46,7 @@ __all__ = [
 ]
 
 TABLE = "requests"
+META_TABLE = "tamias_meta"
 
 # The provider's response id is the only value in this log that arrives inside a
 # response body, so it is admitted on shape rather than on trust.  A real id is a
@@ -184,6 +186,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     router_mode TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_session ON {TABLE}(session_id);
+CREATE TABLE IF NOT EXISTS {META_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 _INSERT = f"INSERT INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})"
@@ -209,6 +212,8 @@ class Store:
         with self._lock:
             self._conn.executescript(_CREATE_TABLE)
             self._migrate()
+            self._session_salt = self._ensure_session_salt()
+            self._migrate_legacy_sessions()
             self._conn.commit()
         if target != ":memory:":
             # The log holds per-session metering; keep it private to this user.
@@ -245,6 +250,40 @@ class Store:
         ):
             if name not in present:
                 self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
+
+    def _ensure_session_salt(self) -> bytes:
+        row = self._conn.execute(
+            f"SELECT value FROM {META_TABLE} WHERE key = 'session_salt'"
+        ).fetchone()
+        if row is not None:
+            try:
+                value = bytes.fromhex(str(row[0]))
+            except ValueError:
+                value = b""
+            if len(value) == 16:
+                return value
+        value = os.urandom(16)
+        self._conn.execute(
+            f"INSERT OR REPLACE INTO {META_TABLE} (key, value) VALUES ('session_salt', ?)",
+            (value.hex(),),
+        )
+        return value
+
+    def _migrate_legacy_sessions(self) -> None:
+        rows = self._conn.execute(f"SELECT id, session_id FROM {TABLE}").fetchall()
+        for row_id, value in rows:
+            if isinstance(value, str) and re.fullmatch(r"auto-[0-9a-f]{12}", value):
+                continue
+            digest = hashlib.sha256(self._session_salt + str(value).encode()).hexdigest()[:12]
+            self._conn.execute(
+                f"UPDATE {TABLE} SET session_id = ? WHERE id = ?",
+                (f"auto-{digest}", row_id),
+            )
+
+    @property
+    def session_salt(self) -> bytes:
+        """Stable per-database salt used to derive request session ids."""
+        return self._session_salt
 
     def log_request(
         self,

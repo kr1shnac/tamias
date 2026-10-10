@@ -143,6 +143,7 @@ def register_routes(
     sheet: PriceSheet,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    session_salt: bytes | None = None,
 ) -> FastAPI:
     """Add the meter-only ``POST /v1/responses`` route to ``app``."""
     base = upstream_url.rstrip("/")
@@ -252,7 +253,7 @@ def register_routes(
             return JSONResponse({"error": {"message": "request body must be a JSON object"}}, 400)
 
         session_id = session.derive_session_id(
-            dict(request.headers.items()), body, wire=session.WIRE_RESPONSES
+            dict(request.headers.items()), body, session_salt, wire=session.WIRE_RESPONSES
         )
         model_requested = _model_name(body.get("model"))
         outgoing = client.build_request(

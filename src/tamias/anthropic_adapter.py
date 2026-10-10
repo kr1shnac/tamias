@@ -352,6 +352,7 @@ def register_routes(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     config: RouterConfig | None = None,
+    session_salt: bytes | None = None,
 ) -> FastAPI:
     """Add the Anthropic Messages route to ``app`` and return it.
 
@@ -371,6 +372,11 @@ def register_routes(
     Nothing is injected into the request.  Anthropic reports usage in every
     stream, so there is no equivalent of the OpenAI ``stream_options`` opt-in.
     """
+
+    if router_mode == "active":
+        raise ValueError("active routing is disabled for the public alpha; use shadow or off")
+    if router_mode not in ("shadow", "off"):
+        raise ValueError(f"unknown router mode: {router_mode}")
 
     base = upstream_url.rstrip("/")
     sessions: dict[str, SessionState] = {}
@@ -533,7 +539,7 @@ def register_routes(
             return _bad_request("request body must be a JSON object")
 
         session_id = session.derive_session_id(
-            dict(request.headers.items()), body, wire=session.WIRE_ANTHROPIC
+            dict(request.headers.items()), body, session_salt, wire=session.WIRE_ANTHROPIC
         )
         model_requested = _model_name(body.get("model"))
         decision = plan(session_id, body, model_requested)

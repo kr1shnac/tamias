@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -63,41 +64,15 @@ def test_policy_off_preserves_existing_router_decision() -> None:
     assert result.target_effort is None
 
 
-async def test_active_proxy_forwards_and_persists_the_effective_effort(tmp_path: Path) -> None:
-    received: list[dict[str, object]] = []
-    upstream = FastAPI()
-
-    @upstream.post("/v1/chat/completions")
-    async def chat(request: Request) -> JSONResponse:
-        received.append(await request.json())
-        return JSONResponse(
-            {"model": "cheap", "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+async def test_active_proxy_is_rejected_for_public_alpha(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="active routing is disabled"):
+        create_app(
+            "http://upstream.invalid",
+            Store(tmp_path / "requests.sqlite"),
+            PriceSheet(date="2026-10-07", models={}),
+            "active",
+            config=policy(),
         )
-
-    store = Store(tmp_path / "requests.sqlite")
-    app = create_app(
-        "http://upstream.invalid",
-        store,
-        PriceSheet(date="2026-10-07", models={}),
-        "active",
-        config=policy(),
-        transport=httpx.ASGITransport(app=upstream),
-    )
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
-        ) as client:
-            response = await client.post("/v1/chat/completions", content=json.dumps(tool_body()))
-
-        assert response.status_code == 200
-        assert received == [{**tool_body(), "model": "cheap", "reasoning": {"effort": "low"}}]
-        (row,) = store.rows()
-        assert row["effort_requested"] is None
-        assert row["effort_used"] == "low"
-        assert row["decision_target_effort"] == "low"
-    finally:
-        await app.state.upstream_client.aclose()
-        store.close()
 
 
 async def test_shadow_proxy_keeps_the_body_byte_identical(tmp_path: Path) -> None:

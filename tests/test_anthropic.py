@@ -592,25 +592,18 @@ async def test_shadow_decision_is_recorded_but_the_bytes_are_untouched(
     assert base64.b64decode(echo_of(frames[0])["raw_body_b64"]) == raw
 
 
-async def test_active_mode_leaves_a_stay_decision_alone(
+async def test_active_mode_is_rejected_for_public_alpha(
     upstream: FastAPI, store: FakeStore, sheet: PriceSheet
 ) -> None:
-    app = anthropic_adapter.register_routes(
-        FastAPI(lifespan=closing_lifespan),
-        UPSTREAM_URL,
-        store,
-        sheet,
-        "active",
-        transport=StreamingASGITransport(upstream),
-    )
-    raw = make_body(MODEL_CACHED)
-
-    async with as_client(app) as client:
-        response = await client.post("/v1/messages", content=raw, headers=ANTHROPIC_HEADERS)
-
-    assert store.last["decision"].persisted_only is False
-    assert store.last["decision"].action == "STAY"
-    assert base64.b64decode(response.json()["echo"]["raw_body_b64"]) == raw
+    with pytest.raises(ValueError, match="active routing is disabled"):
+        anthropic_adapter.register_routes(
+            FastAPI(lifespan=closing_lifespan),
+            UPSTREAM_URL,
+            store,
+            sheet,
+            "active",
+            transport=StreamingASGITransport(upstream),
+        )
 
 
 async def test_router_off_records_a_stay(

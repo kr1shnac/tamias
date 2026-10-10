@@ -445,31 +445,18 @@ async def test_shadow_mode_switch_names_the_configured_cheap_model(
     assert forwarded_body(response.json()["echo"])["model"] == "gpt-mock"
 
 
-async def test_active_mode_is_the_only_mode_that_rewrites_the_model(
+async def test_active_mode_is_rejected_for_public_alpha(
     upstream: FastAPI, store: FakeStore, sheet: PriceSheet
 ) -> None:
-    app = proxy.create_app(
-        UPSTREAM_URL,
-        store,
-        sheet,
-        "active",
-        config=RouterConfig(cheap_model="gpt-cheap", strong_model="gpt-mock", min_gap=0),
-        transport=StreamingASGITransport(upstream),
-    )
-    body = {
-        "model": "gpt-mock",
-        "messages": [
-            {"role": "assistant", "tool_calls": [{"id": "1", "function": {"name": "read"}}]},
-            {"role": "tool", "tool_call_id": "1", "content": "file body"},
-        ],
-    }
-    async with as_client(app) as active_client:
-        response = await active_client.post(
-            "/v1/chat/completions", content=json.dumps(body).encode(), headers=JSON_HEADERS
+    with pytest.raises(ValueError, match="active routing is disabled"):
+        proxy.create_app(
+            UPSTREAM_URL,
+            store,
+            sheet,
+            "active",
+            config=RouterConfig(cheap_model="gpt-cheap", strong_model="gpt-mock", min_gap=0),
+            transport=StreamingASGITransport(upstream),
         )
-
-    assert store.last["decision"].persisted_only is False
-    assert forwarded_body(response.json()["echo"])["model"] == "gpt-cheap"
 
 
 async def test_router_off_records_a_stay_and_never_asks_the_router(

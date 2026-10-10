@@ -195,8 +195,6 @@ def _price(row: dict[str, Any], sheet: PriceSheet) -> dict[str, Any]:
 
     row["actual_cost"] = actual
     stored_cost = row.get("computed_list_cost_usd")
-    if stored_cost is None:
-        stored_cost = row.get("cost_usd")
     row["computed_cost_usd"] = (
         float(stored_cost)
         if isinstance(stored_cost, int | float) and not isinstance(stored_cost, bool)
@@ -277,7 +275,7 @@ def summary(
         if isinstance(row.get("provider_cost_usd"), int | float)
         and not isinstance(row.get("provider_cost_usd"), bool)
         and isinstance(
-            (computed := row.get("computed_cost_usd", row.get("actual_cost"))), int | float
+            (computed := row.get("computed_cost_usd")), int | float
         )
         and not isinstance(computed, bool)
     ]

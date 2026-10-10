@@ -61,7 +61,7 @@ def test_run_sets_project_base_urls_reports_and_cleans_up(tmp_path: Path, capsys
         [
             "run",
             "--mode",
-            "active",
+            "shadow",
             "--project",
             "work",
             "--upstream",

@@ -68,11 +68,12 @@ flags are `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--effort-policy`, `--effort-style`, `--inject-usage`,
 `--request-usage-cost`, and `--verbose`.
 
-`--effort-policy easy-low` is opt-in. In active router mode it asks the upstream
-for high reasoning effort on planning or tool-error turns and low effort on easy
-tool turns. `--effort-style` chooses OpenRouter's `reasoning.effort` field or
-OpenAI's `reasoning_effort` field. The log records the requested and forwarded
-setting; it does not prove the provider applied it.
+Public alpha routing is limited to `shadow` and `off`; `active` routing is
+disabled because it rewrites provider requests. `--effort-policy easy-low` is
+available for metering policy decisions but does not enable model rewriting.
+`--effort-style` chooses OpenRouter's `reasoning.effort` field or OpenAI's
+`reasoning_effort` field. The log records the requested setting; it does not
+prove the provider applied it.
 
 If an agent's tools return `Error: ...`, configure `error_markers`; see
 [`examples/router.example.toml`](examples/router.example.toml).

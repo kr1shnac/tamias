@@ -910,6 +910,7 @@ def test_a_legacy_row_is_reported_as_provenance_unknown(tmp_path: Path, sheet) -
 
     assert report["n_priced"] == 1
     assert report["provenance_unknown"] == 1
+    assert "provider_difference" not in report
     assert report["price_sheets"] == []
     assert "simulated" not in report
     assert "price_sheet_warning" not in report
