@@ -597,6 +597,18 @@ def _resolve_router_mode(args: argparse.Namespace, cfg: Config) -> str:
     return str(mode)
 
 
+def _resolve_tls(cert: str | None, key: str | None) -> tuple[str | None, str | None]:
+    """Validate the TLS certificate/key pair. Both or neither, and both exist."""
+    if cert is None and key is None:
+        return None, None
+    if cert is None or key is None:
+        raise ConfigError("--tls-cert and --tls-key must be given together")
+    for label, path in (("cert", cert), ("key", key)):
+        if not Path(path).exists():
+            raise ConfigError(f"--tls-{label} file not found: {path}")
+    return cert, key
+
+
 def config_command(args: argparse.Namespace) -> int:
     """``tamias config path|show|providers``."""
     if args.config_command == "providers":
@@ -687,6 +699,12 @@ def serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    try:
+        tls_cert, tls_key = _resolve_tls(args.tls_cert, args.tls_key)
+    except ConfigError as exc:
+        print(f"tamias serve: {exc}", file=sys.stderr)
+        return 2
+    scheme = "https" if tls_cert else "http"
     max_body_bytes = args.max_body_bytes
     if max_body_bytes is None:
         max_body_bytes = _env_positive_int(MAX_BODY_BYTES_ENV, DEFAULT_MAX_BODY_BYTES)
@@ -718,10 +736,15 @@ def serve(args: argparse.Namespace) -> int:
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
-        f"http://{args.host}:{args.port}{proxy_path()} -> {args.upstream}{proxy_path()}",
+        f"{scheme}://{args.host}:{args.port}{proxy_path()} -> {args.upstream}{proxy_path()}",
         file=sys.stderr,
     )
     print(f"tamias serve: request log {args.db}, prices {args.prices}", file=sys.stderr)
+    if tls_cert:
+        print(
+            f"tamias serve: TLS is ON (cert {tls_cert}); clients must use {scheme}://",
+            file=sys.stderr,
+        )
     if auth_token is not None:
         print(
             "tamias serve: bearer auth is ON: clients must send "
@@ -746,7 +769,8 @@ def serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     _warn_if_exposed(args.host)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    ssl_kwargs = {"ssl_certfile": tls_cert, "ssl_keyfile": tls_key} if tls_cert else {}
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", **ssl_kwargs)
     store: Store | None = getattr(app.state, "store", None)
     if store is not None:
         store.close()
@@ -1194,6 +1218,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"bearer token clients must send as Authorization: Bearer <token> "
         f"(default: ${AUTH_TOKEN_ENV}; required for a non-loopback --host)",
+    )
+    serve_parser.add_argument(
+        "--tls-cert",
+        default=None,
+        help="PEM certificate chain; with --tls-key, serve HTTPS instead of HTTP",
+    )
+    serve_parser.add_argument(
+        "--tls-key",
+        default=None,
+        help="PEM private key matching --tls-cert",
     )
     serve_parser.add_argument(
         "--max-body-bytes",

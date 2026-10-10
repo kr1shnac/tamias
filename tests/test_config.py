@@ -278,3 +278,57 @@ def test_serve_flag_beats_config_port(monkeypatch, tmp_path: Path) -> None:
     )
     assert code == 0
     assert captured == {"port": 8123}
+
+
+def _serve_args(tmp_path: Path, sheet: Path, *extra: str) -> list[str]:
+    return [
+        "serve",
+        "--upstream",
+        "http://upstream.invalid",
+        "--prices",
+        str(sheet),
+        "--db",
+        str(tmp_path / "r.db"),
+        *extra,
+    ]
+
+
+def test_serve_rejects_tls_cert_without_key(monkeypatch, tmp_path: Path, capsys) -> None:
+    sheet = _write(tmp_path / "prices.toml", 'date = "2026-10-06"\n[model]\ninput=1\noutput=1\n')
+    assert cli.main(_serve_args(tmp_path, sheet, "--tls-cert", "cert.pem")) == 2
+    assert "must be given together" in capsys.readouterr().err
+
+
+def test_serve_rejects_missing_tls_files(monkeypatch, tmp_path: Path, capsys) -> None:
+    sheet = _write(tmp_path / "prices.toml", 'date = "2026-10-06"\n[model]\ninput=1\noutput=1\n')
+    code = cli.main(
+        _serve_args(tmp_path, sheet, "--tls-cert", "nope.pem", "--tls-key", "nope.key")
+    )
+    assert code == 2
+    assert "file not found" in capsys.readouterr().err
+
+
+def test_serve_passes_tls_to_uvicorn(monkeypatch, tmp_path: Path, capsys) -> None:
+    sheet = _write(tmp_path / "prices.toml", 'date = "2026-10-06"\n[model]\ninput=1\noutput=1\n')
+    cert = _write(tmp_path / "cert.pem", "cert")
+    key = _write(tmp_path / "key.pem", "key")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "uvicorn.run", lambda app, **kw: captured.update(kw)
+    )
+
+    code = cli.main(_serve_args(tmp_path, sheet, "--tls-cert", str(cert), "--tls-key", str(key)))
+    assert code == 0
+    assert captured["ssl_certfile"] == str(cert)
+    assert captured["ssl_keyfile"] == str(key)
+    err = capsys.readouterr().err
+    assert "https://127.0.0.1:8000" in err
+    assert "TLS is ON" in err
+
+
+def test_serve_without_tls_does_not_pass_ssl(monkeypatch, tmp_path: Path) -> None:
+    sheet = _write(tmp_path / "prices.toml", 'date = "2026-10-06"\n[model]\ninput=1\noutput=1\n')
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
+    assert cli.main(_serve_args(tmp_path, sheet)) == 0
+    assert "ssl_certfile" not in captured

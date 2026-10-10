@@ -107,8 +107,12 @@ environment or config-file fallback; see Configuration above). Its available
 flags are `--provider`, `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--router-config`, `--cheap-model`, `--strong-model`, `--min-gap`,
 `--effort-policy`, `--effort-style`, `--inject-usage`,
-`--request-usage-cost`, `--auth-token`, `--max-body-bytes`,
-`--max-concurrency`, and `--verbose`.
+`--request-usage-cost`, `--auth-token`, `--tls-cert`, `--tls-key`,
+`--max-body-bytes`, `--max-concurrency`, and `--verbose`.
+
+Give `--tls-cert` and `--tls-key` together to serve HTTPS; the startup banner
+then prints the `https://` URL. TLS is independent of `--auth-token`, which a
+non-loopback bind still requires.
 
 Binding to a non-loopback `--host` requires `--auth-token`: `serve` refuses to
 start otherwise. The token is checked as a bearer credential in constant time,
