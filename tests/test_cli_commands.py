@@ -21,7 +21,20 @@ def test_dashboard_delegates_without_starting_a_server(monkeypatch) -> None:
 
     monkeypatch.setattr("tamias.dashboard.main", dashboard_main)
     assert (
-        cli.main(["dashboard", "--db", "log.db", "--prices", "prices.toml", "--port", "9124"]) == 17
+        cli.main(
+            [
+                "dashboard",
+                "--db",
+                "log.db",
+                "--prices",
+                "prices.toml",
+                "--compare-db",
+                "baseline.db",
+                "--port",
+                "9124",
+            ]
+        )
+        == 17
     )
     assert calls == [
         [
@@ -33,6 +46,8 @@ def test_dashboard_delegates_without_starting_a_server(monkeypatch) -> None:
             "127.0.0.1",
             "--port",
             "9124",
+            "--compare-db",
+            "baseline.db",
         ]
     ]
 

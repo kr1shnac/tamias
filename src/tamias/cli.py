@@ -977,7 +977,8 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser = sub.add_parser("dashboard", help="serve the local run dashboard")
     dashboard_parser.add_argument("--db", required=True, help="path to the proxy sqlite log")
     dashboard_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
-    dashboard_parser.add_argument("--port", type=int, default=8000, help="port to listen on")
+    dashboard_parser.add_argument("--port", type=int, default=8010, help="port to listen on")
+    dashboard_parser.add_argument("--compare-db", help="optional baseline database to compare")
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="address to bind")
     dashboard_parser.add_argument(
         "--allow-non-loopback",
@@ -1062,6 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--port",
                 str(args.port),
             ]
+            + (["--compare-db", args.compare_db] if args.compare_db else [])
             + (["--allow-non-loopback"] if args.allow_non_loopback else [])
         )
     if args.command == "agent-config":
