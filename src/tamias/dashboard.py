@@ -213,6 +213,24 @@ def _price(row: dict[str, Any], sheet: PriceSheet) -> dict[str, Any]:
     return row
 
 
+def _reconciliation_cost(row: dict[str, Any]) -> float | None:
+    """Return a trustworthy computed value for billed-cost reconciliation.
+
+    Rows built from the request log always have ``computed_cost_usd`` after
+    :func:`_price`; a missing value there is UNKNOWN, including legacy rows
+    that contain only ambiguous ``cost_usd``.  Lightweight callers of
+    :func:`summary` may supply an already-computed ``actual_cost`` without any
+    storage fields, which is safe to reconcile.
+    """
+    if "computed_cost_usd" in row:
+        value = row.get("computed_cost_usd")
+    elif "cost_usd" in row:
+        return None
+    else:
+        value = row.get("actual_cost")
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
 def summary(
     rows: list[dict[str, Any]],
     simulated: bool = False,
@@ -274,10 +292,7 @@ def summary(
         for row in rows
         if isinstance(row.get("provider_cost_usd"), int | float)
         and not isinstance(row.get("provider_cost_usd"), bool)
-        and isinstance(
-            (computed := row.get("computed_cost_usd")), int | float
-        )
-        and not isinstance(computed, bool)
+        and (computed := _reconciliation_cost(row)) is not None
     ]
     report["provider_rows"] = len(billed_rows)
     report["provider_missing"] = n_requests - len(billed_rows)
