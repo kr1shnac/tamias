@@ -5,6 +5,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0a4] - 2026-10-10
+
+### Added
+
+- Persistent per-database session salts and safe migration of legacy session ids.
+- Shared SSE parser fixtures covering CRLF, byte boundaries, comments, and
+  multi-line data events.
+- CI checks for tests, Ruff, package builds, metadata, and wheel contents.
+
+### Changed
+
+- Public alpha routing accepts only `shadow` and `off`; active request rewriting
+  is disabled.
+- Ambiguous legacy `cost_usd` values remain UNKNOWN and are excluded from
+  computed-cost and billed-cost reconciliation.
+- Dashboard defaults to port 8010 and forwards `--compare-db`.
+
+### Security
+
+- Failure-ledger fields accept only the closed coded vocabulary; raw exception
+  text is discarded at the storage boundary.
+
 ## [0.1.0a3] - 2026-10-07
 
 ### Added
