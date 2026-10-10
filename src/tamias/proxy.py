@@ -28,6 +28,8 @@ through to the catch-all relay.
 
 from __future__ import annotations
 
+import asyncio
+import hmac
 import json
 import logging
 import os
@@ -229,6 +231,63 @@ def _bad_request(message: str) -> JSONResponse:
     )
 
 
+def _unauthorized() -> JSONResponse:
+    return JSONResponse(
+        {"error": {"message": "authentication failed", "type": "authentication_error"}},
+        status_code=401,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _payload_too_large() -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "message": "request body exceeds the configured size limit",
+                "type": "invalid_request_error",
+            }
+        },
+        status_code=413,
+    )
+
+
+class _BodyTooLarge(Exception):
+    """Internal signal that a request body grew past the configured cap."""
+
+
+def _contains_body_too_large(exc: BaseException) -> bool:
+    """True when ``exc`` is (or wraps, through an anyio task group) _BodyTooLarge."""
+    if isinstance(exc, _BodyTooLarge):
+        return True
+    sub = getattr(exc, "exceptions", None)
+    return isinstance(sub, (list, tuple)) and any(
+        _contains_body_too_large(item) for item in sub
+    )
+
+
+class _LimitedReceive:
+    """ASGI receive wrapper that counts bytes and stops over the cap.
+
+    Starlette's :class:`~starlette.requests.Request` reads its body through the
+    ``_receive`` channel, so replacing it here lets :func:`create_app` enforce
+    a body-size cap for chunked bodies without buffering more than the limit
+    or disturbing downstream ``await request.body()`` reads.
+    """
+
+    def __init__(self, receive: Any, limit: int) -> None:
+        self._receive = receive
+        self._limit = limit
+        self._total = 0
+
+    async def __call__(self) -> dict[str, Any]:
+        message = await self._receive()
+        if message["type"] == "http.request":
+            self._total += len(message.get("body", b""))
+            if self._total > self._limit:
+                raise _BodyTooLarge()
+        return message
+
+
 def _upstream_failure_response() -> JSONResponse:
     """The deliberate 502-class answer for a request the upstream never served.
 
@@ -319,6 +378,9 @@ def create_app(
     inject_usage: bool = False,
     request_usage_cost: bool = False,
     config: RouterConfig | None = None,
+    auth_token: str | None = None,
+    max_body_bytes: int | None = None,
+    max_concurrency: int | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     effort_style: str = "openrouter",
 ) -> FastAPI:
@@ -356,6 +418,51 @@ def create_app(
     app.state.request_usage_cost = request_usage_cost
     app.state.effort_style = effort_style
     app.state.sessions = table
+
+    if auth_token is not None:
+        @app.middleware("http")
+        async def require_auth(request: Request, call_next: Any) -> Response:
+            header = request.headers.get("authorization", "")
+            scheme, separator, credential = header.partition(" ")
+            if (
+                separator
+                and scheme.lower() == "bearer"
+                and hmac.compare_digest(credential, auth_token)
+            ):
+                return await call_next(request)
+            return _unauthorized()
+
+    if max_body_bytes is not None:
+        @app.exception_handler(_BodyTooLarge)
+        async def _body_too_large_handler(
+            request: Request, exc: _BodyTooLarge
+        ) -> JSONResponse:
+            return _payload_too_large()
+
+        @app.middleware("http")
+        async def enforce_body_limit(request: Request, call_next: Any) -> Response:
+            length = request.headers.get("content-length")
+            if length is not None:
+                try:
+                    if int(length) > max_body_bytes:
+                        return _payload_too_large()
+                except ValueError:
+                    pass
+            request._receive = _LimitedReceive(request._receive, max_body_bytes)
+            try:
+                return await call_next(request)
+            except BaseException as exc:
+                if _contains_body_too_large(exc):
+                    return _payload_too_large()
+                raise
+
+    if max_concurrency is not None:
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        @app.middleware("http")
+        async def limit_concurrency(request: Request, call_next: Any) -> Response:
+            async with semaphore:
+                return await call_next(request)
 
     @app.middleware("http")
     async def project_prefix(request: Request, call_next: Any) -> Response:

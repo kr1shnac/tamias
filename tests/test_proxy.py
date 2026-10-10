@@ -779,3 +779,81 @@ def single_chunk(content: bytes) -> AsyncIterator[bytes]:
         yield content
 
     return iterator()
+
+
+async def test_bearer_token_is_required_when_configured(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    app = proxy.create_app(
+        UPSTREAM_URL,
+        store,
+        sheet,
+        "shadow",
+        auth_token="s3cret-token",
+        transport=StreamingASGITransport(upstream),
+    )
+    async with as_client(app) as client:
+        missing = await client.post(
+            "/v1/chat/completions", content=make_body("gpt-mock"), headers=JSON_HEADERS
+        )
+        assert missing.status_code == 401
+
+        wrong = await client.post(
+            "/v1/chat/completions",
+            content=make_body("gpt-mock"),
+            headers={**JSON_HEADERS, "authorization": "Bearer wrong"},
+        )
+        assert wrong.status_code == 401
+
+        accepted = await client.post(
+            "/v1/chat/completions",
+            content=make_body("gpt-mock"),
+            headers={**JSON_HEADERS, "authorization": "Bearer s3cret-token"},
+        )
+        assert accepted.status_code == 200
+
+
+async def test_oversized_body_is_rejected_with_413(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    app = proxy.create_app(
+        UPSTREAM_URL,
+        store,
+        sheet,
+        "shadow",
+        max_body_bytes=1024,
+        transport=StreamingASGITransport(upstream),
+    )
+    async with as_client(app) as client:
+        within = await client.post(
+            "/v1/chat/completions", content=make_body("gpt-mock"), headers=JSON_HEADERS
+        )
+        assert within.status_code == 200
+
+        big = (
+            b'{"model": "gpt-mock", "messages": [{"role": "user", "content": "'
+            + b"x" * 5000
+            + b'"}]}'
+        )
+        too_large = await client.post(
+            "/v1/chat/completions", content=big, headers=JSON_HEADERS
+        )
+        assert too_large.status_code == 413
+
+
+async def test_concurrency_limit_serves_single_requests(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    app = proxy.create_app(
+        UPSTREAM_URL,
+        store,
+        sheet,
+        "shadow",
+        max_concurrency=1,
+        transport=StreamingASGITransport(upstream),
+    )
+    async with as_client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions", content=make_body("gpt-mock"), headers=JSON_HEADERS
+        )
+        assert response.status_code == 200
