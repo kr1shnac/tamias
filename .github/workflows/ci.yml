@@ -42,6 +42,19 @@ jobs:
           assert not any(name.startswith(("agent", "tui", "demo")) for name in names)
           PY
 
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Known-vulnerability audit of installed dependencies
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          python -m pip install .
+          pip-audit --strict
+
   smoke:
     runs-on: ubuntu-latest
     needs: package

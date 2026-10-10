@@ -152,13 +152,16 @@ Three client protocols are metered. Any other path is relayed unlogged.
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the frozen architecture and
   research design (v1.2, 2026-09-30). It is the spec; the code is an
-  implementation of a subset of it, and §7 of `HANDOFF-CODEX.md` records which
-  parts exist and which do not.
+  implementation of a subset of it, and
+  [`docs/RELEASE-STATUS.md`](docs/RELEASE-STATUS.md) records which parts exist
+  and which do not.
 - [`docs/ROUTING.md`](docs/ROUTING.md) — the router's matcher, profiles and
   TOML keys.
 - [`docs/PRICING.md`](docs/PRICING.md) — how token counts become a dollar
   figure, and when the answer is UNKNOWN.
 - [`docs/EFFORT.md`](docs/EFFORT.md) — optional reasoning-effort switching.
+- [`docs/PLATFORMS.md`](docs/PLATFORMS.md) — supported Python and OS, and the
+  Windows database-permission caveat.
 - [`demo/RUNBOOK.md`](demo/RUNBOOK.md) — how to produce and read the two-arm
   demo, including its known limits.
 - [`DEMO.md`](DEMO.md) — the demo script: three offline acts, exact commands,
