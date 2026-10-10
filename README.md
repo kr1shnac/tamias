@@ -55,6 +55,38 @@ tamias run --prices prices.toml --upstream https://your-provider.example -- your
 As with `tamias serve`, the upstream is a base URL without
 `/v1/chat/completions`. `tamias run --help` prints the same defaults.
 
+### Configuration file
+
+Instead of repeating flags, put them in `~/.tamias/config.toml` (or the path in
+`$TAMIAS_CONFIG`, or `--config PATH`):
+
+```toml
+provider = "openrouter"   # openrouter | openai | ollama
+prices = "prices.toml"
+db = "requests.db"
+router_mode = "shadow"    # shadow | off
+cheap_model = "some-cheap-model"
+host = "127.0.0.1"
+port = 8000
+```
+
+`provider` fills `upstream` from a built-in preset when no explicit URL is set.
+Precedence is **CLI flag > environment > config file > built-in default**, and
+the file holds no secrets — keep bearer tokens in `$TAMIAS_AUTH_TOKEN`. Inspect
+what will be read:
+
+```sh
+tamias config path        # which file is used
+tamias config show        # the values it holds
+tamias config providers   # the built-in upstream presets
+```
+
+Provider presets also work directly on the command line:
+
+```sh
+tamias serve --provider openai --prices prices.toml --db requests.db
+```
+
 Use `tamias agent-config` to print a local configuration snippet for an agent:
 
 ```sh
@@ -70,8 +102,9 @@ View a local run with:
 tamias dashboard --db requests.db --prices prices.toml
 ```
 
-`tamias serve` requires `--upstream`, `--prices`, and `--db`. Its available
-flags are `--port`, `--host`, `--router-mode`, `--router-profile`,
+`tamias serve` takes `--upstream`, `--prices`, and `--db` (each with an
+environment or config-file fallback; see Configuration above). Its available
+flags are `--provider`, `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--router-config`, `--cheap-model`, `--strong-model`, `--min-gap`,
 `--effort-policy`, `--effort-style`, `--inject-usage`,
 `--request-usage-cost`, `--auth-token`, `--max-body-bytes`,

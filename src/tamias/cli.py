@@ -31,6 +31,15 @@ from pathlib import Path
 from typing import Any
 from urllib.request import build_opener, urlopen
 
+from tamias.config import (
+    PROVIDER_PRESETS,
+    Config,
+    ConfigError,
+    load_config,
+    pick,
+    preset_names,
+    preset_upstream,
+)
 from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
 from tamias.pricing_fetch import (
     OPENROUTER_MODELS_URL,
@@ -546,15 +555,129 @@ def build_serve_app(
     return app
 
 
+def _load_effective_config(args: argparse.Namespace) -> Config:
+    """Read the config file named on the command line (or the default)."""
+    return load_config(getattr(args, "config", None))
+
+
+def _flag_given(args: argparse.Namespace, flag: str) -> bool:
+    """Whether ``flag`` appeared on the command line (vs. only its default).
+
+    argparse cannot tell an explicit ``--host 127.0.0.1`` from the built-in
+    default, so the raw argv recorded by :func:`main` is consulted.
+    """
+    for token in getattr(args, "_argv", []):
+        if token == flag or token.startswith(flag + "="):
+            return True
+    return False
+
+
+def _resolve_upstream(args: argparse.Namespace, cfg: Config) -> str | None:
+    """Precedence: --upstream > $TAMIAS_UPSTREAM > --provider > config upstream/provider."""
+    if getattr(args, "upstream", None):
+        return str(args.upstream)
+    env_upstream = os.environ.get(UPSTREAM_ENV_VAR)
+    if env_upstream:
+        return env_upstream
+    if getattr(args, "provider", None):
+        return preset_upstream(str(args.provider))
+    return cfg.resolved_upstream()
+
+
+def _resolve_router_mode(args: argparse.Namespace, cfg: Config) -> str:
+    if _flag_given(args, "--router-mode"):
+        mode: object = args.router_mode
+    elif cfg.router_mode is not None:
+        mode = cfg.router_mode
+    else:
+        mode = args.router_mode
+    if mode not in ROUTER_MODES:
+        allowed = ", ".join(ROUTER_MODES)
+        raise ConfigError(f"router_mode {mode!r} is not one of: {allowed}")
+    return str(mode)
+
+
+def config_command(args: argparse.Namespace) -> int:
+    """``tamias config path|show|providers``."""
+    if args.config_command == "providers":
+        for name in preset_names():
+            preset = PROVIDER_PRESETS[name]
+            print(f"{name}\t{preset['upstream']}\t{preset['description']}")
+        return 0
+    try:
+        cfg = _load_effective_config(args)
+    except ConfigError as exc:
+        print(f"tamias config: {exc}", file=sys.stderr)
+        return 1
+    if args.config_command == "path":
+        print(cfg.path)
+        return 0
+    # show: report the file path plus every key that was set.
+    print(f"# {cfg.path}")
+    for key in (
+        "upstream",
+        "provider",
+        "prices",
+        "db",
+        "router_mode",
+        "cheap_model",
+        "strong_model",
+        "effort_style",
+        "host",
+        "port",
+        "min_gap",
+        "inject_usage",
+    ):
+        value = getattr(cfg, key)
+        if value is not None:
+            print(f"{key} = {value!r}")
+    return 0
+
+
 def serve(args: argparse.Namespace) -> int:
     """Run the proxy under uvicorn until interrupted."""
     import uvicorn
 
     from tamias.security import is_loopback, refuse_non_loopback
 
+    cfg = _load_effective_config(args)
+    upstream = _resolve_upstream(args, cfg)
+    if not upstream:
+        print(
+            "tamias serve: an upstream is required; pass --upstream, set "
+            f"${UPSTREAM_ENV_VAR}, or set upstream/provider in the config file",
+            file=sys.stderr,
+        )
+        return 2
+    args.upstream = upstream
+    args.router_mode = _resolve_router_mode(args, cfg)
+    if not _flag_given(args, "--host") and cfg.host is not None:
+        args.host = cfg.host
+    if not _flag_given(args, "--port") and cfg.port is not None:
+        args.port = cfg.port
+
+    # Refuse a wider bind before any server-side work starts.
     refused = refuse_non_loopback("serve", args.host, args.allow_non_loopback)
     if refused:
         return refused
+
+    prices_arg = pick(args.prices, cfg.prices, None)
+    prices_path = _resolve_prices_path(prices_arg)
+    if prices_path is None:
+        target = prices_arg if prices_arg is not None else f"./{DEFAULT_PRICES_NAME}"
+        print(
+            f"tamias serve: no price sheet found; run: tamias prices fetch --out {target}",
+            file=sys.stderr,
+        )
+        return 2
+    args.prices = str(prices_path)
+    args.db = str(pick(args.db, cfg.db, "requests.db"))
+    if not _flag_given(args, "--effort-style") and cfg.effort_style is not None:
+        args.effort_style = cfg.effort_style
+    if not _flag_given(args, "--cheap-model") and cfg.cheap_model is not None:
+        args.cheap_model = cfg.cheap_model
+    if not _flag_given(args, "--strong-model") and cfg.strong_model is not None:
+        args.strong_model = cfg.strong_model
 
     auth_token = args.auth_token or os.environ.get(AUTH_TOKEN_ENV)
     if not is_loopback(args.host) and auth_token is None:
@@ -575,6 +698,8 @@ def serve(args: argparse.Namespace) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    if not _flag_given(args, "--inject-usage") and cfg.inject_usage is not None:
+        args.inject_usage = cfg.inject_usage
     app = build_serve_app(
         args.upstream,
         args.prices,
@@ -871,15 +996,17 @@ def run(args: argparse.Namespace) -> int:
         print("tamias run: COMMAND is required after --", file=sys.stderr)
         return 2
 
-    prices_path = _resolve_prices_path(args.prices)
+    cfg = _load_effective_config(args)
+    prices_path = _resolve_prices_path(pick(args.prices, cfg.prices, None))
     if prices_path is None:
-        target = args.prices if args.prices is not None else f"./{DEFAULT_PRICES_NAME}"
+        target = pick(args.prices, cfg.prices, None) or f"./{DEFAULT_PRICES_NAME}"
         print(f"no price sheet found; run: tamias prices fetch --out {target}", file=sys.stderr)
         return 2
-    upstream = args.upstream or os.environ.get(UPSTREAM_ENV_VAR) or DEFAULT_UPSTREAM
+    upstream = _resolve_upstream(args, cfg) or DEFAULT_UPSTREAM
+    db_override = pick(args.db, cfg.db, None)
 
     try:
-        db = _reserve_run_db(args.db, args.project)
+        db = _reserve_run_db(db_override, args.project)
     except OSError as exc:
         print(f"tamias run: {exc}", file=sys.stderr)
         return 1
@@ -900,13 +1027,13 @@ def run(args: argparse.Namespace) -> int:
         "127.0.0.1",
         "--port",
         str(port),
-        "--router-mode",
-        args.mode,
         "--cheap-model",
         args.cheap_model,
         "--strong-model",
         args.strong_model,
     ]
+    if args.mode:
+        serve_command.extend(("--router-mode", args.mode))
     if args.router_config:
         serve_command.extend(("--router-config", args.router_config))
 
@@ -972,6 +1099,11 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"tamias {package_version()}",
         help="print the tamias version and exit",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="TOML config file (default: $TAMIAS_CONFIG, else ~/.tamias/config.toml)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     prices_parser = sub.add_parser("prices", help="manage price sheets")
@@ -986,13 +1118,23 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = sub.add_parser("serve", help="run the proxy in front of an upstream")
     serve_parser.add_argument(
         "--upstream",
-        required=True,
-        help="base URL of the OpenAI-compatible upstream, without /v1/chat/completions",
+        default=None,
+        help="base URL of the OpenAI-compatible upstream, without /v1/chat/completions "
+        f"(default: ${UPSTREAM_ENV_VAR}, else the config/provider preset)",
+    )
+    serve_parser.add_argument(
+        "--provider",
+        choices=preset_names(),
+        default=None,
+        help="named upstream preset, used when --upstream/upstream is not set "
+        f"(one of: {', '.join(preset_names())})",
     )
     serve_parser.add_argument("--router-profile", choices=("generic", "legacy"), default="generic")
     serve_parser.add_argument("--router-config", help="TOML router configuration path")
-    serve_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
-    serve_parser.add_argument("--db", required=True, help="path to the sqlite request log")
+    serve_parser.add_argument(
+        "--prices", default=None, help="path to the TOML price sheet"
+    )
+    serve_parser.add_argument("--db", default=None, help="path to the sqlite request log")
     serve_parser.add_argument("--port", type=int, default=8000, help="port to listen on")
     serve_parser.add_argument("--host", default="127.0.0.1", help="address to bind")
     serve_parser.add_argument(
@@ -1069,7 +1211,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run_parser = sub.add_parser("run", help="run one command through a short-lived proxy")
-    run_parser.add_argument("--mode", choices=ROUTER_MODES, default="shadow")
+    run_parser.add_argument("--mode", choices=ROUTER_MODES, default=None)
     run_parser.add_argument("--project")
     run_parser.add_argument("--cheap-model", default="")
     run_parser.add_argument("--strong-model", default="")
@@ -1084,7 +1226,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--upstream",
         default=None,
         help="base URL of the OpenAI-compatible upstream, without /v1/chat/completions "
-        f"(default: ${UPSTREAM_ENV_VAR} if set, else {DEFAULT_UPSTREAM})",
+        f"(default: ${UPSTREAM_ENV_VAR} if set, else the config/provider preset, "
+        f"else {DEFAULT_UPSTREAM})",
+    )
+    run_parser.add_argument(
+        "--provider",
+        choices=preset_names(),
+        default=None,
+        help="named upstream preset, used when --upstream/upstream is not set "
+        f"(one of: {', '.join(preset_names())})",
     )
     run_parser.add_argument("--router-config", help="TOML router configuration path")
     run_parser.add_argument("child_command", nargs=argparse.REMAINDER, metavar="COMMAND")
@@ -1135,6 +1285,12 @@ def build_parser() -> argparse.ArgumentParser:
     prune_parser.add_argument(
         "--dry-run", action="store_true", help="print what would be deleted without deleting"
     )
+
+    config_parser = sub.add_parser("config", help="show the effective configuration")
+    config_sub = config_parser.add_subparsers(dest="config_command", required=True)
+    config_sub.add_parser("path", help="print the config file path that would be read")
+    config_sub.add_parser("show", help="print the values loaded from the config file")
+    config_sub.add_parser("providers", help="list the built-in upstream presets")
     return parser
 
 
@@ -1154,7 +1310,9 @@ def package_version() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:]) if argv is None else list(argv)
+    args = build_parser().parse_args(raw_argv)
+    args._argv = raw_argv
     if args.command == "prices" and args.prices_command == "fetch":
         output = Path(args.out)
         if output.exists() and not args.force:
@@ -1230,6 +1388,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "prune":
         return prune(args)
+    if args.command == "config":
+        return config_command(args)
     return 2
 
 
