@@ -5,6 +5,14 @@ optionally applying rule-based model routing.
 
 ## Install
 
+Public alpha from PyPI (Python 3.11 or newer):
+
+```sh
+pip install tamias
+```
+
+To work on tamias itself, install the checkout in editable mode:
+
 ```sh
 python -m venv .venv
 .venv/bin/pip install -e '.[dev]'
@@ -66,7 +74,20 @@ tamias dashboard --db requests.db --prices prices.toml
 flags are `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--router-config`, `--cheap-model`, `--strong-model`, `--min-gap`,
 `--effort-policy`, `--effort-style`, `--inject-usage`,
-`--request-usage-cost`, and `--verbose`.
+`--request-usage-cost`, `--auth-token`, `--max-body-bytes`,
+`--max-concurrency`, and `--verbose`.
+
+Binding to a non-loopback `--host` requires `--auth-token`: `serve` refuses to
+start otherwise. The token is checked as a bearer credential in constant time,
+and every response carries a `WWW-Authenticate: Bearer` header on a 401. The
+three limits are also settable through the environment — `TAMIAS_AUTH_TOKEN`,
+`TAMIAS_MAX_BODY_BYTES` (default 10 MiB, larger bodies are rejected with 413),
+and `TAMIAS_MAX_CONCURRENCY` (default 64). The log database can be trimmed with
+`tamias prune --db requests.db --keep-days 30` (`--keep-rows` and `--dry-run`
+are also available); `tamias doctor` warns once the database passes 500 MB.
+`tamias --version` prints the single version shared by the package and the
+installed metadata.
+
 
 Public alpha routing is limited to `shadow` and `off`; `active` routing is
 disabled because it rewrites provider requests. `--effort-policy easy-low` is
@@ -90,6 +111,42 @@ If an agent's tools return `Error: ...`, configure `error_markers`; see
   different amounts of work, so their totals are not comparable in either
   direction, and every dollar figure shown is hypothetical — the real billed
   cost of the free models is `$0`.
+
+## Client matrix
+
+Three client protocols are metered. Any other path is relayed unlogged.
+
+| Client protocol | Route | Streaming | Buffered |
+| --- | --- | --- | --- |
+| OpenAI Chat Completions | `POST /v1/chat/completions` | metered | metered |
+| Anthropic Messages | `POST /v1/messages` | metered | metered |
+| OpenAI Responses | `POST /v1/responses` | metered | metered |
+| Anything else | `/{path}` | relayed, not logged | relayed, not logged |
+
+## Capability matrix
+
+| Capability | Alpha state |
+| --- | --- |
+| Per-request token and cost log | Yes |
+| Rule-based shadow routing | Yes — records decisions, does not rewrite |
+| Active routing (request rewriting) | No — rejected by the CLI and library |
+| Reasoning-effort switching | Metering only; provider behaviour unverified |
+| Proxy authentication | Opt-in bearer token; required off loopback |
+| Prompt / response text storage | No — never stored |
+| Multi-user or remote hardening | Not supported — single user |
+
+## What Tamias does not do
+
+- It does not proxy arbitrary web traffic: only the three routes above are
+  metered; everything else is passed through without a log row.
+- It does not store prompt or response text, and it does not log credentials.
+- It does not authenticate with the upstream provider; it forwards the
+  credentials the client already sends.
+- It does not rewrite provider requests in this alpha (`active` routing is
+  disabled), so it cannot change which model a provider actually runs.
+- It does not prove that a provider honoured a requested reasoning effort; the
+  log records the request only.
+
 
 ## Documentation
 
