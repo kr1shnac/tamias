@@ -348,14 +348,20 @@ def report(db_path: str, prices_path: str) -> None:
             f"free-model rows: {free_count} of {len(rows)}; "
             "real billed cost for those is $0, so dollar figures above are hypothetical"
         )
-    router_mode = "shadow"
-    for row in rows:
-        mode = row.get("router_mode") if isinstance(row, dict) else None
-        if isinstance(mode, str) and mode:
-            router_mode = mode
-            break
-    if router_mode == "active":
+    router_modes = {
+        mode
+        for row in rows
+        if isinstance(row, dict)
+        for mode in (row.get("router_mode"),)
+        if isinstance(mode, str) and mode
+    }
+    if router_modes == {"active"}:
         print(f"requests routed to the cheap model: {switched}")
+    elif len(router_modes) > 1:
+        print(
+            "requests shadow mode would have switched: "
+            f"{switched} (mixed/historical router modes)"
+        )
     else:
         print(f"requests shadow mode would have switched: {switched}")
 
