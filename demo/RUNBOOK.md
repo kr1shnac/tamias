@@ -1,21 +1,36 @@
 # Demo runbook
 
-Everything below is run from the repo root on the `feat/demo` branch. Every
-command uses the project venv; there is no bare `python` or `pytest` anywhere in
-this document.
+Everything below is run from the repo root on the current branch. Every command
+uses the project venv; there is no bare `python` or `pytest` anywhere in this
+document.
 
 The demo is one small task run twice under two arms:
 
-| arm | proxy flags | what it measures |
+| arm | proxy flags | what it records |
 | --- | --- | --- |
-| `baseline` | `--router-mode shadow` | what the router **would** do; every request still runs the strong model |
-| `routed` | `--router-mode active --cheap-model … --strong-model … --inject-usage` | what it **did**: mechanical tool work is rewritten to the cheap model |
+| `baseline` | `--router-mode shadow` | 7 STAY / 5 SWITCH decisions, **no target** (no cheap model configured) |
+| `routed` | `--router-mode shadow --cheap-model … --strong-model …` | 7 STAY / 5 SWITCH decisions, the 5 SWITCHes carrying the **cheap model as target** |
+
+## Alpha boundary (read this first)
+
+In the 0.1.0a4 alpha, **tamias does not rewrite provider requests.** `active`
+routing is rejected outright: `tamias serve --router-mode active` fails with
+`invalid choice: 'active' (choose from shadow, off)`, and the library raises
+`ValueError`. Both arms therefore run `shadow`, which *records* what the router
+would do without touching the bytes. In both arms the upstream still runs the
+requested (strong) model, so **no row has `model_used != model_requested`**.
+
+What the two arms show is the router's recorded intent: the `routed` arm
+configures a cheap model, so its SWITCH decisions name a target; the `baseline`
+arm configures none, so its SWITCH decisions have no target. The saving figure
+`tamias report` prints is an **estimate**, labelled as such, not a measurement.
 
 Each run writes `demo/runs/<arm>-<n>.db` (the request log) and
-`demo/runs/<arm>-<n>.json` (the score). The runs from 2026-10-05 are committed
-as the evidence this document reads from. `.gitignore` still ignores `*.db` and
+`demo/runs/<arm>-<n>.json` (the score). `.gitignore` ignores `*.db` and
 `demo/runs/`, so a run you produce yourself stays out of a commit unless you
-`git add -f` it deliberately.
+`git add -f` it deliberately. The runs committed under `demo/runs/` are the
+reproducible dry-run evidence; a live run would leave that evidence alone only
+if you pass `--force`.
 
 ---
 
@@ -25,9 +40,14 @@ Do this before anything else. It starts the real proxy against the test suite's
 mock upstream on port 9001, sends 12 realistic requests, and costs nothing.
 
 ```sh
-bash demo/run_arm.sh routed 1 --dry-run
-bash demo/run_arm.sh baseline 1 --dry-run
+bash demo/run_arm.sh routed   1 --dry-run --force
+bash demo/run_arm.sh baseline 1 --dry-run --force
 ```
+
+`--force` is required here only because `routed-1.db`/`baseline-1.db` are
+already committed. Without it the runner refuses to overwrite an existing run
+and exits with a message naming the file. Pick a fresh `<n>` instead if you want
+to keep the committed evidence.
 
 Check what landed:
 
@@ -36,11 +56,12 @@ Check what landed:
 .venv/bin/python -m tamias.cli report --db demo/runs/baseline-1.db --prices prices.openrouter-sim.toml
 ```
 
-Observed on 2026-10-05, dry run:
+The committed dry-run evidence is deterministic (the dry-run client sends a
+fixed 12-request session), so every run reads the same:
 
 ```
-routed-1.db     12 rows   3 rows where model_used != model_requested   12/12 rows with token counts
-baseline-1.db   12 rows   0 rows rewritten                            5 SWITCH decisions recorded, none applied
+routed-1.db     12 rows   0 rewritten   7 STAY / 5 SWITCH   5 targets set   12/12 rows priced
+baseline-1.db   12 rows   0 rewritten   7 STAY / 5 SWITCH   0 targets set   12/12 rows priced
 ```
 
 ---
@@ -93,7 +114,9 @@ export OPENROUTER_API_KEY
 `--api-key` flag and stores no credential: the proxy forwards OpenCode's
 `Authorization` header byte-for-byte, so the key goes OpenCode → tamias →
 OpenRouter and is never read from a tamias-side setting. **Anything that can
-reach port 8000 can spend your key**, so leave `--host` on `127.0.0.1`.
+reach port 8000 can spend your key**, so leave `--host` on `127.0.0.1`. (If you
+must bind wider, `tamias serve` requires `--auth-token`; the demo does not use
+that and keeps the loopback default.)
 
 Create the key at <https://openrouter.ai/settings/keys>, put a credit limit on it
 if your plan allows one, and delete it when you are done.
@@ -101,7 +124,8 @@ if your plan allows one, and delete it when you are done.
 ## 4. Run 3 baseline and 3 routed arms
 
 One per line; each takes a couple of minutes, and each regenerates the task from
-scratch into `/tmp/tamias-demo-task`:
+scratch into `/tmp/tamias-demo-task`. Add `--force` if a run number already
+exists and you intend to replace it:
 
 ```sh
 for n in 1 2 3; do bash demo/run_arm.sh baseline $n; done
@@ -111,7 +135,8 @@ for n in 1 2 3; do bash demo/run_arm.sh routed   $n; done
 Each arm:
 
 1. regenerates the buggy task project into `/tmp/tamias-demo-task`;
-2. starts the proxy in the background against `UPSTREAM` with prices `PRICES`;
+2. starts the proxy in the background against `UPSTREAM` with prices `PRICES`,
+   in `shadow` mode (see the alpha boundary above);
 3. prints `key set` or `key missing` — **only** that, never the value;
 4. writes an `opencode.json` in the task dir pointing an
    `@ai-sdk/openai-compatible` provider at the proxy (per
@@ -121,6 +146,9 @@ Each arm:
 7. kills the proxy **by the recorded PID** — never by `pkill`, because other
    agents share this machine;
 8. writes `demo/runs/<arm>-<n>.json`.
+
+Every external step is bounded by a `timeout`, and the runner never overwrites a
+committed run unless `--force` is given.
 
 The score for each arm:
 
@@ -141,25 +169,27 @@ cat demo/runs/routed-1.json
 }
 ```
 
+(The committed files are dry runs, so their `dry_run` is `true` and
+`tests_passed` is `false`: the buggy task is not fixed without an agent.)
+
 ## 5. Look at the dashboard
 
-Once `tamias.dashboard` is merged, live and replay:
+Live and replay both work on this branch:
 
 ```sh
 # live: one arm, priced as it streams in
-.venv/bin/python -m tamias.dashboard --db demo/runs/routed-1.db --prices demo/prices.toml
+.venv/bin/python -m tamias.cli dashboard --db demo/runs/routed-1.db --prices prices.openrouter-sim.toml
 
 # replay: this arm against the baseline that shares its task
-.venv/bin/python -m tamias.dashboard --db demo/runs/routed-1.db --prices demo/prices.toml \
+.venv/bin/python -m tamias.cli dashboard --db demo/runs/routed-1.db --prices prices.openrouter-sim.toml \
   --compare-db demo/runs/baseline-1.db
 ```
 
-`tamias.dashboard` is **not in this branch yet**, so both of these commands will
-fail with `No module named tamias.dashboard` until it lands. Until then use
-`tamias report`, which reads the same databases read-only:
+If you would rather stay in the terminal, `tamias report` reads the same
+databases read-only:
 
 ```sh
-.venv/bin/python -m tamias.cli report --db demo/runs/routed-1.db --prices demo/prices.toml
+.venv/bin/python -m tamias.cli report --db demo/runs/routed-1.db --prices prices.openrouter-sim.toml
 ```
 
 ---
@@ -172,13 +202,13 @@ suspended account is worse than a missing demo. Then:
 
 ```sh
 # 1. Rehearse instead. No key, no network, real proxy, real router.
-bash demo/run_arm.sh routed 1 --dry-run
-bash demo/run_arm.sh baseline 1 --dry-run
+bash demo/run_arm.sh routed   1 --dry-run --force
+bash demo/run_arm.sh baseline 1 --dry-run --force
 
 # 2. Replay whatever databases you already have. `tamias report` reads a sqlite
 #    file offline, so yesterday's runs are still worth something.
-.venv/bin/python -m tamias.cli report --db demo/runs/routed-1.db   --prices demo/prices.toml
-.venv/bin/python -m tamias.cli report --db demo/runs/baseline-1.db --prices demo/prices.toml
+.venv/bin/python -m tamias.cli report --db demo/runs/routed-1.db   --prices prices.openrouter-sim.toml
+.venv/bin/python -m tamias.cli report --db demo/runs/baseline-1.db --prices prices.openrouter-sim.toml
 
 # 3. Inspect any run's rows without the report.
 .venv/bin/python - <<'PY'
@@ -206,6 +236,9 @@ Read this before quoting any number from this demo.
 - **Three runs per arm is not a sample.** Three numbers have no confidence
   interval. If the routed arm fixed the task 3 times out of 3, that is not
   evidence that routing is 100% as good as not routing.
+- **The alpha does not apply routing.** Every committed run is `shadow`: no row
+  was rewritten. Any "saving" is what the router *would* do, printed by
+  `tamias report` as an `estimate … not measured`.
 - **The prices in the dry runs are invented.** `prices.openrouter-sim.toml`
   carries `simulated = true` and every amount derived from it is stamped
   `SIMULATED PRICES, NOT REAL SAVINGS`. The model *ids* are real; the *rates* are
@@ -215,42 +248,38 @@ Read this before quoting any number from this demo.
   OpenRouter publishes per token. It says nothing about how well a model does
   this task, and a cheap model that needs three attempts to fix `median` is worse
   than a strong one that needs one, whatever the sheet says.
-- **The two arms did not do the same amount of work, so their totals are not
-  comparable.** Both arms take `--inject-usage` and both price every row, so this
-  is not a measurability gap any more — but the row counts differ:
+- **The committed evidence is one deterministic dry-run session, run twice.**
+  Every committed database reads the same, because the dry-run client is fixed:
 
   ```
-  routed-1.db     12 rows   $0.001202   (12 of 12 rows priced)
-  baseline-1.db   12 rows   $0.001559   (12 of 12 rows priced)
-  routed-2.db     10 rows   $0.239832   (10 of 10 rows priced)
-  baseline-2.db    7 rows   $0.180645    (7 of 7 rows priced)
-  baseline-3.db    4 rows   $0.083058    (4 of 4 rows priced)
+  routed-1.db     12 rows   $0.001559 computed   (12 of 12 rows priced)
+  baseline-1.db   12 rows   $0.001559 computed   (12 of 12 rows priced)
+  routed-2.db     12 rows   $0.001559 computed   (12 of 12 rows priced)
+  baseline-2.db   12 rows   $0.001559 computed   (12 of 12 rows priced)
+  routed-3.db     12 rows   $0.001559 computed   (12 of 12 rows priced)
+  baseline-3.db   12 rows   $0.001559 computed   (12 of 12 rows priced)
   ```
 
-  A dollar difference between the arms mostly measures how much the agent
-  happened to do, not what routing saved. Compare `model_used` against
-  `model_requested` and the `decision_action` counts instead; those do not depend
-  on how many rows each arm wrote. Every figure above is hypothetical: all rows
-  are `:free` models, so the real billed cost is `$0`, and `tamias report` puts
-  `[SIMULATED PRICES, NOT REAL SAVINGS]` beside each of them — copy the label
-  along with the number.
+  A live run replaces this determinism with whatever the agent happened to do, so
+  the row counts and totals would then differ per arm. A dollar difference
+  between arms mostly measures how much the agent did, not what routing saved.
+  Compare `decision_action` and `decision_target_model` instead; those do not
+  depend on how many rows each arm wrote. Every figure above is hypothetical: all
+  rows are `:free` models, so the real billed cost is `$0`, and `tamias report`
+  puts `[SIMULATED PRICES, NOT REAL SAVINGS]` beside each of them — copy the
+  label along with the number.
 - **`--effort-policy` is wired up on this branch.** `config.env`'s
   `EFFORT_POLICY` setting is passed through by the routed arm and
   `tamias serve --help` lists both `--effort-policy {off,easy-low}` and
   `--effort-style {openrouter,openai}`, so leaving it empty is no longer
   required. It stays opt-in: with it empty the proxy forwards the body
-  byte-for-byte. **What is verified:** with `--router-mode active
-  --effort-policy easy-low`, a live free-model run recorded
-  `effort_used = high` on the planning turn and `effort_used = low` on the
-  easy-tool turn, each matching `decision_target_effort`, and all three rows
-  returned 200 — so the policy is applied and persisted end to end. **What is
-  not:** whether the provider *honoured* the effort field. The log records the
-  requested and forwarded setting, not the provider's behaviour, so an effort
-  change is not evidence of an effort effect.
-- **The dashboard runs on this branch.** Section 5's
-  `tamias dashboard --db … --prices …` (and the equivalent
-  `python -m tamias.dashboard …`) both work. `tamias report` reads the same files
-  without a browser if you would rather stay in the terminal.
+  byte-for-byte. **What is verified:** the requested effort is recorded in the
+  log and the flag is accepted. **What is not:** with `active` routing disabled,
+  tamias does not rewrite the effort field in this alpha, and in any case it does
+  not record whether the provider *honoured* a requested effort.
+- **The dashboard runs on this branch.** Section 5's `tamias dashboard --db …
+  --prices …` both work. `tamias report` reads the same files without a browser
+  if you would rather stay in the terminal.
 - **A run can still fail for reasons that have nothing to do with routing**: a
   free tier 429, a model id retired from the catalogue, or an agent that runs out
   of its 900 s budget. Read the `status` column before drawing any conclusion

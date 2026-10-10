@@ -1,9 +1,9 @@
 {
   "arm": "routed",
   "n": 3,
-  "dry_run": false,
+  "dry_run": true,
   "tests_passed": false,
-  "wall_seconds": 86,
+  "wall_seconds": 2,
   "models": {
     "strong": "nvidia/nemotron-3-ultra-550b-a55b:free",
     "cheap": "nvidia/nemotron-3.5-lightning:free"

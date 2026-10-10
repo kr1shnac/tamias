@@ -2,8 +2,12 @@
 
 **SYNTHETIC. NOT A RECORD OF REAL WORK.**
 
-This folder exists only for the demo.  It lives on the `swaroop` branch and is
-removed by deleting that branch, so nothing here needs to survive the demo.
+This folder exists only for the demo. Its rewritten rows are fabricated: in the
+0.1.0a4 alpha tamias rejects `active` routing, so **no current command can
+produce this log** — it shows what a routed history would look like and lets the
+reporting and dashboard paths be exercised offline. Nothing here is evidence
+that tamias routes traffic; it is evidence that the *reporters* handle a log of
+that shape.
 
 It tells the "the agent coded intensively for three weeks" story behind the
 numbers the demo shows: which tasks the agent attempted, how many requests each
@@ -25,7 +29,7 @@ The row closest to hand is `agent-3weeks.db`.  Because it is written by the real
 .venv/bin/python -m tamias.cli report --db demo/history/agent-3weeks.db --prices prices.simulated.toml
 
 # a live dashboard over the whole three weeks
-.venv/bin/python -m tamias.dashboard --db demo/history/agent-3weeks.db --prices prices.simulated.toml
+.venv/bin/python -m tamias.cli dashboard --db demo/history/agent-3weeks.db --prices prices.simulated.toml
 ```
 
 Regenerate (same seed reproduces the same numbers):
@@ -54,8 +58,8 @@ Regenerate (same seed reproduces the same numbers):
 
 ```text
 requests: 1165
-total cost: $7.5707  [SIMULATED PRICES, NOT REAL SAVINGS]
-requests shadow would have switched: 428
+total cost (computed, not billed; SIMULATED prices): $7.5707
+requests shadow mode would have switched: 428
 billed cost: UNKNOWN
 ...
 estimated saving: $0.00 ...
@@ -65,11 +69,12 @@ realised saving (rows the proxy actually rewrote): $3.8563 over 428 rows ...
 The two saving lines are not contradictory:
 
 - **estimated saving** prices the switch whose decision was recorded *but not
-  applied* (shadow mode, `model_used == model_requested`).  The generated run is
-  all active mode, where every recorded switch was applied, so that line is
-  `$0.00` and carries no news.
-- **realised saving** prices the rows the proxy actually rewrote
-  (`model_used != model_requested`): `$3.8563` — the headline number.
+  applied* (shadow mode, `model_used == model_requested`). This synthetic log was
+  generated as if routing had been applied, so it has no shadow-only rows and
+  that line is `$0.00`.
+- **realised saving** prices the rows the log marks as rewritten
+  (`model_used != model_requested`): `$3.8563` — the headline number. Those rows
+  are fabricated for the demo; the 0.1.0a4 alpha cannot produce them.
 
 ## Honest limits (say these out loud)
 

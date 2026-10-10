@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 #
-# Run one demo arm -- baseline (shadow) or routed (active) -- end to end.
+# Run one demo arm -- baseline (shadow, no cheap model) or routed (shadow, with
+# a cheap model configured) -- end to end.
 #
-#   bash demo/run_arm.sh <baseline|routed> <n> [--dry-run]
+#   bash demo/run_arm.sh <baseline|routed> <n> [--dry-run] [--force]
 #
-# Baseline records what the router *would* do and always runs the strong model.
-# Routed applies it: some requests are rewritten to the cheap model, and their
-# rows carry a model_used that differs from model_requested.
+# In the 0.1.0a4 alpha tamias cannot rewrite provider requests: `active` routing
+# is rejected.  Both arms therefore run under `--router-mode shadow`, which
+# records what the router *would* do without touching the bytes.  `baseline`
+# configures no cheap model, so nothing can switch; `routed` configures one, so
+# SWITCH decisions are recorded.  Neither arm changes the model the upstream
+# runs.  What differs is only the router's recorded intent.
+#
+# Runs are non-destructive by default: if the target .db or .json already
+# exists the script refuses to overwrite it unless --force is given.  This
+# protects the committed evidence under demo/runs/ from a rehearsal.
 #
 # What happens, in order:
 #   1. regenerate the task project into /tmp/tamias-demo-task (buggy sources)
@@ -36,6 +44,9 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
 PROXY_PORT=8000
 MOCK_PORT=9001
 AGENT_TIMEOUT=900
+TASK_TIMEOUT=120
+CLIENT_TIMEOUT=180
+PYTEST_TIMEOUT=300
 
 # The two real OpenRouter ids priced by prices.openrouter-sim.toml.  The dry run
 # uses these because the sim sheet carries their ids with invented rates, so a
@@ -50,19 +61,33 @@ die() {
 }
 
 usage() {
-	echo "usage: bash demo/run_arm.sh <baseline|routed> <n> [--dry-run]" >&2
+	echo "usage: bash demo/run_arm.sh <baseline|routed> <n> [--dry-run] [--force]" >&2
+	echo "  --dry-run  use the mock upstream; no key, no network, no agent" >&2
+	echo "  --force    overwrite an existing demo/runs/<arm>-<n>.{db,json}" >&2
+	echo "  -h, --help print this message" >&2
 }
 
 # --------------------------------------------------------------------------
 # Arguments
 # --------------------------------------------------------------------------
 
+for arg in "$@"; do
+	case "$arg" in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	esac
+done
+
 ARM="${1:-}"
 N="${2:-}"
 DRY_RUN=""
+FORCE=""
 for arg in "$@"; do
 	case "$arg" in
 	--dry-run) DRY_RUN="yes" ;;
+	--force) FORCE="yes" ;;
 	esac
 done
 
@@ -106,6 +131,16 @@ DB="$RUNS_DIR/$ARM-$N.db"
 JSON="$RUNS_DIR/$ARM-$N.json"
 PROXY_PID=""
 MOCK_PID=""
+
+# Non-destructive by default: the runs under demo/runs/ are committed evidence,
+# so a rehearsal must not silently replace them.  --force is the explicit opt-in.
+if [ -z "$FORCE" ]; then
+	for existing in "$DB" "$JSON"; do
+		if [ -e "$existing" ]; then
+			die "$existing exists; pass --force to overwrite (or pick another <n>)"
+		fi
+	done
+fi
 
 cleanup() {
 	# Kill by recorded PID only, never by pattern: another agent may be running
@@ -159,7 +194,8 @@ wait_for_pid() {
 
 mkdir -p "$RUNS_DIR"
 rm -rf "$TASK_DIR"
-"$PYTHON" "$DEMO_DIR/make_task.py" --out "$TASK_DIR" >/dev/null || die "make_task.py failed"
+timeout "$TASK_TIMEOUT" "$PYTHON" "$DEMO_DIR/make_task.py" --out "$TASK_DIR" >/dev/null ||
+	die "make_task.py failed or timed out"
 
 # The prompt the agent is given: the template with {PYTEST} replaced by the
 # absolute command that runs *this* repo's pytest against the task project.
@@ -181,6 +217,8 @@ echo "   db       $DB"
 echo "   prices   $PRICES"
 echo "   models   strong=$STRONG_MODEL  cheap=$CHEAP_MODEL"
 echo "   upstream $UPSTREAM"
+echo "   note     0.1.0a4 does not rewrite requests; both arms run shadow."
+[ "$ARM" = routed ] && echo "            routed records SWITCH decisions; no provider request changes."
 
 # --------------------------------------------------------------------------
 # 2. The proxy
@@ -205,14 +243,15 @@ if [ -n "$DRY_RUN" ]; then
 	wait_for_port "$MOCK_PORT" || die "mock upstream never listened on $MOCK_PORT"
 fi
 
-# baseline: shadow records the decision and never touches the bytes sent.
-# routed: active applies it, and --inject-usage asks the upstream for token
-# counts on streams the client did not ask for.
+# Both arms run shadow.  baseline configures no cheap model, so nothing can
+# switch and every decision is STAY with no target.  routed configures one, so
+# SWITCH decisions are recorded -- but shadow never touches the bytes, so the
+# upstream still runs the requested (strong) model in both arms.
 if [ "$ARM" = "baseline" ]; then
 	SERVE_ARGS=(--router-mode shadow --inject-usage)
 else
 	SERVE_ARGS=(
-		--router-mode active
+		--router-mode shadow
 		--cheap-model "$CHEAP_MODEL"
 		--strong-model "$STRONG_MODEL"
 		--inject-usage
@@ -247,10 +286,10 @@ TESTS_PASSED=false
 
 if [ -n "$DRY_RUN" ]; then
 	echo "   sending the 12-request dry-run session"
-	"$PYTHON" "$DEMO_DIR/dry_run_client.py" \
+	timeout "$CLIENT_TIMEOUT" "$PYTHON" "$DEMO_DIR/dry_run_client.py" \
 		--proxy "http://127.0.0.1:$PROXY_PORT" \
 		--model "$STRONG_MODEL" \
-		--session "demo-$ARM-$N" || die "dry-run client failed"
+		--session "demo-$ARM-$N" || die "dry-run client failed or timed out"
 else
 	# Never print, echo or expand the key: only whether it is there.
 	if [ -n "${OPENROUTER_API_KEY:-}" ]; then
@@ -296,7 +335,7 @@ fi
 # --------------------------------------------------------------------------
 
 echo "   running the task's pytest"
-if (cd "$TASK_DIR" && "$PYTHON" -m pytest -q); then
+if (cd "$TASK_DIR" && timeout "$PYTEST_TIMEOUT" "$PYTHON" -m pytest -q); then
 	TESTS_PASSED=true
 fi
 
