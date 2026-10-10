@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m pytest -q
+      - run: ruff check src tests scripts
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - name: Audit wheel contents
+        run: |
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          wheel = next(Path("dist").glob("*.whl"))
+          names = zipfile.ZipFile(wheel).namelist()
+          assert all(name.startswith("tamias/") or ".dist-info/" in name for name in names)
+          assert not any(name.startswith(("agent", "tui", "demo")) for name in names)
+          PY
