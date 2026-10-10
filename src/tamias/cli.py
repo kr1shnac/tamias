@@ -14,6 +14,7 @@ money.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import logging
 import os
@@ -965,6 +966,12 @@ def run(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tamias", description="Local chat API proxy.")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"tamias {package_version()}",
+        help="print the tamias version and exit",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     prices_parser = sub.add_parser("prices", help="manage price sheets")
@@ -1129,6 +1136,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print what would be deleted without deleting"
     )
     return parser
+
+
+def package_version() -> str:
+    """The installed distribution version, falling back to ``__version__``.
+
+    Source runs (and the test suite) may import ``tamias`` without the
+    distribution being installed; in that case the metadata lookup raises and
+    the single source of truth is ``tamias.__version__``.
+    """
+    try:
+        return importlib.metadata.version("tamias")
+    except importlib.metadata.PackageNotFoundError:
+        from tamias import __version__ as source_version
+
+        return source_version
 
 
 def main(argv: list[str] | None = None) -> int:

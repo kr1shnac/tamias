@@ -58,6 +58,12 @@ Changelog = "https://github.com/kr1shnac/tamias/blob/master/CHANGELOG.md"
 [tool.hatch.build.targets.wheel]
 packages = ["src/tamias"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/demo/config.env",
+    "/demo/history",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
