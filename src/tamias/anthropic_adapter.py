@@ -486,10 +486,11 @@ def register_routes(
     ) -> AsyncIterator[bytes]:
         collector = AnthropicStreamUsage()
         failure: UpstreamFailure | None = None
+        assembler = sse_module.SseAssembler()
         try:
             async for chunk in upstream.aiter_bytes():
                 yield chunk
-                events = list(sse_module.SseAssembler().feed(chunk))
+                events = list(assembler.feed(chunk))
                 for event in events:
                     data = event.data
                     if isinstance(data, bytes):

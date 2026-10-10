@@ -67,12 +67,32 @@ _PROJECT = re.compile(r"[A-Za-z0-9_.-]+")
 EFFORT_VALUES = frozenset({"low", "medium", "high", "minimal", "none", "auto"})
 EFFORT_MAX_CHARS = max(len(value) for value in EFFORT_VALUES)
 
+FAILURE_STAGES = frozenset({"setup", "stream"})
+FAILURE_TYPES = frozenset(
+    {
+        "connect_timeout",
+        "read_timeout",
+        "connect_error",
+        "read_error",
+        "protocol_error",
+        "timeout",
+        "transport",
+    }
+)
+
 
 def sanitize_effort(value: object) -> str | None:
     """Return `value` when it names a known effort level, else None (SQL NULL)."""
     if not isinstance(value, str):
         return None
     return value if value in EFFORT_VALUES else None
+
+
+def sanitize_failure(value: object, allowed: frozenset[str]) -> str | None:
+    """Return a known ledger code, never arbitrary exception text."""
+    if not isinstance(value, str):
+        return None
+    return value if value in allowed else None
 
 
 def sanitize_project(value: object) -> str | None:
@@ -294,8 +314,8 @@ class Store:
             sanitize_effort(decision_target_effort),
             cost.usd,
             cost.source,
-            failure_stage,
-            failure_type,
+            sanitize_failure(failure_stage, FAILURE_STAGES),
+            sanitize_failure(failure_type, FAILURE_TYPES),
             router_mode,
         )
         with self._lock:

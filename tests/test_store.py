@@ -346,6 +346,40 @@ def test_provider_cost_is_nullable_and_persisted(store: Store) -> None:
     assert row["provider_cost_usd"] == 0.0025
 
 
+def test_failure_ledger_accepts_only_coded_values(store: Store) -> None:
+    store.log_request(
+        TS,
+        "session-1",
+        "model-a",
+        "model-a",
+        KNOWN_USAGE,
+        KNOWN_COST,
+        120,
+        "502",
+        STAY,
+        failure_stage="stream",
+        failure_type="read_error",
+    )
+    store.log_request(
+        TS,
+        "session-2",
+        "model-a",
+        "model-a",
+        KNOWN_USAGE,
+        KNOWN_COST,
+        120,
+        "502",
+        STAY,
+        failure_stage='raw exception: sk-or-v1-SECRET',
+        failure_type='raw exception: sk-or-v1-SECRET',
+    )
+
+    rows = store.rows()
+    assert (rows[0]["failure_stage"], rows[0]["failure_type"]) == ("stream", "read_error")
+    assert rows[1]["failure_stage"] is None
+    assert rows[1]["failure_type"] is None
+
+
 def test_the_three_money_columns_stay_independent(store: Store) -> None:
     """Billed, computed and the pre-split generic never share a meaning.
 
