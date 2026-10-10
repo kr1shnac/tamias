@@ -11,3 +11,5 @@ live_check.db
 *.db
 *.db-journal
 demo/runs/
+sbom.json
+licenses.csv

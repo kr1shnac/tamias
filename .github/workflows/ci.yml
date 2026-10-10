@@ -49,11 +49,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Known-vulnerability audit of installed dependencies
+      - name: Install the project and the audit tooling
         run: |
-          python -m pip install --upgrade pip pip-audit
-          python -m pip install .
-          pip-audit --strict
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit cyclonedx-bom pip-licenses .
+      - name: Known-vulnerability audit of installed dependencies
+        run: pip-audit --strict
+      - name: Software bill of materials
+        run: cyclonedx-py environment --of json -o sbom.json
+      - name: License report and copyleft check
+        run: |
+          pip-licenses --format=csv --with-urls > licenses.csv
+          python - <<'PY'
+          import csv
+
+          banned = ("agpl", "sspl", "gnu affero", "gpl-3", "gplv3", "server side public")
+          with open("licenses.csv", newline="") as handle:
+              rows = list(csv.DictReader(handle))
+          offenders = [
+              f"{row['Name']} {row['Version']}: {row['License']}"
+              for row in rows
+              if any(term in (row.get("License") or "").lower() for term in banned)
+          ]
+          if offenders:
+              raise SystemExit("copyleft dependency: " + "; ".join(offenders))
+          print(f"checked {len(rows)} distributions; no denylisted licenses")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-and-licenses
+          path: |
+            sbom.json
+            licenses.csv
 
   smoke:
     runs-on: ubuntu-latest
