@@ -30,6 +30,7 @@ import os
 import re
 import sqlite3
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tamias.types import CostBreakdown, Decision, Usage
@@ -366,6 +367,62 @@ class Store:
         """Every logged request, oldest first."""
         with self._lock:
             return list(self._conn.execute(_SELECT))
+
+    def prune(
+        self,
+        *,
+        keep_days: int | None = None,
+        keep_rows: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        """Delete old rows and return ``{"deleted": n, "remaining": m}``.
+
+        ``keep_days`` drops rows whose parseable timestamp is older than that
+        many days; an unparseable timestamp is never assumed old.  ``keep_rows``
+        drops every row but the newest N by id.  At least one policy is
+        required.  With ``dry_run`` nothing is deleted, but the same counts are
+        computed and returned, for ``tamias prune --dry-run``.
+        """
+        if keep_days is None and keep_rows is None:
+            raise ValueError("prune requires keep_days and/or keep_rows")
+        with self._lock:
+            total = int(self._conn.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0])
+            doomed: set[int] = set()
+            if keep_days is not None:
+                cutoff = datetime.now(UTC) - timedelta(days=keep_days)
+                for row in self._conn.execute(f"SELECT id, ts FROM {TABLE}"):
+                    value = row["ts"]
+                    if not isinstance(value, str):
+                        continue
+                    try:
+                        parsed = datetime.fromisoformat(value)
+                    except ValueError:
+                        continue
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=UTC)
+                    if parsed < cutoff:
+                        doomed.add(int(row["id"]))
+            if keep_rows is not None:
+                newest = [
+                    r["id"]
+                    for r in self._conn.execute(
+                        f"SELECT id FROM {TABLE} ORDER BY id DESC LIMIT ?", (keep_rows,)
+                    )
+                ]
+                kept: set[int] = set(int(x) for x in newest)
+                doomed.update(
+                    int(r["id"])
+                    for r in self._conn.execute(f"SELECT id FROM {TABLE}")
+                    if int(r["id"]) not in kept
+                )
+            deleted = len(doomed)
+            if doomed and not dry_run:
+                placeholders = ",".join("?" * len(doomed))
+                self._conn.execute(
+                    f"DELETE FROM {TABLE} WHERE id IN ({placeholders})", sorted(doomed)
+                )
+                self._conn.commit()
+        return {"deleted": deleted, "remaining": total - deleted}
 
     def close(self) -> None:
         """Close the underlying connection."""

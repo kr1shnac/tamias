@@ -52,6 +52,7 @@ def test_doctor_reports_offline_checks_with_tmp_paths(tmp_path: Path, capsys, mo
         f"OK Python: {sys.version_info.major}.{sys.version_info.minor}",
         f"OK Price sheet: {prices} (0 days old)",
         f"OK DB directory: {tmp_path} writable",
+        f"OK DB: {tmp_path / 'requests.db'} not present yet (created on first request)",
         "OK Port: 0 free",
         "WARN OPENROUTER_API_KEY: missing",
     ]
@@ -103,3 +104,26 @@ def test_doctor_returns_nonzero_for_a_busy_port(tmp_path: Path, capsys, monkeypa
 
     assert code == 1
     assert f"FAIL Port: {port} in use" in capsys.readouterr().out
+
+
+def test_doctor_reports_a_large_db_and_suggests_prune(tmp_path: Path, capsys, monkeypatch) -> None:
+    prices = tmp_path / "prices.toml"
+    _prices(prices, "2026-10-06")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    db = tmp_path / "requests.db"
+    db.write_bytes(b"\x00" * (cli.DOCTOR_DB_SIZE_WARN_MB * 1024 * 1024 + 1))
+
+    code = doctor(
+        prices=prices,
+        db=db,
+        port=0,
+        online=False,
+        upstream="https://example.invalid",
+        today=date(2026, 10, 6),
+        port_checker=lambda _: True,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "WARN DB size:" in out
+    assert "tamias prune --db" in out

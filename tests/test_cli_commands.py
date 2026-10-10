@@ -10,6 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tamias import cli
+from tamias.store import Store
+from tamias.types import CostBreakdown, Decision, Usage
 
 
 def test_dashboard_delegates_without_starting_a_server(monkeypatch) -> None:
@@ -50,6 +52,33 @@ def test_dashboard_delegates_without_starting_a_server(monkeypatch) -> None:
             "baseline.db",
         ]
     ]
+
+
+def test_prune_keeps_the_newest_rows(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "log.sqlite"
+    store = Store(db)
+    try:
+        for index in range(4):
+            store.log_request(
+                f"2026-10-04T12:00:0{index}Z",
+                "session-1",
+                "model-a",
+                "model-a",
+                Usage(None, None, None, None),
+                CostBreakdown(None, "no pricing", "2026-10-04"),
+                1,
+                "200",
+                Decision(action="STAY", target_model=None, reason="ok"),
+            )
+    finally:
+        store.close()
+
+    assert cli.main(["prune", "--db", str(db), "--keep-rows", "1"]) == 0
+    assert "deleted 3 rows; 1 remain" in capsys.readouterr().out
+
+    assert cli.main(["prune", "--db", str(db), "--keep-days", "30", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would delete 0 rows; 1 remain" in out
 
 
 def _unused_port() -> int:

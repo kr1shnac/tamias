@@ -59,6 +59,16 @@ DEFAULT_UPSTREAM = "https://openrouter.ai/api"
 DEFAULT_PRICES_NAME = "prices.toml"
 UPSTREAM_ENV_VAR = "TAMIAS_UPSTREAM"
 
+# Serve hardening (G1/G2/G3). All are opt-in knobs: the token protects a
+# non-loopback bind, the body cap and concurrency limit bound a runaway agent,
+# and doctor's size check nudges toward `tamias prune --keep-days`.
+AUTH_TOKEN_ENV = "TAMIAS_AUTH_TOKEN"
+MAX_BODY_BYTES_ENV = "TAMIAS_MAX_BODY_BYTES"
+DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
+MAX_CONCURRENCY_ENV = "TAMIAS_MAX_CONCURRENCY"
+DEFAULT_MAX_CONCURRENCY = 64
+DOCTOR_DB_SIZE_WARN_MB = 500
+
 # store.Store owns the schema; these are the columns the report reads, with a
 # little tolerance for a renamed table or column.
 REQUEST_TABLES = ("requests",)
@@ -496,6 +506,9 @@ def build_serve_app(
     router_config: RouterConfig | None = None,
     transport: Any | None = None,
     effort_style: str = "openrouter",
+    auth_token: str | None = None,
+    max_body_bytes: int | None = None,
+    max_concurrency: int | None = None,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
@@ -524,6 +537,9 @@ def build_serve_app(
         request_usage_cost=request_usage_cost,
         transport=transport,
         effort_style=effort_style,
+        auth_token=auth_token,
+        max_body_bytes=max_body_bytes,
+        max_concurrency=max_concurrency,
     )
     app.state.store = store
     return app
@@ -533,11 +549,26 @@ def serve(args: argparse.Namespace) -> int:
     """Run the proxy under uvicorn until interrupted."""
     import uvicorn
 
-    from tamias.security import refuse_non_loopback
+    from tamias.security import is_loopback, refuse_non_loopback
 
     refused = refuse_non_loopback("serve", args.host, args.allow_non_loopback)
     if refused:
         return refused
+
+    auth_token = args.auth_token or os.environ.get(AUTH_TOKEN_ENV)
+    if not is_loopback(args.host) and auth_token is None:
+        print(
+            f"tamias serve: refusing to bind {args.host!r}: a non-loopback bind "
+            f"requires a bearer token. Set --auth-token or ${AUTH_TOKEN_ENV}.",
+            file=sys.stderr,
+        )
+        return 1
+    max_body_bytes = args.max_body_bytes
+    if max_body_bytes is None:
+        max_body_bytes = _env_positive_int(MAX_BODY_BYTES_ENV, DEFAULT_MAX_BODY_BYTES)
+    max_concurrency = args.max_concurrency
+    if max_concurrency is None:
+        max_concurrency = _env_positive_int(MAX_CONCURRENCY_ENV, DEFAULT_MAX_CONCURRENCY)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -555,6 +586,9 @@ def serve(args: argparse.Namespace) -> int:
         request_usage_cost=args.request_usage_cost,
         router_config=_serve_router_config(args),
         effort_style=args.effort_style,
+        auth_token=auth_token,
+        max_body_bytes=max_body_bytes,
+        max_concurrency=max_concurrency,
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -562,6 +596,17 @@ def serve(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     print(f"tamias serve: request log {args.db}, prices {args.prices}", file=sys.stderr)
+    if auth_token is not None:
+        print(
+            "tamias serve: bearer auth is ON: clients must send "
+            "Authorization: Bearer <token>",
+            file=sys.stderr,
+        )
+    print(
+        f"tamias serve: request body cap {_fmt_bytes(max_body_bytes)}, "
+        f"max concurrent requests {max_concurrency}",
+        file=sys.stderr,
+    )
     if args.inject_usage:
         print(
             "tamias serve: --inject-usage is ON: streaming requests are re-encoded "
@@ -610,6 +655,45 @@ def agent_config(agent: str, port: int, project: str | None) -> str:
     )
 
 
+def _env_positive_int(name: str, default: int) -> int | None:
+    """An int from env ``name`` in service-default units, or ``None`` for 0/absent."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else None
+
+
+def _fmt_bytes(size: int | None) -> str:
+    if size is None:
+        return "unlimited"
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):g} MiB"
+    return f"{size} bytes"
+
+
+def prune(args: argparse.Namespace) -> int:
+    """Delete old rows from a request log; ``--dry-run`` only reports."""
+    store = Store(args.db)
+    try:
+        result = store.prune(
+            keep_days=args.keep_days,
+            keep_rows=args.keep_rows,
+            dry_run=args.dry_run,
+        )
+    finally:
+        store.close()
+    verb = "would delete" if args.dry_run else "deleted"
+    print(
+        f"tamias prune: {verb} {result['deleted']} rows; "
+        f"{result['remaining']} remain ({args.db})"
+    )
+    return 0
+
+
 def doctor(
     *,
     prices: Path,
@@ -647,6 +731,18 @@ def doctor(
     else:
         print(f"FAIL DB directory: {db_directory} is not writable")
         blocking = True
+
+    if db.exists():
+        size_mb = db.stat().st_size / (1024 * 1024)
+        if size_mb > DOCTOR_DB_SIZE_WARN_MB:
+            print(
+                f"WARN DB size: {db} is {size_mb:.1f} MB (over {DOCTOR_DB_SIZE_WARN_MB} MB); "
+                f"run `tamias prune --db {db} --keep-days 90`"
+            )
+        else:
+            print(f"OK DB size: {db} is {size_mb:.1f} MB")
+    else:
+        print(f"OK DB: {db} not present yet (created on first request)")
 
     try:
         available = port_checker(port) if port_checker else _port_is_free(port)
@@ -944,6 +1040,26 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: off; off forwards the body byte-for-byte)",
     )
     serve_parser.add_argument("--verbose", action="store_true", help="log every proxy event")
+    serve_parser.add_argument(
+        "--auth-token",
+        default=None,
+        help=f"bearer token clients must send as Authorization: Bearer <token> "
+        f"(default: ${AUTH_TOKEN_ENV}; required for a non-loopback --host)",
+    )
+    serve_parser.add_argument(
+        "--max-body-bytes",
+        type=int,
+        default=None,
+        help=f"reject larger request bodies with 413 (default: {DEFAULT_MAX_BODY_BYTES} bytes, "
+        f"overridable via ${MAX_BODY_BYTES_ENV}; 0 disables the cap)",
+    )
+    serve_parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help=f"limit concurrent in-flight requests (default: {DEFAULT_MAX_CONCURRENCY}, "
+        f"overridable via ${MAX_CONCURRENCY_ENV}; 0 disables the limit)",
+    )
 
     run_parser = sub.add_parser("run", help="run one command through a short-lived proxy")
     run_parser.add_argument("--mode", choices=ROUTER_MODES, default="shadow")
@@ -998,6 +1114,19 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--upstream", default=DEFAULT_URL, help="upstream URL for --online")
     doctor_parser.add_argument(
         "--online", action="store_true", help="also check upstream reachability"
+    )
+
+    prune_parser = sub.add_parser("prune", help="delete old rows from the request log")
+    prune_parser.add_argument("--db", required=True, help="path to the proxy sqlite log")
+    keep = prune_parser.add_mutually_exclusive_group(required=True)
+    keep.add_argument(
+        "--keep-days", type=int, help="delete rows older than this many days"
+    )
+    keep.add_argument(
+        "--keep-rows", type=int, help="keep only the most recent this many rows"
+    )
+    prune_parser.add_argument(
+        "--dry-run", action="store_true", help="print what would be deleted without deleting"
     )
     return parser
 
@@ -1077,6 +1206,8 @@ def main(argv: list[str] | None = None) -> int:
             online=args.online,
             upstream=args.upstream,
         )
+    if args.command == "prune":
+        return prune(args)
     return 2
 
 

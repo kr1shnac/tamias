@@ -574,3 +574,38 @@ def test_store_persists_salt_and_migrates_legacy_session_values(tmp_path: Path) 
         assert second.rows()[0]["session_id"] != "raw-session"
     finally:
         second.close()
+
+
+def test_prune_requires_a_policy(store: Store) -> None:
+    with pytest.raises(ValueError, match="keep_days and/or keep_rows"):
+        store.prune()
+
+
+def test_prune_deletes_rows_older_than_keep_days(store: Store) -> None:
+    log(store, ts="2024-01-01T00:00:00")
+    log(store, ts="2026-10-04T12:00:00Z")
+
+    result = store.prune(keep_days=30)
+
+    assert result == {"deleted": 1, "remaining": 1}
+    assert len(store.rows()) == 1
+
+
+def test_prune_dry_run_counts_without_deleting(store: Store) -> None:
+    log(store, ts="2024-01-01T00:00:00")
+    log(store, ts="2026-10-04T12:00:00Z")
+
+    result = store.prune(keep_days=30, dry_run=True)
+
+    assert result == {"deleted": 1, "remaining": 1}
+    assert len(store.rows()) == 2
+
+
+def test_prune_keeps_only_the_newest_rows(store: Store) -> None:
+    for index in range(5):
+        log(store, ts=f"2026-10-04T12:00:0{index}Z")
+
+    result = store.prune(keep_rows=2)
+
+    assert result == {"deleted": 3, "remaining": 2}
+    assert len(store.rows()) == 2
