@@ -25,7 +25,7 @@ reconciliation.
 
 | Severity | Status | Finding |
 | --- | --- | --- |
-| High | Open, separate checkout | `tamias-agent` tool functions accept arbitrary paths and execute arbitrary shell strings. A model can escape the intended workspace and access local files. The checkout has uncommitted user work in `agent.py`, so it was not modified by this audit. |
+| High | Mitigated in the agent working tree | `tamias-agent` tool functions accepted arbitrary paths and executed arbitrary shell strings. Fixed by a workspace-root guard (`resolve_in_workspace`) applied to `read_file`, `write_file`, `edit_file`, `list_directory`, `create_directory` and `search_in_files`, so absolute paths, `../` traversal and out-of-tree symlinks are refused before any file is opened; plus a deliberate shell policy (`TAMIAS_AGENT_ALLOW_SHELL`, default on). Regression tests added. The fix sits in the agent's working tree (that repo carries unrelated uncommitted work); its owner must commit it. |
 | Medium | Design constraint | The proxy has no authentication. It is safe only on loopback by default; a non-loopback operator must supply `--allow-non-loopback` and provide a trusted authenticated boundary. |
 | Medium | Verification gap | Live provider, external clients, and socket-based subprocess behavior were not exercised in this sandbox. They remain unverified, not assumed secure. |
 | Low | Build environment | Rebuilding artifacts requires `hatchling`; it is unavailable locally and dependency download is blocked by the no-network environment. The existing a4 wheel passes metadata and content checks. |
@@ -37,12 +37,18 @@ reconciliation.
 - Earlier offline proxy, parser, pricing, router, and report subsets: `151 passed`.
 - `ruff check src tests scripts`: clean.
 - `pip check`: no broken requirements.
+- Agent workspace-confinement tests: `.venv/bin/python -m pytest test_agent.py -q`
+  → `64 passed` (includes refusal of absolute paths, `../` traversal and
+  out-of-tree symlinks for every file tool, and the shell-disable policy).
 - Existing `tamias-0.1.0a4` wheel: `twine check` passed; no agent, TUI, or
   demo files are packaged.
 
 ## Required follow-up
 
-Before claiming the whole project is secure or release-ready, the demo agent
-needs a workspace-root path guard, a deliberate command-execution policy, and
-tests proving it cannot access paths outside the selected workspace. Those
-changes must be made by reconciling its existing uncommitted work first.
+The demo agent's workspace escape is fixed in its working tree (see the findings
+table). `run_shell` remains inherently powerful — it runs a shell line in the
+workspace and is **not** sandboxed; a full sandbox needs an OS/container boundary
+outside this project's scope. It defaults on and can be disabled with
+`TAMIAS_AGENT_ALLOW_SHELL=0`. The agent's owner should commit the fix, which now
+sits alongside unrelated uncommitted work, and run
+`.venv/bin/python -m pytest test_agent.py -q` (64 passed here).
