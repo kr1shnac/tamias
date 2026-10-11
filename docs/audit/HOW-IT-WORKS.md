@@ -82,11 +82,11 @@ table: requests
 | No prompt/response in DB      | Verified   | `tests/test_proxy.py:test_no_prompt_or_response_text_reaches_the_database_file` confirms no text column contains body content.             |
 | UNKNOWN is never 0             | Verified   | `tests/test_e2e.py:test_cost_is_unknown_never_zero` and `CONTRACT.md` enforce NULL ≠ 0.                                                   |
 | Anthropic adapter             | UNTESTED   | Wired into `tamias serve` but never run against real Anthropic API (mock-only in `tests/test_anthropic.py`).                               |
-| Active mode end-to-end        | UNTESTED   | Unit-tested (`tests/test_proxy.py:test_active_mode_is_the_only_mode_that_rewrites_model`) but never against a real upstream.               |
+| Active mode end-to-end        | VERIFIED   | Unit-tested (`tests/test_proxy.py`) and run against the live OpenRouter upstream ([live-evidence.md](../live-evidence.md) stages 4, 7). 0.1.0a4 no longer accepts `active`. |
 | `--inject-usage` streaming    | PARTIAL    | Unit-tested with mock upstream; live behavior against OpenRouter noted in `docs/live-evidence.md` as volunteering usage without the flag. |
 | Pricing arithmetic            | VERIFIED   | Unit-tested with hand-computed expected values (`tests/test_cli.py`).                                                                      |
 | Router never mutates body     | Verified   | `tests/test_router.py:test_decide_does_not_mutate_body` and `test_decide_does_not_mutate_body_on_every_branch`.                            |
 | Default bind host is 127.0.0.1| Verified   | `cli.py:389`: `default="127.0.0.1"`                                                                                                       |
 | Authorization header never logged/stored | Verified | `LIVE_CHECK.md` check: "no page of the database contains the `ZEN_API_KEY` value"; `derive_session_id` drops it into session digest only. |
-| Only `/v1/chat/completions` logged | Verified | `passthrough` catch-all relays other paths without writing rows (`proxy.py:502-517`).                                                     |
+| Three paths logged (chat/messages/responses) | Verified | `anthropic_adapter` and `responses_adapter` register logged routes (`proxy.py:799-802`); the `passthrough` catch-all relays every other path without writing rows. |
 | Shadow mode never rewrites body | Verified | `tests/test_proxy.py:test_shadow_mode_never_changes_a_request_byte`                                                                        |

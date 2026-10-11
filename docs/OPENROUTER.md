@@ -98,8 +98,9 @@ Every key here is from <https://opencode.ai/docs/providers/> as checked on
 LM Studio, Ollama and Helicone examples:
 
 - `npm: "@ai-sdk/openai-compatible"` is the package for anything that speaks
-  `/v1/chat/completions`. (For `/v1/responses` you would need `@ai-sdk/openai`,
-  which tamias does not proxy — see the caveat at the end.)
+  `/v1/chat/completions`, which tamias both logs and routes. (`@ai-sdk/openai`
+  speaks `/v1/responses`, which tamias *meters* — logs and prices — but never
+  switches on; see the caveat at the end.)
 - `options.baseURL` is the endpoint. The AI SDK appends `/chat/completions`, so
   `http://localhost:8000/v1` produces exactly the path tamias answers on.
 - `options.apiKey` takes `{env:VAR}` substitution. **Never paste the key here**;
@@ -227,19 +228,22 @@ the report shows the throttling rather than hiding it.
 
 ## Caveats
 
-- **Only `/v1/chat/completions` is proxied and logged.** OpenRouter also serves
-  `/v1/responses` and `/v1/messages`. A client that uses `/v1/responses` hits
-  tamias's catch-all relay: the request is forwarded and the response returned,
-  but **no row is written and no cost is computed**. So `model` and `npm` above
-  matter — `@ai-sdk/openai-compatible` (chat-completions) works,
-  `@ai-sdk/openai` (responses) does not.
-- **I have not run any of this against OpenRouter.** No key was available while
-  this was written, so no request in this document has been observed. The
-  endpoint shape is read off `proxy.py` and the config shape off the OpenCode
+- **All three wire paths are logged and priced; only some are routed.**
+  `/v1/chat/completions` is logged *and* routed (a `SWITCH` can be recorded).
+  `/v1/messages` (the Anthropic wire) is likewise logged and routed.
+  `/v1/responses` is logged and priced but **meter-only**: it always records a
+  `STAY` (`reason = "responses route is meter-only"`) and never emits a `SWITCH`.
+  So a client on the responses API still sees cost in the report, but will not
+  see model switching. Pick `@ai-sdk/openai-compatible` (chat-completions) for
+  full routing; `@ai-sdk/openai` (responses) meters only. Only the catch-all
+  relay for *other* paths forwards without writing a row.
+- **The endpoint shape here is read off `proxy.py`; the live behaviour is in
+  [live-evidence.md](live-evidence.md).** The config shape is from the OpenCode
   docs; the model ids and the `openrouter/free` description are quoted from a
-  real `GET https://openrouter.ai/api/v1/models`. Anything that has actually been
-  run against the live API is recorded in `docs/live-evidence.md`, once there is
-  a run to record.
+  real `GET https://openrouter.ai/api/v1/models`. What has actually been run
+  against the live API — `opencode run` through the proxy in shadow and active
+  mode, with real SWITCH decisions and priced rows — is recorded in
+  [live-evidence.md](live-evidence.md).
 - **The model list moves.** `:free` models get added and retired. If a request
   404s or the model stops appearing in `/v1/models`, the fix is a new id, not a
   new price sheet.

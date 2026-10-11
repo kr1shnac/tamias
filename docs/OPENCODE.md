@@ -128,8 +128,9 @@ Add a custom OpenAI-compatible provider to `opencode.json`. Either:
 Notes on each key, all from the docs cited above:
 
 - `npm: "@ai-sdk/openai-compatible"` is the package for APIs that speak
-  `/v1/chat/completions`. (For `/v1/responses` you would need
-  `@ai-sdk/openai` — see the Zen caveat below.)
+  `/v1/chat/completions`, which tamias logs and routes. (For `/v1/responses` you
+  would use `@ai-sdk/openai`; tamias meters that path but never switches on it —
+  see the Zen caveat below.)
 - `options.baseURL` is the endpoint. The AI SDK appends `/chat/completions`, so
   `http://localhost:8000/v1` produces exactly the path tamias answers on.
 - `options.apiKey` uses `{env:VAR}` substitution. If the variable is unset it
@@ -197,8 +198,10 @@ mechanical, which is the input to deciding whether to run `--router-mode active`
 
 ## Zen caveat: only some Zen models are reachable through tamias
 
-tamias proxies exactly one route, `/v1/chat/completions`. Zen serves different
-model families on different endpoints (from the Zen docs):
+tamias logs and prices three routes — `/v1/chat/completions`, `/v1/messages`
+and `/v1/responses` — and routes (may record a `SWITCH`) on the first two; the
+responses route is meter-only. Zen serves different model families on different
+endpoints (from the Zen docs):
 
 | Zen endpoint | AI SDK package | Models |
 | --- | --- | --- |
@@ -207,9 +210,9 @@ model families on different endpoints (from the Zen docs):
 | `https://opencode.ai/zen/v1/messages` | `@ai-sdk/anthropic` | `claude-*`, `qwen3.7-*`, `qwen3.6-plus`, `qwen3.5-plus`, `qwen3.8-flash` |
 | `https://opencode.ai/zen/v1/models/<id>` | `@ai-sdk/google` | `gemini-*` |
 
-Only the first row is proxied. If you configure a Claude or GPT model here,
-Zen will answer `404` for `/v1/chat/completions`. Pick a model from the first
-row.
+The first two rows are routed through tamias (the responses row is metered, not
+routed). If you configure a model on an endpoint Zen does not serve for that
+path, Zen answers `404`. For routing, prefer a model from the first row.
 
 Zen's own list of what is live is at `https://opencode.ai/zen/v1/models`; the
 table above reflects the docs page as of the date above and Zen adds and retires
@@ -239,7 +242,7 @@ number appear. `?` in a report means exactly that.
 | Model missing from `/models` in OpenCode | Check `opencode debug config`, and that `models` keys match the ids in your price sheet. |
 | Every row has `session_id = default` | No `x-tamias-session` header arrived, so all requests fell into the `default` session. OpenCode does not appear to send this header (unverified — see below); a plugin is needed to group rows by conversation. |
 | `tamias serve` exits 1 at startup | Price sheet missing, unreadable, or missing its top-level `date`. The message names the file. |
-| Nothing logged after a request | The route was not `/v1/chat/completions`. Only chat completions are logged; other paths are relayed without a row. |
+| Nothing logged after a request | The path was neither `/v1/chat/completions`, `/v1/messages`, nor `/v1/responses` — those three are logged. Every other path is relayed by the catch-all without a row. |
 
 ## What I could not verify
 

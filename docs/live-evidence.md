@@ -321,4 +321,6 @@ beyond the usual set are `price_sheet_date` (always `2026-10-04`) and
   time; resuming an existing session, and any `opencode run --continue`
   behaviour, was not exercised.
 - **The `/v1/responses` path.** Only OpenAI-style `/v1/chat/completions` was
-  proxied, as the caveats in [OPENROUTER.md](OPENROUTER.md) describe.
+  exercised in these runs; the `/v1/messages` and `/v1/responses` routes were
+  added later. They are unit-tested against fixtures (see
+  [ROUTES.md](ROUTES.md)) but no live traffic has been observed on them.
