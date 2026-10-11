@@ -188,6 +188,15 @@ wait_for_pid() {
 	return 1
 }
 
+# A stale listener on the proxy port is worse than a plain failure: our own
+# serve would die with "address already in use" but the port would still accept
+# connections, so wait_for_pid below would report success and the run would
+# quietly talk to the wrong proxy and log to the wrong database.  Fail fast,
+# before any work (task generation, key checks, etc.).
+if wait_for_port "$PROXY_PORT"; then
+	die "port $PROXY_PORT is already in use; stop that listener first (ss -ltnp | grep :$PROXY_PORT) and retry"
+fi
+
 # --------------------------------------------------------------------------
 # 1. The task project
 # --------------------------------------------------------------------------
@@ -232,6 +241,9 @@ SERVE_LOG="$RUNS_DIR/$ARM-$N.serve.log"
 # (tests/mock_upstream.py:create_mock_upstream), so the proxy talks to something
 # real without anything leaving the machine.
 if [ -n "$DRY_RUN" ]; then
+	if wait_for_port "$MOCK_PORT"; then
+		die "port $MOCK_PORT is already in use; stop that listener first (ss -ltnp | grep :$MOCK_PORT) and retry"
+	fi
 	echo "   starting mock upstream on port $MOCK_PORT"
 	(
 		cd "$REPO_ROOT" &&

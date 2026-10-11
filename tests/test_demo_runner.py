@@ -8,6 +8,7 @@ starting the proxy.
 
 from __future__ import annotations
 
+import socket
 import subprocess
 from pathlib import Path
 
@@ -37,3 +38,36 @@ def test_runner_help_exits_zero() -> None:
     )
     assert completed.returncode == 0
     assert "usage:" in (completed.stdout + completed.stderr)
+
+
+def test_runner_fails_fast_when_proxy_port_is_busy() -> None:
+    """A stale listener on the proxy port must abort before any real work.
+
+    Otherwise `serve` dies with "address already in use" while the port keeps
+    accepting connections, and a later readiness check reports success against
+    the wrong listener.
+    """
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        held.bind(("127.0.0.1", 8000))
+        held.listen(1)
+        we_hold = True
+    except OSError:
+        # Someone already owns 8000; the condition under test still holds.
+        held.close()
+        we_hold = False
+    try:
+        completed = subprocess.run(
+            ["bash", str(RUN_ARM), "routed", "99", "--dry-run"],
+            capture_output=True,
+            text=True,
+            cwd=REPO,
+            timeout=60,
+        )
+    finally:
+        if we_hold:
+            held.close()
+    out = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert "already in use" in out
