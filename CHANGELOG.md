@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reserve-then-settle; refusals are 402 for money and 429 for rate. See
   `docs/BUDGET.md`.
 
+### Changed
+
+- Active request rewriting (`--router-mode active`) is available, opt-in and
+  fail-closed: the process refuses to start unless the target is named, listed
+  in `--registry`, tool-capable and priced, and a switch the caller's key does
+  not allow is suppressed rather than refused. `tamias report` prints
+  `requests routed to the cheap model` and names the switches it declined to
+  apply. See `docs/ROUTING.md`.
+
 ## [0.1.0a4] - 2026-10-10
 
 ### Added

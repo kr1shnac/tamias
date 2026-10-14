@@ -5,6 +5,33 @@ looks at one request and answers STAY (keep the requested model) or SWITCH
 (rewrite to the configured cheap model). It never mutates the request body and
 never stores conversation text in a decision reason.
 
+## Modes
+
+`--router-mode` decides what becomes of a decision:
+
+| Mode | What it does |
+| --- | --- |
+| `off` | Calls nothing. Every request runs on the model the caller named, and no decision is recorded. |
+| `shadow` (default) | Calls `decide`, records the decision on the log row, and forwards the request byte-for-byte. |
+| `active` | Calls `decide`, and when it says SWITCH rewrites `model` to the cheap model before forwarding. |
+
+Active is opt-in and **fail-closed**. `tamias serve` refuses to start active
+unless the target is (1) named by `--cheap-model`, (2) listed in `--registry`,
+(3) marked `tools = true` there, and (4) priced by the price sheet -- because
+the gateway prices, caps and reports the request against the model that
+actually runs, not the one the caller typed.
+
+`tamias.router.applied_target` is the single place that turns a decision plus
+those conditions into the model to run. It returns the target only when the
+mode is active, the decision is SWITCH, the target differs from the requested
+model, and the caller's key (if any) allows it; otherwise it returns `None`,
+meaning "no rewrite". A switch the caller's key does not allow is
+**suppressed**: the request stays on the model it named rather than failing,
+and the log still records the SWITCH that was declined.
+
+Active routing rewrites `POST /v1/chat/completions` and `POST /v1/messages`.
+`POST /v1/responses` is metered only and is never rewritten.
+
 ## Rules, in order
 
 1. A trailing `user` message means the agent is planning -> STAY.

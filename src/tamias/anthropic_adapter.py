@@ -353,7 +353,8 @@ def register_routes(
     transport: httpx.AsyncBaseTransport | None = None,
     config: RouterConfig | None = None,
     session_salt: bytes | None = None,
-    authorize: Callable[[Request, object], Response | None] | None = None,
+    authorize: Callable[..., Response | None] | None = None,
+    allowed_models: Callable[[Request], tuple[str, ...] | None] | None = None,
 ) -> FastAPI:
     """Add the Anthropic Messages route to ``app`` and return it.
 
@@ -374,14 +375,22 @@ def register_routes(
     stream, so there is no equivalent of the OpenAI ``stream_options`` opt-in.
     """
 
-    if router_mode == "active":
-        raise ValueError("active routing is disabled for the public alpha; use shadow or off")
-    if router_mode not in ("shadow", "off"):
-        raise ValueError(f"unknown router mode: {router_mode}")
+    if router_mode not in ("shadow", "off", "active"):
+        raise ValueError(
+            f"unknown router mode: {router_mode} (allowed: shadow, off, active)"
+        )
 
     base = upstream_url.rstrip("/")
     sessions: dict[str, SessionState] = {}
     routing = router.DEFAULT_CONFIG if config is None else config
+    if router_mode == "active" and not routing.cheap_model:
+        # ``create_app`` checks the rest (registry membership, tool support,
+        # priceability) once for the whole app; a target to switch to is the
+        # one thing this route can check for itself and must not skip.
+        raise ValueError(
+            "active routing needs a cheap model: pass RouterConfig(cheap_model=...) "
+            "or --cheap-model MODEL"
+        )
     session_salt = session_salt or getattr(store, "session_salt", None)
 
     client = getattr(app.state, "upstream_client", None)
@@ -430,20 +439,17 @@ def register_routes(
         )
         return decision
 
-    def outbound(raw: bytes, body: dict[str, Any], decision: Decision) -> bytes:
+    def outbound(raw: bytes, body: dict[str, Any], routed_model: str | None) -> bytes:
         """The exact bytes to send upstream.
 
-        Shadow mode returns ``raw`` unchanged: the decision is recorded, never
-        applied.  Only ``router_mode == "active"`` may rewrite ``model``.
+        ``routed_model`` is the model an active decision applies, or None when
+        the request keeps the model it named -- every shadow and off request,
+        and any switch that was suppressed -- in which case ``raw`` is
+        returned unchanged.
         """
-        if (
-            router_mode == "active"
-            and decision.action == "SWITCH"
-            and decision.target_model
-            and decision.target_model != body.get("model")
-        ):
-            return json.dumps({**body, "model": decision.target_model}).encode()
-        return raw
+        if routed_model is None:
+            return raw
+        return json.dumps({**body, "model": routed_model}).encode()
 
     def advance(session_id: str, model_used: str) -> None:
         """Count this request and note the model it actually ran on."""
@@ -544,16 +550,24 @@ def register_routes(
             dict(request.headers.items()), body, session_salt, wire=session.WIRE_ANTHROPIC
         )
         model_requested = _model_name(body.get("model"))
+        # The decision comes before the gate so the gate can price and cap the
+        # model that will actually run.
+        decision = plan(session_id, body, model_requested)
+        routed_model = router.applied_target(
+            decision,
+            requested=model_requested,
+            enabled=router_mode == "active",
+            allowed=None if allowed_models is None else allowed_models(request),
+        )
         if authorize is not None:
-            denied = authorize(request, body.get("model"), raw)
+            denied = authorize(request, body.get("model"), raw, effective=routed_model)
             if denied is not None:
                 return denied
-        decision = plan(session_id, body, model_requested)
 
         outgoing = client.build_request(
             "POST",
             base + MESSAGES_PATH,
-            content=outbound(raw, body, decision),
+            content=outbound(raw, body, routed_model),
             headers=forward_headers(request),
         )
         started = time.perf_counter()

@@ -5,12 +5,13 @@
 #
 #   bash demo/run_arm.sh <baseline|routed> <n> [--dry-run] [--force]
 #
-# In the 0.1.0a4 alpha tamias cannot rewrite provider requests: `active` routing
-# is rejected.  Both arms therefore run under `--router-mode shadow`, which
-# records what the router *would* do without touching the bytes.  `baseline`
-# configures no cheap model, so nothing can switch; `routed` configures one, so
-# SWITCH decisions are recorded.  Neither arm changes the model the upstream
-# runs.  What differs is only the router's recorded intent.
+# Active request rewriting exists but is opt-in, and these arms deliberately do
+# not use it: both run under a shadow router, which records what the router
+# *would* do without touching the bytes.  `baseline` configures no cheap model,
+# so nothing can switch; `routed` configures one, so SWITCH decisions are
+# recorded.  Neither arm changes the model the upstream runs; what differs is
+# only the router's recorded intent.  See docs/ROUTING.md for the gates an
+# active run would have to satisfy.
 #
 # Runs are non-destructive by default: if the target .db or .json already
 # exists the script refuses to overwrite it unless --force is given.  This

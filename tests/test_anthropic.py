@@ -592,10 +592,16 @@ async def test_shadow_decision_is_recorded_but_the_bytes_are_untouched(
     assert base64.b64decode(echo_of(frames[0])["raw_body_b64"]) == raw
 
 
-async def test_active_mode_is_rejected_for_public_alpha(
+async def test_active_mode_needs_a_cheap_model(
     upstream: FastAPI, store: FakeStore, sheet: PriceSheet
 ) -> None:
-    with pytest.raises(ValueError, match="active routing is disabled"):
+    """This route refuses to start active routing with nothing to switch to.
+
+    The rest of active mode's gates live in ``proxy.create_app``, which
+    checks them once for the whole app; a target to switch to is the one
+    thing the route can check for itself and must not skip.
+    """
+    with pytest.raises(ValueError, match="needs a cheap model"):
         anthropic_adapter.register_routes(
             FastAPI(lifespan=closing_lifespan),
             UPSTREAM_URL,

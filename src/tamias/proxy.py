@@ -13,6 +13,12 @@ rewrite ``model``; only ``effort_mode="apply"`` may add a reasoning
 effort, and only for a model the capability registry vouches for; only
 the opt-in ``inject_usage`` may add ``stream_options``.
 
+``active`` is opt-in and fail-closed.  It refuses to start unless its cheap
+model is configured, listed in the capability registry, able to call tools,
+and priced by the price sheet (:func:`_verify_active_target`), and a switch
+the caller's own key may not use is suppressed rather than applied (see
+:func:`tamias.router.applied_target`).
+
 A request's session is a salted digest, produced by
 :func:`tamias.session.derive_session_id` from the request's authorization
 header and its first system/developer and first user message -- or, when the
@@ -257,6 +263,13 @@ def sse_payload(line: bytes) -> dict[str, Any] | None:
 
 def _model_name(value: Any) -> str:
     return value if isinstance(value, str) and value else UNKNOWN_MODEL
+
+
+def _named_model(model: object) -> str | None:
+    """A model name worth acting on: a non-empty string that is not UNKNOWN."""
+    if isinstance(model, str) and model and model != UNKNOWN_MODEL:
+        return model
+    return None
 
 
 def _bad_request(message: str) -> JSONResponse:
@@ -532,6 +545,54 @@ class SessionTable:
         return session_id in self._records
 
 
+def _verify_active_target(
+    routing: RouterConfig, capabilities: Registry, sheet: PriceSheet
+) -> None:
+    """Refuse to start active routing that cannot be honoured.
+
+    Active is the only mode where the gateway's model choice is real, so every
+    way the choice could be wrong is a startup error rather than a surprise at
+    request time:
+
+    * **no target.**  A SWITCH decision would have nothing to switch to, and the
+      mode's entire promise would be silently empty.
+    * **a target outside the registry.**  Routing may never pick a model the
+      deployment has not vouched for; the registry is where it says which models
+      exist at all.
+    * **a target that cannot call tools.**  Every routed step is a tool-loop
+      step, so a target that does not support tool calls would break the loop it
+      was chosen to continue.
+    * **an unpriced target.**  Cost arithmetic that cannot price a request
+      settles as UNKNOWN, which would charge a budget the reservation ceiling
+      and leave the run's own cost unreportable.
+    """
+    target = routing.cheap_model
+    if not target:
+        raise ValueError(
+            "active routing needs a cheap model: pass RouterConfig(cheap_model=...) "
+            "or --cheap-model MODEL"
+        )
+    info = capabilities.get(target)
+    if info is None:
+        raise ValueError(
+            f"active routing target {target!r} is not in the capability registry: "
+            "add it to the registry file (--registry) so the router cannot pick a "
+            "model the deployment has not vouched for"
+        )
+    if not info.tools:
+        raise ValueError(
+            f"active routing target {target!r} does not support tool calls "
+            "(its registry entry has tools = false); every routed step is a "
+            "tool-loop step, so the target must be able to continue the loop"
+        )
+    if not pricing.can_price(target, sheet):
+        raise ValueError(
+            f"active routing target {target!r} is not priced by the price sheet: "
+            "an unpriced request settles as UNKNOWN, which a budget cannot "
+            "enforce and a report cannot price"
+        )
+
+
 def create_app(
     upstream_url: str,
     store: RequestLog,
@@ -551,10 +612,10 @@ def create_app(
     key_store: KeyStore | None = None,
     request_ceiling_usd: object = None,
 ) -> FastAPI:
-    if router_mode == "active":
-        raise ValueError("active routing is disabled for the public alpha; use shadow or off")
-    if router_mode not in ("shadow", "off"):
-        raise ValueError(f"unknown router mode: {router_mode}")
+    if router_mode not in ("shadow", "off", "active"):
+        raise ValueError(
+            f"unknown router mode: {router_mode} (allowed: shadow, off, active)"
+        )
     if effort_mode not in EFFORT_MODES:
         allowed = ", ".join(EFFORT_MODES)
         raise ValueError(f"unknown effort mode: {effort_mode} (allowed: {allowed})")
@@ -569,6 +630,9 @@ def create_app(
         # record or send.
         routing = replace(routing, effort_policy=True)
     capabilities = registry if registry is not None else empty_registry()
+    if router_mode == "active":
+        # Everything active mode needs to be sure of, checked once at start.
+        _verify_active_target(routing, capabilities, sheet)
     # One ledger per app, sharing the key store's connection.  ``metered`` is the
     # request log every route writes through; it settles the caller's reservation
     # at the one point the response's real cost is known.
@@ -734,24 +798,20 @@ def create_app(
     def outbound(
         raw: bytes,
         body: dict[str, Any],
-        decision: Decision,
+        routed_model: str | None,
         applied_effort: str | None = None,
     ) -> bytes:
         """The exact bytes to send upstream.
 
-        Shadow mode returns ``raw`` unchanged: the decision is recorded, never
-        applied.  Only ``router_mode == "active"`` may rewrite ``model``, and
-        only an ``applied_effort`` resolved for this model (effort_mode
-        ``apply``) adds the reasoning field; only the opt-in ``inject_usage``
-        may add ``stream_options``.
+        ``routed_model`` is the model an active decision applies, or None when
+        the request keeps the model it named (every shadow and off request, and
+        any switch that was suppressed), in which case ``raw`` is returned
+        unchanged.  Only an ``applied_effort`` resolved for this model
+        (effort_mode ``apply``) adds the reasoning field; only the opt-in
+        ``inject_usage`` may add ``stream_options``.
         """
-        if (
-            router_mode == "active"
-            and decision.action == "SWITCH"
-            and decision.target_model
-            and decision.target_model != body.get("model")
-        ):
-            body = {**body, "model": decision.target_model}
+        if routed_model is not None:
+            body = {**body, "model": routed_model}
             raw = json.dumps(body).encode()
         if applied_effort is not None:
             body = apply_effort(body, applied_effort, style=app.state.effort_style)
@@ -819,7 +879,9 @@ def create_app(
         narrow, because a limit is a promise about what the gateway measures: a
         metered route must name a model when money is at stake, and the
         passthrough -- which the gateway neither prices nor logs -- may not name
-        a model at all.
+        a model at all.  ``named`` is the model the request will actually run
+        on, which under active routing is the router's target rather than the
+        one the caller typed.
         """
         assert ledger is not None  # callers only reach here with a key store
         limits = key.limits
@@ -847,33 +909,62 @@ def create_app(
             return _rate_limited(key, reserve)
         return _payment_required(key, ceiling, reserve)
 
+    def allowed_models_for(request: Request) -> tuple[str, ...] | None:
+        """The models this caller's key may use, or None when unrestricted.
+
+        A routing target outside this set must not be applied: the caller
+        would then be running on a model their key forbids, which is exactly
+        what the allowlist exists to prevent.  ``None`` means "no allowlist",
+        which is every deployment that does not use company keys.
+        """
+        key = getattr(request.state, "key", None)
+        if key is None or key.unrestricted:
+            return None
+        return key.models
+
     def authorize(
-        request: Request, model: object, body: bytes | None = None
+        request: Request,
+        model: object,
+        body: bytes | None = None,
+        *,
+        effective: str | None = None,
     ) -> Response | None:
-        """None when the caller may use ``model``, else a refusal response.
+        """None when the caller may use the model this request will run on.
 
-        Three independent policies are applied, all on the model named in the
-        request body, so they bind the chat, messages, responses and passthrough
-        routes alike rather than one handler's idea of "the model":
+        Two independent policies are applied, so they bind the chat, messages,
+        responses and passthrough routes alike rather than one handler's idea of
+        "the model":
 
-        * the key's model allowlist (403),
+        * the key's model allowlist (403), applied to the model the caller named
+          *and*, when it differs, to the model the gateway will actually run;
         * the key's limits -- budget, per-model sub-caps, requests and tokens per
           minute -- which reserve the request before it is forwarded and refuse
-          with 402 or 429 when it would take the key past one of them.
+          with 402 or 429 when it would take the key past one of them.  A
+          per-model sub-cap therefore measures the model that runs, not the one
+          that was asked for.
 
         ``body`` is the raw request bytes, used only to estimate a prompt's size
-        against ``tpm``.  A key with an empty allowlist and no limits is
-        unaffected by all of this.
+        against ``tpm``.  ``effective`` is the routing target when an active
+        decision will rewrite the request, else None.  A key with an empty
+        allowlist and no limits is unaffected by all of this.
         """
         key = getattr(request.state, "key", None)
         if key is None:
             return None
-        named = model if isinstance(model, str) and model and model != UNKNOWN_MODEL else None
+        named = _named_model(model)
+        target = _named_model(effective) or named
         if not key.unrestricted and named is not None and named not in key.models:
             return _forbidden_model(named, key.models)
+        if (
+            not key.unrestricted
+            and target is not None
+            and target != named
+            and target not in key.models
+        ):
+            return _forbidden_model(target, key.models)
         if not key.limited or ledger is None:
             return None
-        return budget_gate(request, key, named, body)
+        return budget_gate(request, key, target, body)
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
         try:
@@ -896,7 +987,18 @@ def create_app(
             dict(request.headers.items()), body, session_salt
         )
         model_requested = _model_name(body.get("model"))
-        denied = authorize(request, model_requested, raw)
+        # The decision comes before the gate so the gate can price and cap the
+        # model that will actually run.  Planning has no lasting side effect
+        # for a request the gate then refuses: it only logs the decision and
+        # registers the session.
+        decision = plan(session_id, body, model_requested)
+        routed_model = router.applied_target(
+            decision,
+            requested=model_requested,
+            enabled=router_mode == "active",
+            allowed=allowed_models_for(request),
+        )
+        denied = authorize(request, model_requested, raw, effective=routed_model)
         if denied is not None:
             return denied
         streaming = bool(body.get("stream"))
@@ -909,21 +1011,14 @@ def create_app(
         )
         if not isinstance(effort_requested, str):
             effort_requested = None
-        decision = plan(session_id, body, model_requested)
-        routed_model = (
-            decision.target_model
-            if router_mode == "active"
-            and decision.action == "SWITCH"
-            and decision.target_model
-            else model_requested
-        )
-        applied_effort = resolve_effort(routed_model, decision)
+        running_model = routed_model or model_requested
+        applied_effort = resolve_effort(running_model, decision)
         effort_used = applied_effort if applied_effort is not None else effort_requested
 
         outgoing = client.build_request(
             "POST",
             base + CHAT_PATH,
-            content=outbound(raw, body, decision, applied_effort),
+            content=outbound(raw, body, routed_model, applied_effort),
             headers=forward_headers(request),
         )
         started = time.perf_counter()
@@ -1109,6 +1204,7 @@ def create_app(
         config=routing,
         session_salt=session_salt,
         authorize=authorize,
+        allowed_models=allowed_models_for,
     )
     responses_adapter.register_routes(
         app,

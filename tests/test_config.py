@@ -147,9 +147,9 @@ def test_resolve_upstream_config_provider_preset(monkeypatch) -> None:
 
 
 def test_resolve_router_mode_validates_config(monkeypatch) -> None:
-    cfg = Config(router_mode="active")
     with pytest.raises(ConfigError):
-        cli._resolve_router_mode(_namespace(), cfg)
+        cli._resolve_router_mode(_namespace(), Config(router_mode="yolo"))
+    assert cli._resolve_router_mode(_namespace(), Config(router_mode="active")) == "active"
     assert cli._resolve_router_mode(_namespace(), Config(router_mode="off")) == "off"
     assert cli._resolve_router_mode(_namespace(), Config()) == "shadow"
 

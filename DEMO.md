@@ -8,12 +8,15 @@ here is expected output written from memory.
 committed logs in `demo/` and `demo/history/`. If the suite is green
 (`.venv/bin/python -m pytest -q`), these pass.
 
-**Alpha boundary:** in 0.1.0a4 tamias does **not** rewrite provider requests.
-`active` routing is rejected (`tamias serve --router-mode active` →
-`invalid choice: 'active'`). Act 1 shows only shadow decisions, and Act 2's
-rewritten rows are **synthetic** — no current command can produce them. Every
-dollar figure below is arithmetic over a simulated price sheet, labelled as
-such in the output itself.
+**Alpha boundary (as captured):** at the commit this file was captured from,
+tamias did **not** rewrite provider requests: `active` routing was rejected
+(`tamias serve --router-mode active` → `invalid choice: 'active'`). Active
+request rewriting has since become available, but opt-in and fail-closed (see
+[`docs/ROUTING.md`](docs/ROUTING.md)); the acts below were captured under the
+earlier alpha and are kept verbatim. Act 1 shows only shadow decisions, and
+Act 2's rewritten rows are **synthetic** — no command at capture time could
+produce them. Every dollar figure below is arithmetic over a simulated price
+sheet, labelled as such in the output itself.
 
 Run everything from the repo root:
 
@@ -74,8 +77,8 @@ routed-1   SWITCH 5 targets ['nvidia/nemotron-3.5-lightning:free']
 
 - `billed cost: UNKNOWN` — the proxy records usage, not the bill. It does not
   guess.
-- `0` rows rewritten in both arms: the alpha does not change which model the
-  upstream runs. The only difference is the recorded target.
+- `0` rows rewritten in both arms: both arms run shadow, so neither changes
+  which model the upstream runs. The only difference is the recorded target.
 - Every dollar figure carries `[SIMULATED PRICES, NOT REAL SAVINGS]` and
   `estimate; ignores cache rebuild cost; not measured`.
 - `free-model rows: 12 of 12` — these models cost `$0` for real, so the
@@ -88,8 +91,8 @@ routed-1   SWITCH 5 targets ['nvidia/nemotron-3.5-lightning:free']
 This log is **synthetic**; see [`demo/history/README.md`](demo/history/README.md).
 It is a real tamias request log on the real schema, but a script wrote it, and
 its 428 "rewritten" rows are fabricated to show what a routed history would look
-like — the current alpha cannot produce them. It exercises the same reporting
-path with no special case.
+like — no command at capture time could produce them. It exercises the same
+reporting path with no special case.
 
 ```sh
 .venv/bin/python -m tamias.cli report --db demo/history/agent-3weeks.db --prices prices.simulated.toml
@@ -175,6 +178,7 @@ and free models return HTTP 429 unpredictably — so it is shown only after two
 consecutive rehearsals pass, and dropped for the offline acts if it does not.
 Everything above was produced without a network.
 
-**Request rewriting.** The alpha rejects `active` routing, so nothing here
-rewrites a provider request. Act 1 records shadow decisions; Act 2's rewritten
-rows are synthetic and labelled.
+**Request rewriting (at capture time).** The alpha then rejected `active`
+routing, so nothing here rewrites a provider request. Act 1 records shadow
+decisions; Act 2's rewritten rows are synthetic and labelled. Active rewriting
+exists now, but this file is a verbatim capture and was not re-run for it.

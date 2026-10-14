@@ -445,10 +445,17 @@ async def test_shadow_mode_switch_names_the_configured_cheap_model(
     assert forwarded_body(response.json()["echo"])["model"] == "gpt-mock"
 
 
-async def test_active_mode_is_rejected_for_public_alpha(
+async def test_active_mode_needs_a_target_the_registry_vouches_for(
     upstream: FastAPI, store: FakeStore, sheet: PriceSheet
 ) -> None:
-    with pytest.raises(ValueError, match="active routing is disabled"):
+    """Active is opt-in and fail-closed.
+
+    The target is outside this deployment's capability registry, so the app
+    refuses to start rather than routing to a model nobody vetted.  (The
+    other three gates -- no target, no tool support, unpriced target -- are
+    pinned in tests/test_active_routing.py.)
+    """
+    with pytest.raises(ValueError, match="not in the capability registry"):
         proxy.create_app(
             UPSTREAM_URL,
             store,

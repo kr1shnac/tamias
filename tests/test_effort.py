@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from tamias.effort import apply_effort
-from tamias.pricing import PriceSheet
+from tamias.pricing import ModelPrice, PriceSheet
 from tamias.proxy import create_app
 from tamias.registry import ModelInfo, Registry, empty_registry
 from tamias.router import RouterConfig, decide
@@ -65,15 +66,60 @@ def test_policy_off_preserves_existing_router_decision() -> None:
     assert result.target_effort is None
 
 
-async def test_active_proxy_is_rejected_for_public_alpha(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="active routing is disabled"):
-        create_app(
+async def test_an_active_proxy_rewrites_the_model_and_sends_that_models_effort(
+    tmp_path: Path,
+) -> None:
+    """The two axes compose (D2 + D3) on one request.
+
+    The model is rewritten to the cheap model and the effort the policy chose
+    for this step is resolved against *that* model, so active routing does not
+    have to be off for the effort axis to work (the coupling A1 removed).
+    """
+    upstream = FastAPI()
+    sent: list[dict[str, Any]] = []
+
+    @upstream.post("/v1/chat/completions")
+    async def chat(request: Request) -> JSONResponse:
+        sent.append(json.loads(await request.body()))
+        return JSONResponse(
+            {"model": "cheap", "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+        )
+
+    store = Store(tmp_path / "requests.sqlite")
+    try:
+        app = create_app(
             "http://upstream.invalid",
-            Store(tmp_path / "requests.sqlite"),
-            PriceSheet(date="2026-10-07", models={}),
+            store,
+            PriceSheet(date="2026-10-07", models={"cheap": ModelPrice(input=1.0, output=2.0)}),
             "active",
             config=policy(),
+            registry=registry_with(
+                ModelInfo(
+                    id="cheap",
+                    provider="test",
+                    context_window=1000,
+                    tools=True,
+                    reasoning=True,
+                    efforts=("low",),
+                )
+            ),
+            effort_mode="apply",
+            transport=httpx.ASGITransport(app=upstream),
         )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+        ) as client:
+            response = await client.post(
+                "/v1/chat/completions", content=json.dumps(tool_body()).encode()
+            )
+
+        assert response.status_code == 200
+        (body,) = sent
+        assert body["model"] == "cheap"
+        assert body["reasoning"] == {"effort": "low"}
+    finally:
+        await app.state.upstream_client.aclose()
+        store.close()
 
 
 async def test_shadow_proxy_keeps_the_body_byte_identical(tmp_path: Path) -> None:

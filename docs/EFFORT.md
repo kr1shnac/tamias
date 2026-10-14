@@ -26,6 +26,8 @@ This feature adds optional `reasoning.effort` (OpenRouter style) or `reasoning_e
 - Providers may ignore the `reasoning.effort` or `reasoning_effort` field entirely.
 - Effort changes may invalidate the prompt cache on some providers (not measured here).
 - Effort switching has NOT been demonstrated end-to-end.
+- The effort axis rewrites chat-completion request bodies only; it is not
+  applied to the Anthropic Messages route or to `/v1/responses`.
 
 ## CLI Flags
 

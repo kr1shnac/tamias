@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | Local proxy metering | Implemented | Chat, Responses, and Anthropic routes share one log; offline client-matrix test |
 | Shadow routing | Implemented | Decisions recorded without rewriting upstream requests |
-| Active routing | Disabled | Public alpha accepts only `shadow` and `off`; `active` is rejected |
+| Active routing | Opt-in | `--router-mode active` rewrites the model to `--cheap-model`; refused at startup unless the target is in `--registry`, tool-capable, and priced; a switch the caller's key forbids is suppressed, not refused |
 | Cost provenance | Implemented | Provider billed cost and list-price computation remain separate |
 | Legacy cost rows | Unknown | Ambiguous `cost_usd` is excluded from computed/reconciliation totals |
 | Session privacy | Implemented | Per-database salt and legacy session migration |

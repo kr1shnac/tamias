@@ -134,8 +134,12 @@ project header. Key auth is off unless `--keys-db` is given. This layer is
 identity only - it does **not** cap spend; see [`docs/KEYS.md`](docs/KEYS.md).
 
 
-Public alpha routing is limited to `shadow` and `off`; `active` routing is
-disabled because it rewrites provider requests. The effort axis is separate
+Routing has three modes: `off`, `shadow` (the default -- it records the
+decision and forwards the request unchanged), and `active`, which rewrites the
+request to `--cheap-model`. Active is opt-in and fail-closed: the process
+refuses to start unless that model is named, listed in `--registry`, marked
+tool-capable there and priced by the sheet, and a switch the caller's key does
+not allow is suppressed rather than refused. The effort axis is separate
 and off by default: `--effort-mode meter` records the effort the policy would
 have chosen without changing the request, and `--effort-mode apply` sends it,
 but only for a model listed in `--registry` (a capability catalogue); a level
@@ -177,7 +181,7 @@ Three client protocols are metered. Any other path is relayed unlogged.
 | --- | --- |
 | Per-request token and cost log | Yes |
 | Rule-based shadow routing | Yes — records decisions, does not rewrite |
-| Active routing (request rewriting) | No — rejected by the CLI and library |
+| Active routing (request rewriting) | Opt-in — `--router-mode active`; refused at startup unless the target is in `--registry`, tool-capable, and priced |
 | Reasoning-effort switching | Metering only; provider behaviour unverified |
 | Proxy authentication | Opt-in bearer token; required off loopback |
 | Company keys (identity + model allowlist) | Yes — opt-in via `--keys-db` |
@@ -192,8 +196,9 @@ Three client protocols are metered. Any other path is relayed unlogged.
 - It does not store prompt or response text, and it does not log credentials.
 - It does not authenticate with the upstream provider; it forwards the
   credentials the client already sends.
-- It does not rewrite provider requests in this alpha (`active` routing is
-  disabled), so it cannot change which model a provider actually runs.
+- It does not rewrite provider requests unless `--router-mode active` is given
+  and the target passes every startup gate, so by default it cannot change
+  which model a provider actually runs.
 - It does not prove that a provider honoured a requested reasoning effort; the
   log records the request only.
 - It does not promise that a remaining budget is exact. A key's spend is

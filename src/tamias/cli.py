@@ -60,7 +60,7 @@ from tamias.types import Usage
 DEFAULT_URL = OPENROUTER_MODELS_URL
 
 ESTIMATE_LABEL = "estimate; ignores cache rebuild cost; not measured"
-ROUTER_MODES = ("shadow", "off")
+ROUTER_MODES = ("shadow", "off", "active")
 SIMULATED_LABEL = "SIMULATED PRICES, NOT REAL SAVINGS"
 RUN_START_TIMEOUT_SECONDS = 15
 RUN_STOP_TIMEOUT_SECONDS = 5
@@ -281,6 +281,11 @@ def report(db_path: str, prices_path: str) -> None:
     realised_saved = 0.0
     realised_count = 0
     realised_unpriced = 0
+    # Switches the proxy actually applied: a SWITCH decision whose row then
+    # ran on a different model than the one requested.  ``switched`` counts
+    # the decisions, so the difference is the switches active mode declined
+    # to apply -- a restricted key, or a target the deployment forbade.
+    routed = 0
 
     for row in rows:
         if _has_counts(row):
@@ -302,6 +307,8 @@ def report(db_path: str, prices_path: str) -> None:
 
         model_used = _pick(row, MODEL_USED_COLUMNS)
         if model_used is not None and model_used != row["model_requested"]:
+            if _would_switch(row):
+                routed += 1
             usage = _usage(row)
             cost_requested = compute_cost(row["model_requested"], usage, sheet).usd
             cost_used = compute_cost(model_used, usage, sheet).usd
@@ -385,7 +392,18 @@ def report(db_path: str, prices_path: str) -> None:
         if isinstance(mode, str) and mode
     }
     if router_modes == {"active"}:
-        print(f"requests routed to the cheap model: {switched}")
+        # The decisions were meant to be applied, but only the rows whose
+        # model actually changed prove it; the rest were held back.
+        line = f"requests routed to the cheap model: {routed}"
+        suppressed = switched - routed
+        if suppressed > 0:
+            line += (
+                f" ({suppressed} more decided SWITCH and were not applied: "
+                "the caller's key may not use the target)"
+            )
+        print(line)
+    elif router_modes == {"off"}:
+        print("router was off: no decision was recorded")
     elif len(router_modes) > 1:
         print(
             "requests shadow mode would have switched: "
@@ -1337,7 +1355,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--router-mode",
         choices=ROUTER_MODES,
         default="shadow",
-        help="shadow records the routing decision; off disables routing (default: shadow)",
+        help="off disables routing; shadow records the decision without changing the "
+        "request; active also rewrites the model to --cheap-model, but only a "
+        "target --registry vouches for and --prices can price (default: shadow)",
     )
     serve_parser.add_argument(
         "--effort-mode",

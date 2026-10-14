@@ -4,9 +4,13 @@
 keeps no module-level mutable state.  Shadow mode (which only records the
 decision) and active mode (which rewrites ``body["model"]``) therefore always
 agree on what the decision was.
+
+``applied_target`` is the other half: the single place that turns a decision
+into an action, so no handler has to re-derive what a ``SWITCH`` means.
 """
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -291,3 +295,35 @@ def decide(
             if tool is not None and _is_easy(tool, config):
                 decision = replace(decision, target_effort="low")
     return decision
+
+
+def applied_target(
+    decision: Decision,
+    *,
+    requested: str,
+    enabled: bool,
+    allowed: Collection[str] | None = None,
+) -> str | None:
+    """The model to actually run on, or ``None`` to keep the requested one.
+
+    The single place that turns a decision into an action, so the chat and
+    messages handlers cannot disagree about what ``SWITCH`` means.
+
+    ``enabled`` is the routing mode's answer: only ``active`` applies a decision,
+    so ``shadow`` and ``off`` always return ``None`` and the request is forwarded
+    exactly as it arrived.  ``allowed`` is the caller's model allowlist, or
+    ``None`` when the caller has none.  A switch to a model the caller may not
+    use is **suppressed** -- the request stays on the model the caller asked for
+    -- rather than applied and then refused, so a restricted key is never failed
+    on a model it never named.
+
+    Returns the target only when it differs from ``requested``; a no-op switch
+    would otherwise rewrite the body for nothing.
+    """
+    if not enabled or decision.action != "SWITCH" or not decision.target_model:
+        return None
+    if decision.target_model == requested:
+        return None
+    if allowed is not None and decision.target_model not in allowed:
+        return None
+    return decision.target_model

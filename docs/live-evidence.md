@@ -262,6 +262,14 @@ strong" line, so an active-mode run cannot report its own benefit; this is a
 known gap in the tool, not a defect introduced by `--inject-usage`, and it is
 left for a separate change.
 
+> **Superseded.** That separate change has since landed (commit `8728935`,
+> "Add realised saving line to tamias report"). `tamias report` now prints a
+> `realised saving (rows the proxy actually rewrote)` line that compares the
+> model each row actually used against the model it requested, and an active
+> run prints `requests routed to the cheap model: N` alongside it. On this
+> stage's data the line reports `$0.030217` over the two rewritten rows -- the
+> figure the table above computes by hand -- instead of `$0.00`.
+
 ### Stages 6 and 7 — checks
 
 | check | result |
@@ -299,10 +307,12 @@ beyond the usual set are `price_sheet_date` (always `2026-10-04`) and
   is established by a controlled probe, but the rate is not: one session gave 3
   NULL of 11, another 0 of 8. Nothing predicts which requests get cut short, so
   the share of priced rows will vary run to run.
-- **Whether an active-mode run can report its own saving.** It cannot: the
-  saving line cancelled itself to `$0.00` against a realised `$0.030217`. The
-  report needs a "spent versus always strong" line before an active run can be
-  summarised; that change has not been made.
+- **Whether an active-mode run can report its own saving.** It can. The gap
+  recorded here (a saving line that cancelled itself to `$0.00` against a
+  realised `$0.030217`) was closed by commit `8728935`, which added the
+  `realised saving (rows the proxy actually rewrote)` line and the
+  `requests routed to the cheap model` line, now pinned by
+  `tests/test_report_realised_saving.py` and `tests/test_report_active_mode.py`.
 - **Attribution of the successful edit.** Active mode switched 2 of 8 requests,
   the task passed, but a metadata-only log cannot attribute the passing edit to
   the strong model or the cheap one.

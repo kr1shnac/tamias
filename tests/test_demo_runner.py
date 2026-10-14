@@ -1,9 +1,9 @@
-"""The demo runner must stay inside the alpha boundary and be non-destructive.
+"""The demo runner must keep the demo arms in shadow and be non-destructive.
 
-`active` routing is rejected in 0.1.0a4, so the runner must never ask for it, and
-it must refuse to overwrite a committed run unless `--force` is passed.  These
-are static/cheap checks: they read the script and run its `--help`, without
-starting the proxy.
+The arms record routing intent without rewriting requests, so the runner must
+never select active rewriting, and it must refuse to overwrite a committed run
+unless `--force` is passed.  These are static/cheap checks: they read the script
+and run its `--help`, without starting the proxy.
 """
 
 from __future__ import annotations
@@ -16,7 +16,8 @@ REPO = Path(__file__).resolve().parents[1]
 RUN_ARM = REPO / "demo" / "run_arm.sh"
 
 
-def test_runner_never_requests_active_routing() -> None:
+def test_runner_keeps_the_demo_arms_in_shadow() -> None:
+    """The arms stay shadow by choice, so the script must not select active."""
     text = RUN_ARM.read_text(encoding="utf-8")
     assert "--router-mode active" not in text
     assert "router-mode active" not in text
