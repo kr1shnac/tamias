@@ -27,6 +27,14 @@ attaches that identity to the request, and refuses any model the key's
 allowlist does not name.  The key's project, when it has one, overrides a
 client-supplied project header, so a caller cannot relabel its spend.
 
+A key may also carry a budget, and then the gateway enforces it: before a
+request is forwarded it reserves ``request_ceiling_usd`` and refuses with 402
+once the budget could not afford it, and when the request is logged the real
+computed cost settles the reservation (:mod:`tamias.budget`).  A budget is only
+held against spend the gateway measures, so a budgeted key is refused the
+unpriced passthrough route when it names a model, and refused a model the price
+sheet cannot price.
+
 :func:`create_app` also registers the Anthropic Messages route, by calling
 :func:`tamias.anthropic_adapter.register_routes`, so ``POST /v1/messages`` is
 logged on the same terms as ``POST /v1/chat/completions`` rather than falling
@@ -46,6 +54,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Protocol
 
 import httpx
@@ -54,8 +63,15 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import anthropic_adapter, pricing, responses_adapter, router, session
 from tamias import sse as sse_module
+from tamias.budget import (
+    CURRENT_KEY_ID,
+    DEFAULT_REQUEST_CEILING_USD,
+    BudgetedLog,
+    BudgetState,
+    parse_usd,
+)
 from tamias.effort import EFFORT_MODES, apply_effort
-from tamias.keys import KeyStore
+from tamias.keys import Key, KeyStore
 from tamias.pricing import PriceSheet
 from tamias.registry import Registry, empty_registry
 from tamias.router import RouterConfig
@@ -79,6 +95,13 @@ SESSION_HEADER = session.SESSION_HEADER
 SESSION_ID_PREFIX = session.SESSION_ID_PREFIX
 SESSION_ID_HEX_CHARS = session.SESSION_ID_HEX_CHARS
 UNKNOWN_MODEL = "unknown"
+
+# The routes whose cost the gateway measures and can therefore hold a budget
+# against.  The passthrough below is deliberately absent: it relays an arbitrary
+# provider body the gateway does not price.
+METERED_PATHS = frozenset(
+    (CHAT_PATH, anthropic_adapter.MESSAGES_PATH, responses_adapter.RESPONSES_PATH)
+)
 
 _SESSION_CAP = 1000
 
@@ -264,6 +287,77 @@ def _forbidden_model(model: str, allowed: tuple[str, ...]) -> JSONResponse:
     )
 
 
+def _payment_required(key: Key, ceiling: Decimal, state: BudgetState) -> JSONResponse:
+    """402 for a key whose budget cannot afford one more request.
+
+    The numbers are the gateway's own ledger -- settled spend, money held by
+    in-flight requests, and what one more request would need -- so the refusal
+    states arithmetic the caller and the operator can both check.
+    """
+    return JSONResponse(
+        {
+            "error": {
+                "message": (
+                    f"budget exhausted for key {key.key_id}: {state.spent_usd} spent, "
+                    f"{state.reserved_usd} reserved, {state.remaining_usd} left, "
+                    f"{ceiling} needed for one request"
+                ),
+                "type": "insufficient_quota",
+            }
+        },
+        status_code=402,
+    )
+
+
+def _unmetered_forbidden(model: str) -> JSONResponse:
+    """403 when a budgeted key names a model on the unlogged passthrough route."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": (
+                    f"model {model!r} cannot be reached through the passthrough route by "
+                    "a key with a budget: the gateway bounds spend only on its metered "
+                    "routes (/v1/chat/completions, /v1/messages, /v1/responses)"
+                ),
+                "type": "invalid_request_error",
+            }
+        },
+        status_code=403,
+    )
+
+
+def _budget_needs_model(key: Key) -> JSONResponse:
+    """403 when a budgeted key reaches a metered route without naming a model."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": (
+                    f"key {key.key_id} has a budget, so the request must name a model "
+                    "the price sheet can price"
+                ),
+                "type": "invalid_request_error",
+            }
+        },
+        status_code=403,
+    )
+
+
+def _unpriced_forbidden(model: str) -> JSONResponse:
+    """403 when a budgeted key names a model no price can be computed for."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": (
+                    f"model {model!r} cannot be priced by the gateway's price sheet, so "
+                    "a key with a budget cannot be held to one by reaching it"
+                ),
+                "type": "invalid_request_error",
+            }
+        },
+        status_code=403,
+    )
+
+
 def _body_model(raw: bytes) -> str | None:
     """The model named in a JSON request body, or None.
 
@@ -429,6 +523,7 @@ def create_app(
     effort_mode: str = "off",
     registry: Registry | None = None,
     key_store: KeyStore | None = None,
+    request_ceiling_usd: object = None,
 ) -> FastAPI:
     if router_mode == "active":
         raise ValueError("active routing is disabled for the public alpha; use shadow or off")
@@ -448,6 +543,16 @@ def create_app(
         # record or send.
         routing = replace(routing, effort_policy=True)
     capabilities = registry if registry is not None else empty_registry()
+    # One ledger per app, sharing the key store's connection.  ``metered`` is the
+    # request log every route writes through; it settles the caller's reservation
+    # at the one point the response's real cost is known.
+    ledger = key_store.budget() if key_store is not None else None
+    ceiling = parse_usd(request_ceiling_usd)
+    if ceiling is None:
+        ceiling = DEFAULT_REQUEST_CEILING_USD
+    if ceiling <= 0:
+        raise ValueError("request_ceiling_usd must be a positive USD amount")
+    metered: RequestLog = store if ledger is None else BudgetedLog(store, ledger)
     table = SessionTable()
     session_salt = getattr(store, "session_salt", None)
 
@@ -476,6 +581,8 @@ def create_app(
     app.state.effort_mode = effort_mode
     app.state.registry = capabilities
     app.state.key_store = key_store
+    app.state.budget_ledger = ledger
+    app.state.request_ceiling_usd = ceiling
     app.state.sessions = table
 
     if auth_token is not None or key_store is not None:
@@ -652,7 +759,7 @@ def create_app(
         failure_type: str | None = None,
     ) -> None:
         cost = pricing.compute_cost(model_used, usage, sheet)
-        store.log_request(
+        metered.log_request(
             datetime.now(UTC).isoformat(timespec="milliseconds"),
             session_id,
             model_requested,
@@ -677,21 +784,61 @@ def create_app(
             router_mode=router_mode,
         )
 
-    def authorize(request: Request, model: object) -> Response | None:
-        """None when the caller may use ``model``, else a 403 response.
+    def budget_gate(request: Request, key: Key, named: str | None) -> Response | None:
+        """Reserve a key's request ceiling, or refuse the request.
 
-        A key with an empty allowlist is unrestricted.  A key that names models
-        may reach only those.  The check is on the model named in the request
-        body, so it binds the chat, messages, responses and passthrough routes
-        alike rather than one handler's idea of "the model".
+        Called only for a key that carries a budget.  The rules are deliberately
+        narrow, because a budget is a promise about spend the gateway measures:
+        a metered route must name a priceable model, and the passthrough -- which
+        the gateway does not price -- may not name a model at all.
+        """
+        assert ledger is not None  # callers only reach here with a key store
+        if named is None:
+            # A metered route with no model cannot be priced; a passthrough read
+            # that names no model has nothing to charge.
+            return _budget_needs_model(key) if request.scope["path"] in METERED_PATHS else None
+        if request.scope["path"] not in METERED_PATHS:
+            return _unmetered_forbidden(named)
+        if not pricing.can_price(named, sheet):
+            return _unpriced_forbidden(named)
+        budget = key.budget_usd
+        if budget is None:  # unreachable: the caller checked key.budgeted
+            return None
+        # Settling is driven by this variable, read when the request is logged.
+        CURRENT_KEY_ID.set(key.key_id)
+        if not ledger.try_reserve(
+            key.key_id, ceiling_usd=ceiling, budget_usd=budget, period_days=key.period_days
+        ):
+            return _payment_required(
+                key,
+                ceiling,
+                ledger.state(key.key_id, budget_usd=budget, period_days=key.period_days),
+            )
+        return None
+
+    def authorize(request: Request, model: object) -> Response | None:
+        """None when the caller may use ``model``, else a refusal response.
+
+        Two independent policies are applied, both on the model named in the
+        request body, so they bind the chat, messages, responses and passthrough
+        routes alike rather than one handler's idea of "the model":
+
+        * the key's model allowlist, and
+        * the key's budget, which reserves a request ceiling before the request is
+          forwarded and refuses (402) when it would take the key past the budget.
+
+        A key with an empty allowlist is unrestricted.  A key with no budget is
+        unaffected by the second policy.
         """
         key = getattr(request.state, "key", None)
-        if key is None or key.unrestricted:
+        if key is None:
             return None
         named = model if isinstance(model, str) and model and model != UNKNOWN_MODEL else None
-        if named is None or named in key.models:
+        if not key.unrestricted and named is not None and named not in key.models:
+            return _forbidden_model(named, key.models)
+        if not key.budgeted or ledger is None:
             return None
-        return _forbidden_model(named, key.models)
+        return budget_gate(request, key, named)
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
         try:
@@ -921,7 +1068,7 @@ def create_app(
     anthropic_adapter.register_routes(
         app,
         upstream_url,
-        store,
+        metered,
         sheet,
         router_mode,
         config=routing,
@@ -931,7 +1078,7 @@ def create_app(
     responses_adapter.register_routes(
         app,
         upstream_url,
-        store,
+        metered,
         sheet,
         session_salt=session_salt,
         authorize=authorize,

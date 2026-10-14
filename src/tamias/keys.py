@@ -12,8 +12,12 @@ never print the secret.  The public ``key_id`` (the token's prefix) is what an
 operator sees and revokes.
 
 Revocation is a timestamp rather than a delete, so a revoked key stays in the
-table as an audit trail while failing authentication.  Nothing here enforces a
-budget yet: this module is identity only.
+table as an audit trail while failing authentication.
+
+A key may also carry a budget: a USD ceiling and the period it is measured over.
+The arithmetic that enforces it lives in :mod:`tamias.budget`; a :class:`KeyStore`
+hands that module its own connection so keys and spend share one writer rather
+than racing two connections over the same file.
 """
 
 from __future__ import annotations
@@ -26,9 +30,11 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from threading import Lock
 
+from tamias.budget import DEFAULT_RESERVATION_TTL_SECONDS, BudgetError, BudgetLedger, parse_usd
 from tamias.store import sanitize_project
 
 KEY_PREFIX = "vk-"
@@ -43,14 +49,22 @@ CREATE TABLE IF NOT EXISTS {KEY_TABLE} (
     project TEXT,
     models TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    budget_usd TEXT,
+    period_days INTEGER
 );
 """
 
+# Columns added after the first release.  ``CREATE TABLE IF NOT EXISTS`` does not
+# touch a table that already exists, so a database written before budgets needs
+# them added in place; both are nullable, so an old row simply has no budget.
+_ADDED_COLUMNS = {"budget_usd": "TEXT", "period_days": "INTEGER"}
+
 _INSERT = (
     f"INSERT INTO {KEY_TABLE} "
-    "(key_id, token_hash, label, project, models, created_at, revoked_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, NULL)"
+    "(key_id, token_hash, label, project, models, created_at, revoked_at, "
+    "budget_usd, period_days) "
+    "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)"
 )
 
 
@@ -78,6 +92,14 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _stored_usd(value: object) -> Decimal | None:
+    """A budget read back from the column; malformed text reads as no budget."""
+    try:
+        return parse_usd(value)
+    except BudgetError:
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class Key:
     """One company key's identity, without its secret.
@@ -93,10 +115,17 @@ class Key:
     models: tuple[str, ...]
     created_at: str
     revoked_at: str | None = None
+    budget_usd: Decimal | None = None
+    period_days: int | None = None
 
     @property
     def revoked(self) -> bool:
         return self.revoked_at is not None
+
+    @property
+    def budgeted(self) -> bool:
+        """True when the gateway must enforce a USD ceiling for this key."""
+        return self.budget_usd is not None
 
     @property
     def unrestricted(self) -> bool:
@@ -121,8 +150,10 @@ class KeyStore:
         self._conn = sqlite3.connect(target, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = Lock()
+        self._ledger: BudgetLedger | None = None
         with self._lock:
             self._conn.executescript(_CREATE)
+            self._ensure_columns()
             self._conn.commit()
         if self._path is not None:
             # The table holds key material, if only as hashes; keep it private.
@@ -131,8 +162,26 @@ class KeyStore:
             except OSError:
                 pass
 
+    def _ensure_columns(self) -> None:
+        existing = {
+            str(row["name"]) for row in self._conn.execute(f"PRAGMA table_info({KEY_TABLE})")
+        }
+        for name, declaration in _ADDED_COLUMNS.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE {KEY_TABLE} ADD COLUMN {name} {declaration}")
+
     def close(self) -> None:
         self._conn.close()
+
+    def budget(self, *, ttl_seconds: int = DEFAULT_RESERVATION_TTL_SECONDS) -> BudgetLedger:
+        """The spend ledger, sharing this store's connection and lock.
+
+        Built lazily and cached, so a store that never enforces a budget -- every
+        ``tamias admin key`` command, most tests -- never creates the tables.
+        """
+        if self._ledger is None:
+            self._ledger = BudgetLedger(self._conn, self._lock, ttl_seconds=ttl_seconds)
+        return self._ledger
 
     def issue(
         self,
@@ -140,6 +189,8 @@ class KeyStore:
         label: str = "",
         project: str | None = None,
         models: Iterable[str] = (),
+        budget_usd: object = None,
+        period_days: int | None = None,
     ) -> tuple[Key, str]:
         """Mint a key.  Returns the stored :class:`Key` and the token to hand out.
 
@@ -163,6 +214,20 @@ class KeyStore:
             if model not in allow:
                 allow.append(model)
 
+        try:
+            budget = parse_usd(budget_usd)
+        except BudgetError as exc:
+            raise KeysError(str(exc)) from exc
+        if period_days is not None:
+            if (
+                isinstance(period_days, bool)
+                or not isinstance(period_days, int)
+                or period_days <= 0
+            ):
+                raise KeysError("period_days must be a positive whole number of days")
+            if budget is None:
+                raise KeysError("period_days means nothing without a budget")
+
         stamp = _now()
         with self._lock:
             for _ in range(8):
@@ -170,12 +235,23 @@ class KeyStore:
                 try:
                     self._conn.execute(
                         _INSERT,
-                        (key_id, hash_token(token), label, project, json.dumps(allow), stamp),
+                        (
+                            key_id,
+                            hash_token(token),
+                            label,
+                            project,
+                            json.dumps(allow),
+                            stamp,
+                            None if budget is None else str(budget),
+                            period_days,
+                        ),
                     )
                     self._conn.commit()
                 except sqlite3.IntegrityError:
                     continue
-                return Key(key_id, label, project, tuple(allow), stamp, None), token
+                return Key(
+                    key_id, label, project, tuple(allow), stamp, None, budget, period_days
+                ), token
         raise KeysError("could not mint a unique key id")
 
     def get(self, key_id: str) -> Key | None:
@@ -226,4 +302,6 @@ class KeyStore:
             models=models,
             created_at=str(row["created_at"]),
             revoked_at=row["revoked_at"],
+            budget_usd=_stored_usd(row["budget_usd"]),
+            period_days=row["period_days"],
         )

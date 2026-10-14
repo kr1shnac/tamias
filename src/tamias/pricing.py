@@ -8,7 +8,7 @@ from typing import Any
 
 from tamias.types import CostBreakdown, Usage
 
-__all__ = ["ModelPrice", "PriceSheet", "load_price_sheet", "compute_cost"]
+__all__ = ["ModelPrice", "PriceSheet", "load_price_sheet", "can_price", "compute_cost"]
 
 TOKENS_PER_RATE_UNIT = 1_000_000
 UNKNOWN = "?"
@@ -144,6 +144,24 @@ def _parse_model(source: Path, model: str, table: Any) -> ModelPrice:
 
 def _show(value: float | int | None) -> str:
     return UNKNOWN if value is None else repr(value)
+
+
+def can_price(model: str, sheet: PriceSheet) -> bool:
+    """Whether :func:`compute_cost` can ever produce a USD for ``model``.
+
+    A budget cannot be enforced by spending against a cost that is always
+    UNKNOWN, so a key with a budget is refused a model this returns False for.
+    The test mirrors the two ways ``compute_cost`` refuses: the model is absent
+    from the sheet, its entry uses tiered pricing the arithmetic does not
+    implement, or its base input/output rates are unquoted.  A quoted zero rate
+    is priceable ($0.00, not unknown), and a missing cache rate does not matter
+    here -- it can only make a specific usage unknown, while the reservation
+    ceiling is bounded by the model's quoted rates.
+    """
+    price = sheet.get(model)
+    if price is None or price.tiers:
+        return False
+    return price.input is not None and price.output is not None
 
 
 def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:

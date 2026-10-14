@@ -533,6 +533,7 @@ def build_serve_app(
     auth_token: str | None = None,
     max_body_bytes: int | None = None,
     max_concurrency: int | None = None,
+    request_ceiling_usd: object = None,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
@@ -568,6 +569,7 @@ def build_serve_app(
         auth_token=auth_token,
         max_body_bytes=max_body_bytes,
         max_concurrency=max_concurrency,
+        request_ceiling_usd=request_ceiling_usd,
     )
     app.state.store = store
     return app
@@ -673,6 +675,21 @@ def _default_keys_db() -> str:
     return str(Path.home() / ".tamias" / DEFAULT_KEYS_DB)
 
 
+def _describe_budget(key: Any) -> str:
+    if key.budget_usd is None:
+        return "(none)"
+    if key.period_days is None:
+        return f"${key.budget_usd} total"
+    return f"${key.budget_usd} per {key.period_days} days"
+
+
+def _fmt_ceiling(value: object) -> str:
+    from tamias.budget import DEFAULT_REQUEST_CEILING_USD, parse_usd
+
+    parsed = parse_usd(value)
+    return f"${DEFAULT_REQUEST_CEILING_USD if parsed is None else parsed}"
+
+
 def admin_command(args: argparse.Namespace) -> int:
     """``tamias admin key issue|list|revoke``.
 
@@ -683,13 +700,18 @@ def admin_command(args: argparse.Namespace) -> int:
     try:
         if args.key_command == "issue":
             key, token = store.issue(
-                label=args.label, project=args.project, models=args.model
+                label=args.label,
+                project=args.project,
+                models=args.model,
+                budget_usd=args.budget_usd,
+                period_days=args.period_days,
             )
             print(f"key_id:  {key.key_id}")
             print(f"token:   {token}")
             print(f"label:   {key.label or '-'}")
             print(f"project: {key.project or '-'}")
             print(f"models:  {', '.join(key.models) if key.models else '(all)'}")
+            print(f"budget:  {_describe_budget(key)}")
             print(
                 "Store the token now: only its hash is kept, so it cannot "
                 "be shown again.",
@@ -706,7 +728,8 @@ def admin_command(args: argparse.Namespace) -> int:
                 models = ", ".join(key.models) if key.models else "(all)"
                 print(
                     f"{key.key_id}\t{state}\t{key.label or '-'}\t"
-                    f"project={key.project or '-'}\tmodels={models}"
+                    f"project={key.project or '-'}\tmodels={models}\t"
+                    f"budget={_describe_budget(key)}"
                 )
             return 0
         if args.key_command == "revoke":
@@ -815,6 +838,7 @@ def serve(args: argparse.Namespace) -> int:
         auth_token=auth_token,
         max_body_bytes=max_body_bytes,
         max_concurrency=max_concurrency,
+        request_ceiling_usd=args.request_ceiling_usd,
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -1182,6 +1206,8 @@ def run(args: argparse.Namespace) -> int:
         serve_command.extend(("--registry", args.registry))
     if args.keys_db:
         serve_command.extend(("--keys-db", args.keys_db))
+    if getattr(args, "request_ceiling_usd", None) is not None:
+        serve_command.extend(("--request-ceiling-usd", args.request_ceiling_usd))
 
     try:
         proxy_process = subprocess.Popen(serve_command)
@@ -1303,6 +1329,11 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: off)",
     )
     serve_parser.add_argument(
+        "--request-ceiling-usd",
+        default=None,
+        help="USD reserved for one request before it is forwarded",
+    )
+    serve_parser.add_argument(
         "--registry",
         default=None,
         help="TOML capability catalogue; apply mode sends an effort only for a "
@@ -1387,6 +1418,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--effort-mode", choices=EFFORT_MODES, default=None)
     run_parser.add_argument("--registry", default=None)
     run_parser.add_argument("--keys-db", default=None)
+    run_parser.add_argument("--request-ceiling-usd", default=None)
     run_parser.add_argument("--project")
     run_parser.add_argument("--cheap-model", default="")
     run_parser.add_argument("--strong-model", default="")
@@ -1481,6 +1513,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="a model this key may use; repeat for several (default: any model)",
     )
+    issue_parser.add_argument("--budget-usd", default=None)
+    issue_parser.add_argument("--period-days", type=int, default=None)
     list_parser = key_sub.add_parser("list", help="list keys, never their secrets")
     list_parser.add_argument("--keys-db", default=_default_keys_db())
     revoke_parser = key_sub.add_parser("revoke", help="revoke a key by its key_id")
