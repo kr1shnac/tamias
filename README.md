@@ -180,8 +180,8 @@ Three client protocols are metered. Any other path is relayed unlogged.
 | Active routing (request rewriting) | No — rejected by the CLI and library |
 | Reasoning-effort switching | Metering only; provider behaviour unverified |
 | Proxy authentication | Opt-in bearer token; required off loopback |
-| Company keys (identity + model allowlist) | Yes — opt-in via `--keys-db`; not a spend cap |
-| Per-key budget / spend cap | No — not implemented |
+| Company keys (identity + model allowlist) | Yes — opt-in via `--keys-db` |
+| Per-key budget, model sub-caps, RPM/TPM | Yes — enforced by the gateway, `docs/BUDGET.md` |
 | Prompt / response text storage | No — never stored |
 | Multi-user or remote hardening | Not supported — single user |
 
@@ -196,9 +196,11 @@ Three client protocols are metered. Any other path is relayed unlogged.
   disabled), so it cannot change which model a provider actually runs.
 - It does not prove that a provider honoured a requested reasoning effort; the
   log records the request only.
-- It does not enforce a spend cap. Company keys identify a caller and restrict
-  which models it may reach, but nothing yet refuses a request because a budget
-  is exhausted.
+- It does not promise that a remaining budget is exact. A key's spend is
+  reserved as a flat per-request ceiling and settled at the request's real cost,
+  so the request that exhausts a budget can overshoot it by at most
+  `actual - ceiling`, and a budget smaller than one ceiling admits nothing. See
+  [`docs/BUDGET.md`](docs/BUDGET.md).
 
 
 ## Documentation

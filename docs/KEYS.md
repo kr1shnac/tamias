@@ -5,9 +5,9 @@ proxy?" and nothing else: every holder is indistinguishable from every other.
 A company needs per-caller identity, so the gateway can also authenticate with
 **company keys** minted by `tamias admin key`.
 
-This layer is **identity only**. It does not track or limit spend. Budget
-enforcement is a separate, not-yet-built increment, and nothing here should be
-read as saying otherwise.
+A key can also carry spend limits — a budget, per-model sub-caps, and per-minute
+request and token rates — enforced by the gateway itself. Those are described in
+[`BUDGET.md`](BUDGET.md); this document covers identity and the model allowlist.
 
 ## What a key is
 
@@ -81,8 +81,9 @@ not be covered, and no such provider is supported.
 
 ## Limits
 
-- **No budget, spend cap or rate limit.** A key restricts *which* models a
-  caller may reach, not *how much* it may spend.
+- **Budgets, per-model sub-caps, RPM and TPM are enforced** by the gateway, by
+  reserve-then-settle, before a request reaches a provider. See
+  [`BUDGET.md`](BUDGET.md) for what is and is not promised.
 - Revocation is immediate for new requests; it does not cancel a request already
   in flight.
 - Keys are managed on the gateway host by an operator with filesystem access to

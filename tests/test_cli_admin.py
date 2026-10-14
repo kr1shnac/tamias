@@ -200,3 +200,68 @@ def test_a_non_loopback_bind_still_needs_some_authentication(
     )
     assert code == 1
     assert "non-loopback bind requires authentication" in capsys.readouterr().err
+
+
+def test_admin_key_issue_records_rate_limits_and_sub_caps(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "keys.db"
+    code = cli.main(
+        [
+            "admin",
+            "key",
+            "issue",
+            "--keys-db",
+            str(db),
+            "--label",
+            "alice",
+            "--budget-usd",
+            "5.00",
+            "--period-days",
+            "30",
+            "--rpm",
+            "60",
+            "--tpm",
+            "200000",
+            "--model-cap",
+            f"{MODEL}=1.50",
+        ]
+    )
+    assert code == 0
+    issued = capsys.readouterr().out
+    assert field(issued, "budget") == "$5.00 per 30 days"
+    assert field(issued, "rpm") == "60"
+    assert field(issued, "tpm") == "200000"
+    assert field(issued, "caps") == f"{MODEL}=$1.50"
+
+    key_id = field(issued, "key_id")
+    assert cli.main(["admin", "key", "list", "--keys-db", str(db)]) == 0
+    listing = capsys.readouterr().out
+    line = next(row for row in listing.splitlines() if key_id in row)
+    assert "rpm=60" in line
+    assert "tpm=200000" in line
+    assert f"caps={MODEL}=$1.50" in line
+
+
+def test_admin_key_issue_without_limits_prints_placeholders(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "keys.db"
+    assert cli.main(["admin", "key", "issue", "--keys-db", str(db), "--label", "bob"]) == 0
+    issued = capsys.readouterr().out
+    assert field(issued, "budget") == "(none)"
+    assert field(issued, "rpm") == "-"
+    assert field(issued, "tpm") == "-"
+    assert field(issued, "caps") == "-"
+
+
+def test_admin_key_issue_refuses_a_malformed_model_cap(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "keys.db"
+    code = cli.main(
+        ["admin", "key", "issue", "--keys-db", str(db), "--model-cap", "no-equals-sign"]
+    )
+    assert code == 1
+    assert "MODEL=USD" in capsys.readouterr().err
+
+
+def test_admin_key_issue_refuses_a_non_positive_rate(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "keys.db"
+    code = cli.main(["admin", "key", "issue", "--keys-db", str(db), "--rpm", "0"])
+    assert code == 1
+    assert "rpm" in capsys.readouterr().err

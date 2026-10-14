@@ -37,9 +37,10 @@ USD and tokens -- so spend, sub-caps and both windows are aggregates over one
 append-only table.  Reservations are rows in ``budget_reservations``; since every
 request reserves the same money ceiling, a key's outstanding rows are
 interchangeable for the money arithmetic, and one is released per settlement.  A
-row a crashed or unfinished request never settles is ignored -- and swept --
-after :data:`DEFAULT_RESERVATION_TTL_SECONDS`, so a leak cannot lock a key out
-forever.
+row a crashed or unfinished request never settles is ignored, and dropped, after
+:data:`DEFAULT_RESERVATION_TTL_SECONDS`: it stops counting against the key the
+moment it is stale, and the key's next request deletes it, so a leak cannot
+lock a key out and cannot grow the table without bound.
 
 Limits are stated here rather than hidden:
 
@@ -58,6 +59,13 @@ Limits are stated here rather than hidden:
 * **The USD limits require a priced model.**  A model the price sheet cannot
   price (:func:`tamias.pricing.can_price`) produces a cost of UNKNOWN, which a
   budget cannot spend against, so a key with a USD limit may not reach it.
+* **An unmeasured cost is charged the ceiling.**  When the price sheet cannot
+  finish the arithmetic for a request's usage -- a partial usage object, or cache
+  rates the sheet does not quote -- the request settles at the ceiling it
+  reserved, not at zero, because a budget that reads an unmeasured request as
+  free is not a ceiling at all.  This is deliberately conservative: an operator
+  whose sheet lacks a rate will see the budget move faster than their true spend
+  until they quote it.
 * **Only the metered routes are counted.**  A key carrying any limit may not use
   the unlogged passthrough route when its body names a model: the gateway will
   not claim to bound what it does not measure.
@@ -272,9 +280,16 @@ def _tokens_of(usage: Usage | None) -> int | None:
     return sum(parts) if parts else None
 
 
-def _usd_of(cost: CostBreakdown | None) -> Decimal:
+def _usd_of(cost: CostBreakdown | None) -> Decimal | None:
+    """The cost's USD, or None when it could not be computed.
+
+    A ``CostBreakdown`` whose ``usd`` is None is not a free request: it is one the
+    price sheet could not finish the arithmetic for.  Returning None keeps that
+    distinction, so settlement can charge the ceiling instead of pretending the
+    request cost nothing.
+    """
     if cost is None or cost.usd is None:
-        return Decimal(0)
+        return None
     return Decimal(str(cost.usd))
 
 
@@ -393,12 +408,24 @@ class BudgetLedger:
         sub-cap, then the key's total budget.
         """
         moment = now or datetime.now(UTC)
+        # Two cutoffs, because they answer two different questions: a money
+        # reservation is held until it is settled or the TTL expires, while a
+        # rate window only asks what happened in the last minute.
         window = now_stamp(moment - timedelta(seconds=RATE_WINDOW_SECONDS))
+        held = now_stamp(moment - timedelta(seconds=self._ttl))
         since = None if limits.period_days is None else now_stamp(
             moment - timedelta(days=limits.period_days)
         )
         ceiling = to_micros(ceiling_usd)
         with self._lock:
+            # A hold left behind by a request that never settled would otherwise
+            # accumulate for the key's lifetime.  Dropping this key's own stale
+            # rows here keeps the table bounded and self-healing, without a
+            # background task or a sweep of rows belonging to other keys.
+            self._conn.execute(
+                f"DELETE FROM {RESERVATION_TABLE} WHERE key_id = ? AND created_at < ?",
+                (key_id, held),
+            )
             if limits.rpm is not None:
                 used = self.requests_in_window(key_id, window)
                 if used >= limits.rpm:
@@ -418,7 +445,7 @@ class BudgetLedger:
             cap = limits.model_cap(model)
             if cap is not None:
                 spent = self.spend_micros(key_id, since, model)
-                reserved = self.reserved_micros(key_id, window, model)
+                reserved = self.reserved_micros(key_id, held, model)
                 if spent + reserved + ceiling > to_micros(cap):
                     return Reserve(
                         allowed=False,
@@ -430,7 +457,7 @@ class BudgetLedger:
                     )
             if limits.budget_usd is not None:
                 spent = self.spend_micros(key_id, since)
-                reserved = self.reserved_micros(key_id, window)
+                reserved = self.reserved_micros(key_id, held)
                 if spent + reserved + ceiling > to_micros(limits.budget_usd):
                     return Reserve(
                         allowed=False,
@@ -453,7 +480,7 @@ class BudgetLedger:
         self,
         key_id: str,
         *,
-        usd: Decimal,
+        usd: Decimal | None,
         model: str | None = None,
         tokens: int | None = None,
         now: datetime | None = None,
@@ -464,13 +491,22 @@ class BudgetLedger:
         settling one model's request cannot release another's sub-cap.  When the
         upstream reported no token count, the reservation's estimate is recorded
         instead of a bare zero.  Returns whether a reservation was released.
+
+        The reservation's own age is irrelevant here: it is released because the
+        request it belonged to ended, not because a window passed.
+
+        ``usd`` of None means the cost could not be computed.  The request is then
+        charged the ceiling it reserved rather than zero, because a budget that
+        reads an unmeasured request as free is not a ceiling at all -- the same
+        rule the token estimate follows.
         """
         moment = now or datetime.now(UTC)
-        micros = to_micros(usd)
         with self._lock:
             row = self._take_reservation(key_id, model)
-            if row is None:
-                row = self._take_reservation(key_id, None)
+            if usd is None:
+                micros = int(row["ceiling_micros"]) if row is not None else 0
+            else:
+                micros = to_micros(usd)
             if tokens is None:
                 tokens = int(row["token_estimate"]) if row is not None else 0
             self._conn.execute(
@@ -482,11 +518,33 @@ class BudgetLedger:
             return row is not None
 
     def _take_reservation(self, key_id: str, model: str | None) -> sqlite3.Row | None:
-        sql = (
-            f"SELECT reservation_id, token_estimate FROM {RESERVATION_TABLE} "
-            "WHERE key_id = ? AND model IS ? ORDER BY reservation_id LIMIT 1"
-        )
-        row = self._conn.execute(sql, (key_id, model)).fetchone()
+        """Remove one of the key's reservations, preferring the settled model.
+
+        A model-scoped sub-cap needs the settle to release the *same* model's
+        hold, or one model's spending would silently free another's.  The oldest
+        hold is taken next, because a settlement must release something: an
+        upstream that reports a different model than the request named (or none
+        at all) would otherwise leak a reservation for the full TTL.
+        """
+        columns = "reservation_id, token_estimate, ceiling_micros"
+        if model is None:
+            row = self._conn.execute(
+                f"SELECT {columns} FROM {RESERVATION_TABLE} "
+                "WHERE key_id = ? AND model IS NULL ORDER BY reservation_id LIMIT 1",
+                (key_id,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                f"SELECT {columns} FROM {RESERVATION_TABLE} "
+                "WHERE key_id = ? AND model = ? ORDER BY reservation_id LIMIT 1",
+                (key_id, model),
+            ).fetchone()
+        if row is None:
+            row = self._conn.execute(
+                f"SELECT {columns} FROM {RESERVATION_TABLE} "
+                "WHERE key_id = ? ORDER BY reservation_id LIMIT 1",
+                (key_id,),
+            ).fetchone()
         if row is not None:
             self._conn.execute(
                 f"DELETE FROM {RESERVATION_TABLE} WHERE reservation_id = ?",
@@ -494,19 +552,9 @@ class BudgetLedger:
             )
         return row
 
-    def sweep(self, now: datetime | None = None) -> int:
-        """Drop reservations older than the TTL; returns how many were dropped."""
-        moment = now or datetime.now(UTC)
-        cutoff = now_stamp(moment - timedelta(seconds=self._ttl))
-        with self._lock:
-            cursor = self._conn.execute(
-                f"DELETE FROM {RESERVATION_TABLE} WHERE created_at < ?", (cutoff,)
-            )
-            self._conn.commit()
-            return cursor.rowcount
-
-
-def _measurement(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Decimal, str, int | None]:
+def _measurement(
+    args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[Decimal | None, str, int | None]:
     """The USD, model and token count a ``log_request`` row carries.
 
     ``log_request`` takes usage, cost and model positionally in every caller this
@@ -514,7 +562,7 @@ def _measurement(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Decimal
     found by type rather than by position so a signature change cannot silently
     settle zero.  The model is the only string of the three that cannot be told
     from its neighbours by type, so it is read positionally, guarded by an
-    ``isinstance`` check.
+    ``isinstance`` check.  A USD of None means the cost was UNKNOWN.
     """
     cost = kwargs.get("cost")
     if not isinstance(cost, CostBreakdown):

@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A capability registry for models (`src/tamias/registry.py`): a strict TOML
+  catalogue the router may never choose outside, carrying capabilities only.
+- A real reasoning-effort axis, decoupled from model routing: `--effort-mode`
+  `off` | `meter` | `apply`, applied only for a model the registry vouches for.
+- Company keys (`tamias admin key`, `serve --keys-db`): per-caller identity with
+  a model allowlist enforced before forwarding.
+- Per-key limits enforced by the gateway itself: a USD budget over a period,
+  per-model sub-caps, and per-minute request and token rates. Money uses
+  reserve-then-settle; refusals are 402 for money and 429 for rate. See
+  `docs/BUDGET.md`.
+
 ## [0.1.0a4] - 2026-10-10
 
 ### Added

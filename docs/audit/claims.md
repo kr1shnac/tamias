@@ -31,7 +31,7 @@
 | Free models cost $0 only if you say so. A model with no entry in your price sheet is UNKNOWN, not free. | README.md:76-78; pricing.py:_parse_model | Missing model → sheet.get returns None → compute_cost usd=None. | VERIFIED |
 | To record a genuinely free model, give it rates of 0. | README.md:78 | All-0 ModelPrice triggers "free model" branch. | VERIFIED |
 | No per-conversation session tracking from OpenCode. Rows are grouped by an x-tamias-session header if one arrives; otherwise they land in a single default session. | README.md:80-81; derive_session_id | No header → SHA256(salt + auth + first_sys + first_user) → auto- prefix. | VERIFIED |
-| No cost control, budgets, rate limits or alerts. It reports; it does not cap spend. | README.md:82-83 | No budget/cap code in proxy, store, or CLI. | VERIFIED |
+| No cost control, budgets, rate limits or alerts. It reports; it does not cap spend. | README.md:82-83 | **Superseded 2026-10-15**: `src/tamias/budget.py` now enforces per-key budgets, per-model sub-caps and RPM/TPM via reserve-then-settle; README and `docs/BUDGET.md` updated. | SUPERSEDED |
 | tamias forwards Authorization untouched, so the key reaches Zen unchanged. | OPENCODE.md:38; proxy.py:forward_headers | `forward_headers` does not drop Authorization; LIVE_CHECK.md confirms no key in DB. | VERIFIED |
 | tamias appends `/v1/chat/completions` to `--upstream`, so the upstream URL it calls is `https://opencode.ai/zen/v1/chat/completions`. | OPENCODE.md:52-54; proxy.py:53 | CHAT_PATH = "/v1/chat/completions" appended to base URL. | VERIFIED |
 | Do not include `/v1` in `--upstream`. | OPENCODE.md:53-54; proxy.py | Deliberate: appending /v1/chat/completions would double-add it. | VERIFIED |
@@ -48,7 +48,7 @@
 | Three client paths produce log rows (chat completions, Messages, Responses); every other path is relayed by a catch-all without being logged. | README.md:153-160; proxy.py:799-802 | Only the three adapter routes call plan()/record(); the passthrough route does not. | VERIFIED |
 | The Anthropic adapter has never been run against the real Anthropic API; it is wired into `tamias serve` and unit-tested against a mock only. | CHANGELOG.md:54-55 | `OPENCODE.md` and `anthropic_adapter.py` scope. | VERIFIED |
 | Sessions are grouped by an `x-tamias-session` header. Clients that do not send one — OpenCode, as far as the documentation shows — land in a single `default` session. | CHANGELOG.md:57; derive_session_id | Header wins over derivation; no header → auto-derived session. | VERIFIED |
-| No budgets, caps, alerts or spend controls. | CHANGELOG.md:58 | No such code in the project. | VERIFIED |
+| No budgets, caps, alerts or spend controls. | CHANGELOG.md:129;183 | True of releases 0.1.0a2 and 0.1.0a1, whose notes those lines are; the earlier `CHANGELOG.md:58` here pointed at a `tamias run` bullet. **Superseded 2026-10-15** by `src/tamias/budget.py` (per-key budgets, sub-caps, RPM/TPM) and its tests. | SUPERSEDED |
 | unknown is NEVER treated as 0. | CONTRACT.md:8 | Contract statement; enforced in `to_usage`, `compute_cost`, report. | VERIFIED |
 | Type hints everywhere. | CONTRACT.md:8 | Code has type hints throughout. | VERIFIED |
 | Request body is forwarded byte-identical unless router_mode=='active'. | CONTRACT.md:10; tests/test_proxy.py:181-191 | `outbound()` returns raw unchanged in shadow; active rewrites model. | VERIFIED |
