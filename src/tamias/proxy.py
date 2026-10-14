@@ -21,6 +21,12 @@ way rather than trusted verbatim.  Only the digest is kept, so the log records
 which conversation a request belonged to without recording any of the
 conversation.
 
+When ``key_store`` is given, the gateway authenticates each request with a
+company key (``Authorization: Bearer vk-...``) from :mod:`tamias.keys`,
+attaches that identity to the request, and refuses any model the key's
+allowlist does not name.  The key's project, when it has one, overrides a
+client-supplied project header, so a caller cannot relabel its spend.
+
 :func:`create_app` also registers the Anthropic Messages route, by calling
 :func:`tamias.anthropic_adapter.register_routes`, so ``POST /v1/messages`` is
 logged on the same terms as ``POST /v1/chat/completions`` rather than falling
@@ -49,6 +55,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from tamias import anthropic_adapter, pricing, responses_adapter, router, session
 from tamias import sse as sse_module
 from tamias.effort import EFFORT_MODES, apply_effort
+from tamias.keys import KeyStore
 from tamias.pricing import PriceSheet
 from tamias.registry import Registry, empty_registry
 from tamias.router import RouterConfig
@@ -241,6 +248,40 @@ def _unauthorized() -> JSONResponse:
     )
 
 
+def _forbidden_model(model: str, allowed: tuple[str, ...]) -> JSONResponse:
+    """403 for a key whose allowlist does not name this model."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": (
+                    f"model {model!r} is not allowed for this key "
+                    f"(allowed: {', '.join(allowed)})"
+                ),
+                "type": "invalid_request_error",
+            }
+        },
+        status_code=403,
+    )
+
+
+def _body_model(raw: bytes) -> str | None:
+    """The model named in a JSON request body, or None.
+
+    Used by the passthrough route, which may carry any provider's body: when
+    there is a string ``model`` field it must clear the caller's allowlist, and
+    when there is not, there is nothing to check.
+    """
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if isinstance(payload, dict):
+        model = payload.get("model")
+        if isinstance(model, str) and model:
+            return model
+    return None
+
+
 def _payload_too_large() -> JSONResponse:
     return JSONResponse(
         {
@@ -387,6 +428,7 @@ def create_app(
     effort_style: str = "openrouter",
     effort_mode: str = "off",
     registry: Registry | None = None,
+    key_store: KeyStore | None = None,
 ) -> FastAPI:
     if router_mode == "active":
         raise ValueError("active routing is disabled for the public alpha; use shadow or off")
@@ -433,19 +475,29 @@ def create_app(
     app.state.effort_style = effort_style
     app.state.effort_mode = effort_mode
     app.state.registry = capabilities
+    app.state.key_store = key_store
     app.state.sessions = table
 
-    if auth_token is not None:
+    if auth_token is not None or key_store is not None:
         @app.middleware("http")
         async def require_auth(request: Request, call_next: Any) -> Response:
             header = request.headers.get("authorization", "")
             scheme, separator, credential = header.partition(" ")
-            if (
-                separator
-                and scheme.lower() == "bearer"
-                and hmac.compare_digest(credential, auth_token)
-            ):
+            if not separator or scheme.lower() != "bearer":
+                return _unauthorized()
+            if auth_token is not None and hmac.compare_digest(credential, auth_token):
+                # The operator's shared token carries no identity of its own.
+                request.state.key = None
                 return await call_next(request)
+            if key_store is not None:
+                key = key_store.authenticate(credential)
+                if key is not None:
+                    request.state.key = key
+                    if key.project is not None:
+                        # The key's project is authoritative: a client cannot
+                        # relabel its spend with a header it chose.
+                        request.state.project = key.project
+                    return await call_next(request)
             return _unauthorized()
 
     if max_body_bytes is not None:
@@ -625,6 +677,22 @@ def create_app(
             router_mode=router_mode,
         )
 
+    def authorize(request: Request, model: object) -> Response | None:
+        """None when the caller may use ``model``, else a 403 response.
+
+        A key with an empty allowlist is unrestricted.  A key that names models
+        may reach only those.  The check is on the model named in the request
+        body, so it binds the chat, messages, responses and passthrough routes
+        alike rather than one handler's idea of "the model".
+        """
+        key = getattr(request.state, "key", None)
+        if key is None or key.unrestricted:
+            return None
+        named = model if isinstance(model, str) and model and model != UNKNOWN_MODEL else None
+        if named is None or named in key.models:
+            return None
+        return _forbidden_model(named, key.models)
+
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
         try:
             async for chunk in upstream.aiter_bytes():
@@ -646,6 +714,9 @@ def create_app(
             dict(request.headers.items()), body, session_salt
         )
         model_requested = _model_name(body.get("model"))
+        denied = authorize(request, model_requested)
+        if denied is not None:
+            return denied
         streaming = bool(body.get("stream"))
         requested_reasoning = body.get("reasoning")
         effort_requested = (
@@ -826,6 +897,9 @@ def create_app(
     @app.api_route("/{path:path}", methods=PASSTHROUGH_METHODS)
     async def passthrough(path: str, request: Request) -> Response:
         raw = await request.body()
+        denied = authorize(request, _body_model(raw))
+        if denied is not None:
+            return denied
         outgoing = client.build_request(
             request.method,
             f"{base}/{path}",
@@ -845,8 +919,22 @@ def create_app(
     # client put on app.state above, so both routes share one connection pool
     # and one lifespan.
     anthropic_adapter.register_routes(
-        app, upstream_url, store, sheet, router_mode, config=routing, session_salt=session_salt
+        app,
+        upstream_url,
+        store,
+        sheet,
+        router_mode,
+        config=routing,
+        session_salt=session_salt,
+        authorize=authorize,
     )
-    responses_adapter.register_routes(app, upstream_url, store, sheet, session_salt=session_salt)
+    responses_adapter.register_routes(
+        app,
+        upstream_url,
+        store,
+        sheet,
+        session_salt=session_salt,
+        authorize=authorize,
+    )
 
     return app

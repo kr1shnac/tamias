@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -353,6 +353,7 @@ def register_routes(
     transport: httpx.AsyncBaseTransport | None = None,
     config: RouterConfig | None = None,
     session_salt: bytes | None = None,
+    authorize: Callable[[Request, object], Response | None] | None = None,
 ) -> FastAPI:
     """Add the Anthropic Messages route to ``app`` and return it.
 
@@ -543,6 +544,10 @@ def register_routes(
             dict(request.headers.items()), body, session_salt, wire=session.WIRE_ANTHROPIC
         )
         model_requested = _model_name(body.get("model"))
+        if authorize is not None:
+            denied = authorize(request, body.get("model"))
+            if denied is not None:
+                return denied
         decision = plan(session_id, body, model_requested)
 
         outgoing = client.build_request(

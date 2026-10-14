@@ -41,6 +41,7 @@ from tamias.config import (
     preset_upstream,
 )
 from tamias.effort import EFFORT_MODES
+from tamias.keys import KeyStore
 from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
 from tamias.pricing_fetch import (
     OPENROUTER_MODELS_URL,
@@ -80,6 +81,14 @@ DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_CONCURRENCY_ENV = "TAMIAS_MAX_CONCURRENCY"
 DEFAULT_MAX_CONCURRENCY = 64
 DOCTOR_DB_SIZE_WARN_MB = 500
+
+# Company keys live outside the request log by default: the log is
+# append-only metering, the key table is mutable control state, and a
+# deployment may want to keep (or discard) the two separately.  ``serve``
+# does not read this default - key authentication is opt-in via --keys-db -
+# so no server silently starts demanding keys.
+DEFAULT_KEYS_DB = "keys.db"
+KEYS_DB_ENV = "TAMIAS_KEYS_DB"
 
 # store.Store owns the schema; these are the columns the report reads, with a
 # little tolerance for a renamed table or column.
@@ -520,6 +529,7 @@ def build_serve_app(
     effort_style: str = "openrouter",
     effort_mode: str = "off",
     registry: Registry | None = None,
+    keys_db: str | None = None,
     auth_token: str | None = None,
     max_body_bytes: int | None = None,
     max_concurrency: int | None = None,
@@ -535,6 +545,7 @@ def build_serve_app(
 
     sheet = load_price_sheet(prices)
     store = Store(db)
+    key_store = KeyStore(keys_db) if keys_db else None
     config = router_config or RouterConfig(
         easy_tools=EASY_TOOLS,
         cheap_model=cheap_model,
@@ -553,6 +564,7 @@ def build_serve_app(
         effort_style=effort_style,
         effort_mode=effort_mode,
         registry=registry,
+        key_store=key_store,
         auth_token=auth_token,
         max_body_bytes=max_body_bytes,
         max_concurrency=max_concurrency,
@@ -653,6 +665,61 @@ def config_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _default_keys_db() -> str:
+    """The key store ``tamias admin`` uses when ``--keys-db`` is omitted."""
+    configured = os.environ.get(KEYS_DB_ENV)
+    if configured:
+        return configured
+    return str(Path.home() / ".tamias" / DEFAULT_KEYS_DB)
+
+
+def admin_command(args: argparse.Namespace) -> int:
+    """``tamias admin key issue|list|revoke``.
+
+    The token is printed here and nowhere else: only its SHA-256 hash is
+    stored, so no later command can recover it, and ``list`` never shows it.
+    """
+    store = KeyStore(args.keys_db)
+    try:
+        if args.key_command == "issue":
+            key, token = store.issue(
+                label=args.label, project=args.project, models=args.model
+            )
+            print(f"key_id:  {key.key_id}")
+            print(f"token:   {token}")
+            print(f"label:   {key.label or '-'}")
+            print(f"project: {key.project or '-'}")
+            print(f"models:  {', '.join(key.models) if key.models else '(all)'}")
+            print(
+                "Store the token now: only its hash is kept, so it cannot "
+                "be shown again.",
+                file=sys.stderr,
+            )
+            return 0
+        if args.key_command == "list":
+            keys = store.list()
+            if not keys:
+                print("no keys")
+                return 0
+            for key in keys:
+                state = "revoked" if key.revoked else "active"
+                models = ", ".join(key.models) if key.models else "(all)"
+                print(
+                    f"{key.key_id}\t{state}\t{key.label or '-'}\t"
+                    f"project={key.project or '-'}\tmodels={models}"
+                )
+            return 0
+        if args.key_command == "revoke":
+            if store.revoke(args.key_id):
+                print(f"revoked {args.key_id}")
+                return 0
+            print(f"tamias admin: no active key {args.key_id!r}", file=sys.stderr)
+            return 1
+    finally:
+        store.close()
+    return 2
+
+
 def serve(args: argparse.Namespace) -> int:
     """Run the proxy under uvicorn until interrupted."""
     import uvicorn
@@ -740,6 +807,7 @@ def serve(args: argparse.Namespace) -> int:
         effort_style=args.effort_style,
         effort_mode=args.effort_mode,
         registry=_load_registry(args),
+        keys_db=args.keys_db,
         auth_token=auth_token,
         max_body_bytes=max_body_bytes,
         max_concurrency=max_concurrency,
@@ -766,6 +834,13 @@ def serve(args: argparse.Namespace) -> int:
         f"max concurrent requests {max_concurrency}",
         file=sys.stderr,
     )
+    if args.keys_db:
+        print(
+            "tamias serve: company-key auth is ON: clients must send "
+            "Authorization: Bearer <vk-...> and may reach only the models "
+            f"their key lists (store {args.keys_db})",
+            file=sys.stderr,
+        )
     if args.inject_usage:
         print(
             "tamias serve: --inject-usage is ON: streaming requests are re-encoded "
@@ -1101,6 +1176,8 @@ def run(args: argparse.Namespace) -> int:
         serve_command.extend(("--effort-mode", args.effort_mode))
     if args.registry:
         serve_command.extend(("--registry", args.registry))
+    if args.keys_db:
+        serve_command.extend(("--keys-db", args.keys_db))
 
     try:
         proxy_process = subprocess.Popen(serve_command)
@@ -1228,6 +1305,13 @@ def build_parser() -> argparse.ArgumentParser:
         "model it lists (default: $TAMIAS_REGISTRY or ~/.tamias/models.toml)",
     )
     serve_parser.add_argument(
+        "--keys-db",
+        default=None,
+        help="enable company-key authentication from this SQLite key store; "
+        "clients must send a vk- key and may reach only the models it lists "
+        "(default: off, which leaves --auth-token or no auth)",
+    )
+    serve_parser.add_argument(
         "--effort-style",
         choices=("openrouter", "openai"),
         default="openrouter",
@@ -1297,6 +1381,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--mode", choices=ROUTER_MODES, default=None)
     run_parser.add_argument("--effort-mode", choices=EFFORT_MODES, default=None)
     run_parser.add_argument("--registry", default=None)
+    run_parser.add_argument("--keys-db", default=None)
     run_parser.add_argument("--project")
     run_parser.add_argument("--cheap-model", default="")
     run_parser.add_argument("--strong-model", default="")
@@ -1370,6 +1455,32 @@ def build_parser() -> argparse.ArgumentParser:
     prune_parser.add_argument(
         "--dry-run", action="store_true", help="print what would be deleted without deleting"
     )
+
+    admin_parser = sub.add_parser("admin", help="manage company API keys")
+    admin_sub = admin_parser.add_subparsers(dest="admin_command", required=True)
+    key_parser = admin_sub.add_parser("key", help="issue, list or revoke company keys")
+    key_sub = key_parser.add_subparsers(dest="key_command", required=True)
+    issue_parser = key_sub.add_parser(
+        "issue", help="mint a key and print its token once"
+    )
+    issue_parser.add_argument(
+        "--keys-db", default=_default_keys_db(), help="path to the SQLite key store"
+    )
+    issue_parser.add_argument("--label", default="", help="who or what this key is for")
+    issue_parser.add_argument(
+        "--project", default=None, help="project the key's spend belongs to"
+    )
+    issue_parser.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        help="a model this key may use; repeat for several (default: any model)",
+    )
+    list_parser = key_sub.add_parser("list", help="list keys, never their secrets")
+    list_parser.add_argument("--keys-db", default=_default_keys_db())
+    revoke_parser = key_sub.add_parser("revoke", help="revoke a key by its key_id")
+    revoke_parser.add_argument("key_id")
+    revoke_parser.add_argument("--keys-db", default=_default_keys_db())
 
     config_parser = sub.add_parser("config", help="show the effective configuration")
     config_sub = config_parser.add_subparsers(dest="config_command", required=True)
@@ -1475,6 +1586,12 @@ def main(argv: list[str] | None = None) -> int:
         return prune(args)
     if args.command == "config":
         return config_command(args)
+    if args.command == "admin":
+        try:
+            return admin_command(args)
+        except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+            print(f"tamias admin: {exc}", file=sys.stderr)
+            return 1
     return 2
 
 

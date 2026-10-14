@@ -107,7 +107,7 @@ environment or config-file fallback; see Configuration above). Its available
 flags are `--provider`, `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--router-config`, `--cheap-model`, `--strong-model`, `--min-gap`,
 `--effort-mode`, `--registry`, `--effort-style`, `--inject-usage`,
-`--request-usage-cost`, `--auth-token`, `--tls-cert`, `--tls-key`,
+`--request-usage-cost`, `--auth-token`, `--keys-db`, `--tls-cert`, `--tls-key`,
 `--max-body-bytes`, `--max-concurrency`, and `--verbose`.
 
 Give `--tls-cert` and `--tls-key` together to serve HTTPS; the startup banner
@@ -124,6 +124,14 @@ and `TAMIAS_MAX_CONCURRENCY` (default 64). The log database can be trimmed with
 are also available); `tamias doctor` warns once the database passes 500 MB.
 `tamias --version` prints the single version shared by the package and the
 installed metadata.
+
+`--keys-db` turns on **company keys**: per-caller tokens minted with
+`tamias admin key issue` that carry a project and an optional model
+allowlist. A key is checked before the request is forwarded or logged; an
+unknown or revoked token gets 401, and a restricted key gets 403 for any
+model it does not list. The key's project overrides a client-supplied
+project header. Key auth is off unless `--keys-db` is given. This layer is
+identity only - it does **not** cap spend; see [`docs/KEYS.md`](docs/KEYS.md).
 
 
 Public alpha routing is limited to `shadow` and `off`; `active` routing is
@@ -172,6 +180,8 @@ Three client protocols are metered. Any other path is relayed unlogged.
 | Active routing (request rewriting) | No — rejected by the CLI and library |
 | Reasoning-effort switching | Metering only; provider behaviour unverified |
 | Proxy authentication | Opt-in bearer token; required off loopback |
+| Company keys (identity + model allowlist) | Yes — opt-in via `--keys-db`; not a spend cap |
+| Per-key budget / spend cap | No — not implemented |
 | Prompt / response text storage | No — never stored |
 | Multi-user or remote hardening | Not supported — single user |
 
@@ -186,6 +196,9 @@ Three client protocols are metered. Any other path is relayed unlogged.
   disabled), so it cannot change which model a provider actually runs.
 - It does not prove that a provider honoured a requested reasoning effort; the
   log records the request only.
+- It does not enforce a spend cap. Company keys identify a caller and restrict
+  which models it may reach, but nothing yet refuses a request because a budget
+  is exhausted.
 
 
 ## Documentation
@@ -200,6 +213,8 @@ Three client protocols are metered. Any other path is relayed unlogged.
 - [`docs/PRICING.md`](docs/PRICING.md) — how token counts become a dollar
   figure, and when the answer is UNKNOWN.
 - [`docs/EFFORT.md`](docs/EFFORT.md) — optional reasoning-effort switching.
+- [`docs/KEYS.md`](docs/KEYS.md) — company keys: per-caller identity and model
+  allowlists (identity only, not spend caps).
 - [`docs/PLATFORMS.md`](docs/PLATFORMS.md) — supported Python and OS, and the
   Windows database-permission caveat.
 - [`demo/RUNBOOK.md`](demo/RUNBOOK.md) — how to produce and read the two-arm

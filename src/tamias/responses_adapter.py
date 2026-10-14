@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -144,6 +144,7 @@ def register_routes(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     session_salt: bytes | None = None,
+    authorize: Callable[[Request, object], Response | None] | None = None,
 ) -> FastAPI:
     """Add the meter-only ``POST /v1/responses`` route to ``app``."""
     base = upstream_url.rstrip("/")
@@ -257,6 +258,10 @@ def register_routes(
             dict(request.headers.items()), body, session_salt, wire=session.WIRE_RESPONSES
         )
         model_requested = _model_name(body.get("model"))
+        if authorize is not None:
+            denied = authorize(request, body.get("model"))
+            if denied is not None:
+                return denied
         outgoing = client.build_request(
             "POST", base + RESPONSES_PATH, content=raw, headers=forward_headers(request)
         )
