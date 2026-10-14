@@ -767,10 +767,14 @@ def serve(args: argparse.Namespace) -> int:
         args.strong_model = cfg.strong_model
 
     auth_token = args.auth_token or os.environ.get(AUTH_TOKEN_ENV)
-    if not is_loopback(args.host) and auth_token is None:
+    # A wider bind needs *some* authentication.  Company keys count: requiring
+    # the shared --auth-token here would force every deployment beyond loopback
+    # to hand out an identity-less token that bypasses the model allowlist.
+    if not is_loopback(args.host) and auth_token is None and not args.keys_db:
         print(
             f"tamias serve: refusing to bind {args.host!r}: a non-loopback bind "
-            f"requires a bearer token. Set --auth-token or ${AUTH_TOKEN_ENV}.",
+            f"requires authentication. Set --auth-token or ${AUTH_TOKEN_ENV}, "
+            f"or configure company keys with --keys-db.",
             file=sys.stderr,
         )
         return 1
@@ -1350,7 +1354,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--auth-token",
         default=None,
         help=f"bearer token clients must send as Authorization: Bearer <token> "
-        f"(default: ${AUTH_TOKEN_ENV}; required for a non-loopback --host)",
+        f"(default: ${AUTH_TOKEN_ENV}; a non-loopback --host needs this or "
+        f"--keys-db)",
     )
     serve_parser.add_argument(
         "--tls-cert",

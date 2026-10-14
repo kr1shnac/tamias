@@ -130,3 +130,73 @@ async def test_serve_built_app_enforces_keys_when_keys_db_is_given(
     finally:
         app.state.store.close()
         app.state.key_store.close()
+
+
+def test_a_non_loopback_bind_may_use_keys_instead_of_a_shared_token(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Keys are authentication: they must satisfy the wider-bind gate.
+
+    Requiring the identity-less shared token here would force every company
+    deployment beyond loopback to hand out a credential that bypasses the
+    model allowlist.
+    """
+    prices = tmp_path / "prices.toml"
+    prices.write_text(PRICES, encoding="utf-8")
+    keys = tmp_path / "keys.db"
+    calls: list[tuple[str, int]] = []
+
+    class _FakeUvicorn:
+        @staticmethod
+        def run(app, host: str, port: int, log_level: str, **kwargs: object) -> None:
+            calls.append((host, int(port)))
+
+    monkeypatch.setitem(sys.modules, "uvicorn", _FakeUvicorn)
+    code = cli.main(
+        [
+            "serve",
+            "--upstream",
+            UPSTREAM_URL,
+            "--prices",
+            str(prices),
+            "--db",
+            str(tmp_path / "requests.db"),
+            "--host",
+            "0.0.0.0",
+            "--allow-non-loopback",
+            "--keys-db",
+            str(keys),
+        ]
+    )
+    assert code == 0
+    assert calls == [("0.0.0.0", 8000)]
+
+
+def test_a_non_loopback_bind_still_needs_some_authentication(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    prices = tmp_path / "prices.toml"
+    prices.write_text(PRICES, encoding="utf-8")
+
+    class _FakeUvicorn:
+        @staticmethod
+        def run(app, host: str, port: int, log_level: str, **kwargs: object) -> None:
+            raise AssertionError("a refused bind must not start the server")
+
+    monkeypatch.setitem(sys.modules, "uvicorn", _FakeUvicorn)
+    code = cli.main(
+        [
+            "serve",
+            "--upstream",
+            UPSTREAM_URL,
+            "--prices",
+            str(prices),
+            "--db",
+            str(tmp_path / "requests.db"),
+            "--host",
+            "0.0.0.0",
+            "--allow-non-loopback",
+        ]
+    )
+    assert code == 1
+    assert "non-loopback bind requires authentication" in capsys.readouterr().err
