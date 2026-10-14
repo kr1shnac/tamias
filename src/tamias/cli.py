@@ -41,7 +41,7 @@ from tamias.config import (
     preset_upstream,
 )
 from tamias.effort import EFFORT_MODES
-from tamias.keys import KeyStore
+from tamias.keys import KeysError, KeyStore
 from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
 from tamias.pricing_fetch import (
     OPENROUTER_MODELS_URL,
@@ -683,6 +683,12 @@ def _describe_budget(key: Any) -> str:
     return f"${key.budget_usd} per {key.period_days} days"
 
 
+def _describe_caps(key: Any) -> str:
+    if not key.model_caps:
+        return "-"
+    return ",".join(f"{name}=${cap}" for name, cap in key.model_caps)
+
+
 def _fmt_ceiling(value: object) -> str:
     from tamias.budget import DEFAULT_REQUEST_CEILING_USD, parse_usd
 
@@ -699,12 +705,21 @@ def admin_command(args: argparse.Namespace) -> int:
     store = KeyStore(args.keys_db)
     try:
         if args.key_command == "issue":
+            caps: list[tuple[str, str]] = []
+            for item in args.model_cap:
+                model, separator, amount = str(item).partition("=")
+                if not separator or not model.strip() or not amount.strip():
+                    raise KeysError(f"--model-cap wants MODEL=USD, got {item!r}")
+                caps.append((model.strip(), amount.strip()))
             key, token = store.issue(
                 label=args.label,
                 project=args.project,
                 models=args.model,
                 budget_usd=args.budget_usd,
                 period_days=args.period_days,
+                rpm=args.rpm,
+                tpm=args.tpm,
+                model_caps=caps,
             )
             print(f"key_id:  {key.key_id}")
             print(f"token:   {token}")
@@ -712,6 +727,9 @@ def admin_command(args: argparse.Namespace) -> int:
             print(f"project: {key.project or '-'}")
             print(f"models:  {', '.join(key.models) if key.models else '(all)'}")
             print(f"budget:  {_describe_budget(key)}")
+            print(f"rpm:     {key.rpm if key.rpm is not None else '-'}")
+            print(f"tpm:     {key.tpm if key.tpm is not None else '-'}")
+            print(f"caps:    {_describe_caps(key)}")
             print(
                 "Store the token now: only its hash is kept, so it cannot "
                 "be shown again.",
@@ -729,7 +747,8 @@ def admin_command(args: argparse.Namespace) -> int:
                 print(
                     f"{key.key_id}\t{state}\t{key.label or '-'}\t"
                     f"project={key.project or '-'}\tmodels={models}\t"
-                    f"budget={_describe_budget(key)}"
+                    f"budget={_describe_budget(key)}\trpm={key.rpm or '-'}\t"
+                    f"tpm={key.tpm or '-'}\tcaps={_describe_caps(key)}"
                 )
             return 0
         if args.key_command == "revoke":
@@ -1515,6 +1534,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     issue_parser.add_argument("--budget-usd", default=None)
     issue_parser.add_argument("--period-days", type=int, default=None)
+    issue_parser.add_argument("--rpm", type=int, default=None)
+    issue_parser.add_argument("--tpm", type=int, default=None)
+    issue_parser.add_argument(
+        "--model-cap",
+        action="append",
+        default=[],
+        metavar="MODEL=USD",
+        help="a per-model USD sub-cap; repeat for several",
+    )
     list_parser = key_sub.add_parser("list", help="list keys, never their secrets")
     list_parser.add_argument("--keys-db", default=_default_keys_db())
     revoke_parser = key_sub.add_parser("revoke", help="revoke a key by its key_id")

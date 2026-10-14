@@ -545,7 +545,7 @@ def register_routes(
         )
         model_requested = _model_name(body.get("model"))
         if authorize is not None:
-            denied = authorize(request, body.get("model"))
+            denied = authorize(request, body.get("model"), raw)
             if denied is not None:
                 return denied
         decision = plan(session_id, body, model_requested)

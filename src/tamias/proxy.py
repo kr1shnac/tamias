@@ -66,8 +66,10 @@ from tamias import sse as sse_module
 from tamias.budget import (
     CURRENT_KEY_ID,
     DEFAULT_REQUEST_CEILING_USD,
+    RATE_WINDOW_SECONDS,
     BudgetedLog,
-    BudgetState,
+    Reserve,
+    estimate_tokens,
     parse_usd,
 )
 from tamias.effort import EFFORT_MODES, apply_effort
@@ -287,25 +289,49 @@ def _forbidden_model(model: str, allowed: tuple[str, ...]) -> JSONResponse:
     )
 
 
-def _payment_required(key: Key, ceiling: Decimal, state: BudgetState) -> JSONResponse:
-    """402 for a key whose budget cannot afford one more request.
+def _payment_required(key: Key, ceiling: Decimal, reserve: Reserve) -> JSONResponse:
+    """402 for a key that cannot afford one more request.
 
     The numbers are the gateway's own ledger -- settled spend, money held by
     in-flight requests, and what one more request would need -- so the refusal
-    states arithmetic the caller and the operator can both check.
+    states arithmetic the caller and the operator can both check.  ``model_cap``
+    names the model's own sub-cap; ``budget`` is the key's total.
     """
+    what = "budget" if reserve.reason == "budget" else f"{reserve.model!r} sub-cap"
     return JSONResponse(
         {
             "error": {
                 "message": (
-                    f"budget exhausted for key {key.key_id}: {state.spent_usd} spent, "
-                    f"{state.reserved_usd} reserved, {state.remaining_usd} left, "
+                    f"{what} exhausted for key {key.key_id}: {reserve.spent_usd} spent, "
+                    f"{reserve.reserved_usd} reserved, {reserve.remaining_usd} left, "
                     f"{ceiling} needed for one request"
                 ),
                 "type": "insufficient_quota",
             }
         },
         status_code=402,
+    )
+
+
+def _rate_limited(key: Key, reserve: Reserve) -> JSONResponse:
+    """429 for a key that has spent its requests or tokens for the minute.
+
+    A rolling window is refilled continuously, so the only honest advice is the
+    window's own length; ``Retry-After`` says exactly that.
+    """
+    unit = "requests" if reserve.reason == "rpm" else "tokens"
+    return JSONResponse(
+        {
+            "error": {
+                "message": (
+                    f"rate limit for key {key.key_id}: {reserve.used} {unit} in the last "
+                    f"{RATE_WINDOW_SECONDS}s, limit {reserve.limit}"
+                ),
+                "type": "rate_limit_exceeded",
+            }
+        },
+        status_code=429,
+        headers={"Retry-After": str(RATE_WINDOW_SECONDS)},
     )
 
 
@@ -784,51 +810,60 @@ def create_app(
             router_mode=router_mode,
         )
 
-    def budget_gate(request: Request, key: Key, named: str | None) -> Response | None:
-        """Reserve a key's request ceiling, or refuse the request.
+    def budget_gate(
+        request: Request, key: Key, named: str | None, body: bytes | None
+    ) -> Response | None:
+        """Reserve one request against the key's limits, or refuse it.
 
-        Called only for a key that carries a budget.  The rules are deliberately
-        narrow, because a budget is a promise about spend the gateway measures:
-        a metered route must name a priceable model, and the passthrough -- which
-        the gateway does not price -- may not name a model at all.
+        Called only for a key that carries a limit.  The rules are deliberately
+        narrow, because a limit is a promise about what the gateway measures: a
+        metered route must name a model when money is at stake, and the
+        passthrough -- which the gateway neither prices nor logs -- may not name
+        a model at all.
         """
         assert ledger is not None  # callers only reach here with a key store
+        limits = key.limits
+        metered = request.scope["path"] in METERED_PATHS
         if named is None:
             # A metered route with no model cannot be priced; a passthrough read
             # that names no model has nothing to charge.
-            return _budget_needs_model(key) if request.scope["path"] in METERED_PATHS else None
-        if request.scope["path"] not in METERED_PATHS:
+            return _budget_needs_model(key) if metered and limits.priced else None
+        if not metered:
             return _unmetered_forbidden(named)
-        if not pricing.can_price(named, sheet):
+        if limits.priced and not pricing.can_price(named, sheet):
             return _unpriced_forbidden(named)
-        budget = key.budget_usd
-        if budget is None:  # unreachable: the caller checked key.budgeted
-            return None
         # Settling is driven by this variable, read when the request is logged.
         CURRENT_KEY_ID.set(key.key_id)
-        if not ledger.try_reserve(
-            key.key_id, ceiling_usd=ceiling, budget_usd=budget, period_days=key.period_days
-        ):
-            return _payment_required(
-                key,
-                ceiling,
-                ledger.state(key.key_id, budget_usd=budget, period_days=key.period_days),
-            )
-        return None
+        reserve = ledger.try_reserve(
+            key.key_id,
+            limits=limits,
+            model=named,
+            ceiling_usd=ceiling,
+            token_estimate=estimate_tokens(body) if limits.tpm is not None else 0,
+        )
+        if reserve.allowed:
+            return None
+        if reserve.reason in ("rpm", "tpm"):
+            return _rate_limited(key, reserve)
+        return _payment_required(key, ceiling, reserve)
 
-    def authorize(request: Request, model: object) -> Response | None:
+    def authorize(
+        request: Request, model: object, body: bytes | None = None
+    ) -> Response | None:
         """None when the caller may use ``model``, else a refusal response.
 
-        Two independent policies are applied, both on the model named in the
+        Three independent policies are applied, all on the model named in the
         request body, so they bind the chat, messages, responses and passthrough
         routes alike rather than one handler's idea of "the model":
 
-        * the key's model allowlist, and
-        * the key's budget, which reserves a request ceiling before the request is
-          forwarded and refuses (402) when it would take the key past the budget.
+        * the key's model allowlist (403),
+        * the key's limits -- budget, per-model sub-caps, requests and tokens per
+          minute -- which reserve the request before it is forwarded and refuse
+          with 402 or 429 when it would take the key past one of them.
 
-        A key with an empty allowlist is unrestricted.  A key with no budget is
-        unaffected by the second policy.
+        ``body`` is the raw request bytes, used only to estimate a prompt's size
+        against ``tpm``.  A key with an empty allowlist and no limits is
+        unaffected by all of this.
         """
         key = getattr(request.state, "key", None)
         if key is None:
@@ -836,9 +871,9 @@ def create_app(
         named = model if isinstance(model, str) and model and model != UNKNOWN_MODEL else None
         if not key.unrestricted and named is not None and named not in key.models:
             return _forbidden_model(named, key.models)
-        if not key.budgeted or ledger is None:
+        if not key.limited or ledger is None:
             return None
-        return budget_gate(request, key, named)
+        return budget_gate(request, key, named, body)
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
         try:
@@ -861,7 +896,7 @@ def create_app(
             dict(request.headers.items()), body, session_salt
         )
         model_requested = _model_name(body.get("model"))
-        denied = authorize(request, model_requested)
+        denied = authorize(request, model_requested, raw)
         if denied is not None:
             return denied
         streaming = bool(body.get("stream"))
@@ -1044,7 +1079,7 @@ def create_app(
     @app.api_route("/{path:path}", methods=PASSTHROUGH_METHODS)
     async def passthrough(path: str, request: Request) -> Response:
         raw = await request.body()
-        denied = authorize(request, _body_model(raw))
+        denied = authorize(request, _body_model(raw), raw)
         if denied is not None:
             return denied
         outgoing = client.build_request(

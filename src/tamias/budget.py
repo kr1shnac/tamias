@@ -1,43 +1,66 @@
-"""Per-key budgets: a company credit ceiling the gateway enforces itself.
+"""Per-key limits: the company credit ceiling and the rates around it.
 
 :mod:`tamias.keys` answers *who* is calling.  This module answers *how much they
-may spend*, and it is what makes a company credit real rather than a convention:
-the ceiling lives in the gateway, the arithmetic happens before the caller
-reaches a provider, and there is no request a caller can send to lift it.
+may spend, on what, and how fast*, and it is what makes a company credit real
+rather than a convention: the limits live in the gateway, the arithmetic happens
+before the caller reaches a provider, and there is no request a caller can send
+to lift them.
 
-The model is reserve-then-settle:
+Four limits are enforced, each optional and independent:
+
+* a **USD budget** per key, optionally measured over a rolling period;
+* a **per-model sub-cap**, so one expensive model cannot consume a budget meant
+  for all of them;
+* **requests per minute** (``rpm``);
+* **tokens per minute** (``tpm``).
+
+The money limits use reserve-then-settle:
 
 * **Reserve.**  Before a request is forwarded, the gateway reserves a fixed
-  ceiling (``request_ceiling_usd``) against the key.  If settled spend plus
-  outstanding reservations plus this ceiling would exceed the key's budget, the
-  request is refused with ``402`` and never reaches the provider.
-* **Settle.**  When the request is logged -- the one point where its real cost
-  is known -- the reservation is released and the *actual* computed cost is
+  ceiling (``request_ceiling_usd``) against the key and against the named model.
+  If settled spend plus outstanding reservations plus this ceiling would exceed
+  the key's budget -- or the model's sub-cap -- the request is refused with
+  ``402`` and never reaches the provider.
+* **Settle.**  When the request is logged -- the one point where its real cost is
+  known -- the reservation is released and the *actual* computed cost is
   recorded.  A budget is therefore spent by what was used, not by what was
   guessed.
 
-Reservations are rows in ``budget_reservations``; settling deletes one of the
-key's rows and inserts the real cost into ``budget_spend``.  Since every request
-reserves the same ceiling, a key's outstanding rows are interchangeable, so a
-settlement may release any one of them.  A row a crashed or unfinished request
-never settles is ignored -- and swept -- after
-:data:`DEFAULT_RESERVATION_TTL_SECONDS`, so a leak cannot lock a key out forever.
+The rate limits use the same shape for tokens: admission reserves an estimate of
+the prompt's size, and settlement replaces it with the token count the upstream
+reported.  ``rpm`` counts requests already logged plus requests still in flight,
+so a burst cannot slip past it; ``tpm`` counts recorded tokens plus the estimates
+held by requests still in flight.
 
-Three limits are deliberate and stated here rather than hidden:
+Every settled request becomes one row in ``budget_events`` -- key, model, time,
+USD and tokens -- so spend, sub-caps and both windows are aggregates over one
+append-only table.  Reservations are rows in ``budget_reservations``; since every
+request reserves the same money ceiling, a key's outstanding rows are
+interchangeable for the money arithmetic, and one is released per settlement.  A
+row a crashed or unfinished request never settles is ignored -- and swept --
+after :data:`DEFAULT_RESERVATION_TTL_SECONDS`, so a leak cannot lock a key out
+forever.
 
-* **The reservation is a flat ceiling, not a token estimate.**  A request that
-  costs more than ``request_ceiling_usd`` can overshoot the budget once, by the
-  difference, at the moment the budget is exhausted.  The operator sets the
-  ceiling to their largest plausible request.  The test is
-  ``spent + reserved + ceiling <= budget``, so a budget smaller than one ceiling
+Limits are stated here rather than hidden:
+
+* **Money is reserved as a flat ceiling, not a token estimate.**  A request that
+  costs more than ``request_ceiling_usd`` can overshoot a money limit once, by
+  the difference, at the moment it is exhausted.  The operator sets the ceiling
+  to their largest plausible request.  The test is
+  ``spent + reserved + ceiling <= limit``, so a limit smaller than one ceiling
   admits nothing -- the honest reading of "you cannot afford a request this
   large" -- rather than admitting everything.
-* **Only priced models are counted.**  A model the price sheet cannot price
-  (:func:`tamias.pricing.can_price`) produces a cost of UNKNOWN, which a budget
-  cannot spend against, so a budgeted key may not reach it.
-* **Only the metered routes are billed.**  A key with a budget may not use the
-  unlogged passthrough route when its body names a model: the gateway will not
-  claim to bound spend it does not measure.
+* **Tokens are reserved as an estimate** of ``len(body) / 4``; only prompt bytes
+  are counted, so a request asking for a very large completion can overshoot
+  ``tpm`` by its output.  When the upstream reports no usage at all, the
+  estimate is recorded in place of a zero, so an unmeasured request is never
+  free of the counter.
+* **The USD limits require a priced model.**  A model the price sheet cannot
+  price (:func:`tamias.pricing.can_price`) produces a cost of UNKNOWN, which a
+  budget cannot spend against, so a key with a USD limit may not reach it.
+* **Only the metered routes are counted.**  A key carrying any limit may not use
+  the unlogged passthrough route when its body names a model: the gateway will
+  not claim to bound what it does not measure.
 
 Spend and reservations share the key store's SQLite file and connection.  They
 are mutable per-key control state, exactly like the keys themselves, and one
@@ -47,6 +70,7 @@ connection keeps a single writer.
 from __future__ import annotations
 
 import contextvars
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -54,16 +78,19 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from threading import Lock
 from typing import Any
 
-from tamias.types import CostBreakdown
+from tamias.types import CostBreakdown, Usage
 
 __all__ = [
     "DEFAULT_REQUEST_CEILING_USD",
     "DEFAULT_RESERVATION_TTL_SECONDS",
+    "RATE_WINDOW_SECONDS",
     "BudgetError",
     "BudgetLedger",
-    "BudgetState",
     "BudgetedLog",
     "CURRENT_KEY_ID",
+    "Limits",
+    "Reserve",
+    "estimate_tokens",
     "from_micros",
     "parse_usd",
     "to_micros",
@@ -72,25 +99,44 @@ __all__ = [
 MICROS_PER_USD = Decimal(1_000_000)
 DEFAULT_REQUEST_CEILING_USD = Decimal("0.25")
 DEFAULT_RESERVATION_TTL_SECONDS = 1800
+RATE_WINDOW_SECONDS = 60
+BYTES_PER_TOKEN = 4
 
-SPEND_TABLE = "budget_spend"
+EVENTS_TABLE = "budget_events"
 RESERVATION_TABLE = "budget_reservations"
+# The table's first name, used for one commit before it carried tokens as well
+# as money.  A database written then is renamed in place rather than abandoned.
+LEGACY_SPEND_TABLE = "budget_spend"
 
 SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS {SPEND_TABLE} (
+CREATE TABLE IF NOT EXISTS {EVENTS_TABLE} (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
     key_id TEXT NOT NULL,
+    model TEXT,
     ts TEXT NOT NULL,
-    usd_micros INTEGER NOT NULL
+    usd_micros INTEGER NOT NULL DEFAULT 0,
+    tokens INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS {SPEND_TABLE}_by_key ON {SPEND_TABLE} (key_id, ts);
+CREATE INDEX IF NOT EXISTS {EVENTS_TABLE}_by_key ON {EVENTS_TABLE} (key_id, ts);
 CREATE TABLE IF NOT EXISTS {RESERVATION_TABLE} (
     reservation_id INTEGER PRIMARY KEY AUTOINCREMENT,
     key_id TEXT NOT NULL,
-    ceiling_micros INTEGER NOT NULL,
+    model TEXT,
+    ceiling_micros INTEGER NOT NULL DEFAULT 0,
+    token_estimate INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS {RESERVATION_TABLE}_by_key ON {RESERVATION_TABLE} (key_id);
 """
+
+# Columns added after the tables first existed.  ``CREATE TABLE IF NOT EXISTS``
+# does not touch a table that already exists, so an older database is upgraded
+# in place.
+_EVENT_COLUMNS = {"model": "TEXT", "tokens": "INTEGER NOT NULL DEFAULT 0"}
+_RESERVATION_COLUMNS = {
+    "model": "TEXT",
+    "token_estimate": "INTEGER NOT NULL DEFAULT 0",
+}
 
 # The key a request is being settled against.  ``proxy.authorize`` sets it from
 # the authenticated request; ``BudgetedLog`` reads it when the request is logged.
@@ -103,7 +149,66 @@ CURRENT_KEY_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 
 class BudgetError(ValueError):
-    """A budget or a request ceiling could not be parsed."""
+    """A limit could not be parsed."""
+
+
+@dataclass(frozen=True, slots=True)
+class Limits:
+    """The limits a key carries.  Every field is optional and independent."""
+
+    budget_usd: Decimal | None = None
+    period_days: int | None = None
+    rpm: int | None = None
+    tpm: int | None = None
+    model_caps: tuple[tuple[str, Decimal], ...] = ()
+
+    @property
+    def enforced(self) -> bool:
+        """True when any limit applies, so the gateway must meter the key."""
+        return (
+            self.budget_usd is not None
+            or self.rpm is not None
+            or self.tpm is not None
+            or bool(self.model_caps)
+        )
+
+    @property
+    def priced(self) -> bool:
+        """True when enforcing the limits needs a price for the model."""
+        return self.budget_usd is not None or bool(self.model_caps)
+
+    def model_cap(self, model: str | None) -> Decimal | None:
+        if model is None:
+            return None
+        for name, cap in self.model_caps:
+            if name == model:
+                return cap
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class Reserve:
+    """The outcome of asking to reserve one request against a key's limits.
+
+    ``reason`` is ``"ok"`` or the first limit that refused the request, and the
+    numbers beside it are what that limit compared, so a caller can state the
+    refusal as arithmetic rather than as a bare "denied".
+    """
+
+    allowed: bool
+    reason: str = "ok"
+    model: str | None = None
+    spent_usd: Decimal = Decimal("0")
+    reserved_usd: Decimal = Decimal("0")
+    cap_usd: Decimal | None = None
+    used: int = 0
+    limit: int | None = None
+
+    @property
+    def remaining_usd(self) -> Decimal | None:
+        if self.cap_usd is None:
+            return None
+        return self.cap_usd - self.spent_usd - self.reserved_usd
 
 
 def now_stamp(when: datetime | None = None) -> str:
@@ -125,7 +230,7 @@ def parse_usd(value: object) -> Decimal | None:
     """A non-negative USD amount, or None for an absent one.
 
     Accepts what a CLI argument or a stored column carries.  Negative, NaN and
-    infinite amounts are refused: a budget is not a debt, and a NaN would poison
+    infinite amounts are refused: a limit is not a debt, and a NaN would poison
     every comparison it reached.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -143,33 +248,38 @@ def parse_usd(value: object) -> Decimal | None:
     return amount
 
 
-@dataclass(frozen=True, slots=True)
-class BudgetState:
-    """A key's budget and what the gateway's own ledger says it has spent.
+def estimate_tokens(body: bytes | None) -> int:
+    """A prompt's size in tokens, estimated from its bytes.
 
-    ``remaining_usd`` is what is left after both settled spend and outstanding
-    reservations are subtracted, so it never describes money that in-flight
-    requests may already be spending.
+    Text is roughly four bytes per token for the mixed prose and JSON a
+    completion request carries.  This is an estimate the reservation is settled
+    against, not a measurement; a request with no body reserves nothing.
     """
+    if not body:
+        return 0
+    return max(1, math.ceil(len(body) / BYTES_PER_TOKEN))
 
-    budget_usd: Decimal | None
-    period_days: int | None
-    spent_usd: Decimal
-    reserved_usd: Decimal
 
-    @property
-    def enforced(self) -> bool:
-        return self.budget_usd is not None
+def _tokens_of(usage: Usage | None) -> int | None:
+    """Prompt plus completion tokens, or None when the upstream reported none."""
+    if usage is None:
+        return None
+    parts = [
+        count
+        for count in (usage.input_tokens, usage.output_tokens)
+        if isinstance(count, int) and not isinstance(count, bool)
+    ]
+    return sum(parts) if parts else None
 
-    @property
-    def remaining_usd(self) -> Decimal | None:
-        if self.budget_usd is None:
-            return None
-        return self.budget_usd - self.spent_usd - self.reserved_usd
+
+def _usd_of(cost: CostBreakdown | None) -> Decimal:
+    if cost is None or cost.usd is None:
+        return Decimal(0)
+    return Decimal(str(cost.usd))
 
 
 class BudgetLedger:
-    """Spend and reservations in the key store's SQLite file.
+    """Events and reservations in the key store's SQLite file.
 
     Every check-then-write happens under the store's lock, so two concurrent
     requests cannot both settle against the same remaining budget on the same
@@ -190,146 +300,241 @@ class BudgetLedger:
         self._lock = lock
         self._ttl = ttl_seconds
         with self._lock:
+            self._rename_legacy_table()
             self._conn.executescript(SCHEMA)
+            self._ensure_columns(EVENTS_TABLE, _EVENT_COLUMNS)
+            self._ensure_columns(RESERVATION_TABLE, _RESERVATION_COLUMNS)
             self._conn.commit()
 
-    def _since(self, period_days: int | None, moment: datetime) -> str | None:
-        if period_days is None:
-            return None
-        return now_stamp(moment - timedelta(days=period_days))
+    def _rename_legacy_table(self) -> None:
+        tables = {
+            str(row["name"])
+            for row in self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        if LEGACY_SPEND_TABLE in tables and EVENTS_TABLE not in tables:
+            self._conn.execute(
+                f"ALTER TABLE {LEGACY_SPEND_TABLE} RENAME TO {EVENTS_TABLE}"
+            )
 
-    def _cutoff(self, moment: datetime) -> str:
-        return now_stamp(moment - timedelta(seconds=self._ttl))
+    def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
+        present = {
+            str(row["name"]) for row in self._conn.execute(f"PRAGMA table_info({table})")
+        }
+        for name, declaration in columns.items():
+            if name not in present:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
-    def spent_micros(self, key_id: str, since: str | None) -> int:
-        sql = f"SELECT COALESCE(SUM(usd_micros), 0) FROM {SPEND_TABLE} WHERE key_id = ?"
+    # --- reads ----------------------------------------------------------------
+
+    def spend_micros(self, key_id: str, since: str | None, model: str | None = None) -> int:
+        sql = f"SELECT COALESCE(SUM(usd_micros), 0) FROM {EVENTS_TABLE} WHERE key_id = ?"
         args: list[object] = [key_id]
         if since is not None:
             sql += " AND ts >= ?"
             args.append(since)
+        if model is not None:
+            sql += " AND model = ?"
+            args.append(model)
         return int(self._conn.execute(sql, args).fetchone()[0])
 
-    def reserved_micros(self, key_id: str, cutoff: str) -> int:
-        row = self._conn.execute(
+    def reserved_micros(self, key_id: str, cutoff: str, model: str | None = None) -> int:
+        sql = (
             f"SELECT COALESCE(SUM(ceiling_micros), 0) FROM {RESERVATION_TABLE} "
+            "WHERE key_id = ? AND created_at >= ?"
+        )
+        args: list[object] = [key_id, cutoff]
+        if model is not None:
+            sql += " AND model = ?"
+            args.append(model)
+        return int(self._conn.execute(sql, args).fetchone()[0])
+
+    def requests_in_window(self, key_id: str, cutoff: str) -> int:
+        """Requests logged plus requests still in flight, inside the window."""
+        logged = self._conn.execute(
+            f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE key_id = ? AND ts >= ?",
+            (key_id, cutoff),
+        ).fetchone()[0]
+        in_flight = self._conn.execute(
+            f"SELECT COUNT(*) FROM {RESERVATION_TABLE} WHERE key_id = ? AND created_at >= ?",
+            (key_id, cutoff),
+        ).fetchone()[0]
+        return int(logged) + int(in_flight)
+
+    def tokens_in_window(self, key_id: str, cutoff: str) -> int:
+        """Tokens logged plus the estimates held by requests still in flight."""
+        logged = self._conn.execute(
+            f"SELECT COALESCE(SUM(tokens), 0) FROM {EVENTS_TABLE} "
+            "WHERE key_id = ? AND ts >= ?",
+            (key_id, cutoff),
+        ).fetchone()[0]
+        in_flight = self._conn.execute(
+            f"SELECT COALESCE(SUM(token_estimate), 0) FROM {RESERVATION_TABLE} "
             "WHERE key_id = ? AND created_at >= ?",
             (key_id, cutoff),
-        ).fetchone()
-        return int(row[0])
+        ).fetchone()[0]
+        return int(logged) + int(in_flight)
 
-    def state(
-        self,
-        key_id: str,
-        *,
-        budget_usd: Decimal | None,
-        period_days: int | None,
-        now: datetime | None = None,
-    ) -> BudgetState:
-        moment = now or datetime.now(UTC)
-        with self._lock:
-            spent = self.spent_micros(key_id, self._since(period_days, moment))
-            reserved = self.reserved_micros(key_id, self._cutoff(moment))
-        return BudgetState(
-            budget_usd=budget_usd,
-            period_days=period_days,
-            spent_usd=from_micros(spent),
-            reserved_usd=from_micros(reserved),
-        )
+    # --- writes ---------------------------------------------------------------
 
     def try_reserve(
         self,
         key_id: str,
         *,
+        limits: Limits,
+        model: str | None,
         ceiling_usd: Decimal,
-        budget_usd: Decimal,
-        period_days: int | None,
+        token_estimate: int = 0,
         now: datetime | None = None,
-    ) -> bool:
-        """Reserve ``ceiling_usd`` for one request, or refuse it.
+    ) -> Reserve:
+        """Reserve one request against ``limits``, or explain the refusal.
 
-        False means the request would take the key past its budget and must not
-        be forwarded.  A True result has written the reservation, so the spend is
-        committed even if the request is never logged.
+        Limits are applied in order of specificity: the rate limits first (they
+        are retryable and distinct from running out of money), then a model's
+        sub-cap, then the key's total budget.
         """
         moment = now or datetime.now(UTC)
+        window = now_stamp(moment - timedelta(seconds=RATE_WINDOW_SECONDS))
+        since = None if limits.period_days is None else now_stamp(
+            moment - timedelta(days=limits.period_days)
+        )
         ceiling = to_micros(ceiling_usd)
-        budget = to_micros(budget_usd)
         with self._lock:
-            spent = self.spent_micros(key_id, self._since(period_days, moment))
-            reserved = self.reserved_micros(key_id, self._cutoff(moment))
-            if spent + reserved + ceiling > budget:
-                return False
+            if limits.rpm is not None:
+                used = self.requests_in_window(key_id, window)
+                if used >= limits.rpm:
+                    return Reserve(
+                        allowed=False, reason="rpm", model=model, used=used, limit=limits.rpm
+                    )
+            if limits.tpm is not None:
+                used_tokens = self.tokens_in_window(key_id, window)
+                if used_tokens + token_estimate > limits.tpm:
+                    return Reserve(
+                        allowed=False,
+                        reason="tpm",
+                        model=model,
+                        used=used_tokens,
+                        limit=limits.tpm,
+                    )
+            cap = limits.model_cap(model)
+            if cap is not None:
+                spent = self.spend_micros(key_id, since, model)
+                reserved = self.reserved_micros(key_id, window, model)
+                if spent + reserved + ceiling > to_micros(cap):
+                    return Reserve(
+                        allowed=False,
+                        reason="model_cap",
+                        model=model,
+                        spent_usd=from_micros(spent),
+                        reserved_usd=from_micros(reserved),
+                        cap_usd=cap,
+                    )
+            if limits.budget_usd is not None:
+                spent = self.spend_micros(key_id, since)
+                reserved = self.reserved_micros(key_id, window)
+                if spent + reserved + ceiling > to_micros(limits.budget_usd):
+                    return Reserve(
+                        allowed=False,
+                        reason="budget",
+                        model=model,
+                        spent_usd=from_micros(spent),
+                        reserved_usd=from_micros(reserved),
+                        cap_usd=limits.budget_usd,
+                    )
             self._conn.execute(
-                f"INSERT INTO {RESERVATION_TABLE} (key_id, ceiling_micros, created_at) "
-                "VALUES (?, ?, ?)",
-                (key_id, ceiling, now_stamp(moment)),
+                f"INSERT INTO {RESERVATION_TABLE} "
+                "(key_id, model, ceiling_micros, token_estimate, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (key_id, model, ceiling, token_estimate, now_stamp(moment)),
             )
             self._conn.commit()
-            return True
+            return Reserve(allowed=True, model=model)
 
-    def settle(self, key_id: str, *, usd: Decimal, now: datetime | None = None) -> bool:
+    def settle(
+        self,
+        key_id: str,
+        *,
+        usd: Decimal,
+        model: str | None = None,
+        tokens: int | None = None,
+        now: datetime | None = None,
+    ) -> bool:
         """Release one reservation for ``key_id`` and record what was spent.
 
-        Returns whether a reservation was released.  Settlement is recorded even
-        when there was none -- an uncapped request's real cost still belongs in
-        the ledger -- but a zero cost inserts no spend row, so a free request
-        leaves no money behind.
+        The reservation is matched on the model when one is available, so
+        settling one model's request cannot release another's sub-cap.  When the
+        upstream reported no token count, the reservation's estimate is recorded
+        instead of a bare zero.  Returns whether a reservation was released.
         """
         moment = now or datetime.now(UTC)
         micros = to_micros(usd)
         with self._lock:
-            row = self._conn.execute(
-                f"SELECT reservation_id FROM {RESERVATION_TABLE} "
-                "WHERE key_id = ? ORDER BY reservation_id LIMIT 1",
-                (key_id,),
-            ).fetchone()
-            if row is not None:
-                self._conn.execute(
-                    f"DELETE FROM {RESERVATION_TABLE} WHERE reservation_id = ?",
-                    (row[0],),
-                )
-            if micros:
-                self._conn.execute(
-                    f"INSERT INTO {SPEND_TABLE} (key_id, ts, usd_micros) VALUES (?, ?, ?)",
-                    (key_id, now_stamp(moment), micros),
-                )
+            row = self._take_reservation(key_id, model)
+            if row is None:
+                row = self._take_reservation(key_id, None)
+            if tokens is None:
+                tokens = int(row["token_estimate"]) if row is not None else 0
+            self._conn.execute(
+                f"INSERT INTO {EVENTS_TABLE} (key_id, model, ts, usd_micros, tokens) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (key_id, model, now_stamp(moment), micros, tokens),
+            )
             self._conn.commit()
             return row is not None
+
+    def _take_reservation(self, key_id: str, model: str | None) -> sqlite3.Row | None:
+        sql = (
+            f"SELECT reservation_id, token_estimate FROM {RESERVATION_TABLE} "
+            "WHERE key_id = ? AND model IS ? ORDER BY reservation_id LIMIT 1"
+        )
+        row = self._conn.execute(sql, (key_id, model)).fetchone()
+        if row is not None:
+            self._conn.execute(
+                f"DELETE FROM {RESERVATION_TABLE} WHERE reservation_id = ?",
+                (row["reservation_id"],),
+            )
+        return row
 
     def sweep(self, now: datetime | None = None) -> int:
         """Drop reservations older than the TTL; returns how many were dropped."""
         moment = now or datetime.now(UTC)
+        cutoff = now_stamp(moment - timedelta(seconds=self._ttl))
         with self._lock:
             cursor = self._conn.execute(
-                f"DELETE FROM {RESERVATION_TABLE} WHERE created_at < ?",
-                (self._cutoff(moment),),
+                f"DELETE FROM {RESERVATION_TABLE} WHERE created_at < ?", (cutoff,)
             )
             self._conn.commit()
             return cursor.rowcount
 
 
-def _cost_usd_in(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Decimal:
-    """The USD a ``log_request`` row carries, or zero when it could not be computed.
+def _measurement(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Decimal, str, int | None]:
+    """The USD, model and token count a ``log_request`` row carries.
 
-    ``log_request`` takes the cost positionally in every caller this gateway has,
-    but a keyword call is accepted too, and the cost object is found by type
-    rather than by position so a signature change cannot silently settle zero.
+    ``log_request`` takes usage, cost and model positionally in every caller this
+    gateway has, but a keyword call is accepted too, and the two objects are
+    found by type rather than by position so a signature change cannot silently
+    settle zero.  The model is the only string of the three that cannot be told
+    from its neighbours by type, so it is read positionally, guarded by an
+    ``isinstance`` check.
     """
     cost = kwargs.get("cost")
     if not isinstance(cost, CostBreakdown):
         cost = next((arg for arg in args if isinstance(arg, CostBreakdown)), None)
-    if cost is None or cost.usd is None:
-        return Decimal(0)
-    return Decimal(str(cost.usd))
+    usage = kwargs.get("usage")
+    if not isinstance(usage, Usage):
+        usage = next((arg for arg in args if isinstance(arg, Usage)), None)
+    model = kwargs.get("model_used")
+    if not isinstance(model, str):
+        model = args[3] if len(args) > 3 and isinstance(args[3], str) else ""
+    return _usd_of(cost), model, _tokens_of(usage)
 
 
 class BudgetedLog:
     """A request log that also settles the caller's budget reservation.
 
     Every metered route already funnels through one ``log_request`` call at the
-    point where the response's real cost is known, so settlement is placed there
-    rather than duplicated beside three handlers.  The key is read from
-    :data:`CURRENT_KEY_ID`.
+    point where the response's real cost and usage are known, so settlement is
+    placed there rather than duplicated beside three handlers.  The key is read
+    from :data:`CURRENT_KEY_ID`.
     """
 
     def __init__(self, log: Any, ledger: BudgetLedger) -> None:
@@ -340,7 +545,8 @@ class BudgetedLog:
         rowid = self._log.log_request(*args, **kwargs)
         key_id = CURRENT_KEY_ID.get()
         if key_id is not None:
-            self._ledger.settle(key_id, usd=_cost_usd_in(args, kwargs))
+            usd, model, tokens = _measurement(args, kwargs)
+            self._ledger.settle(key_id, usd=usd, model=model, tokens=tokens)
         return rowid
 
     def __getattr__(self, name: str) -> Any:

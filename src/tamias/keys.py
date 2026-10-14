@@ -34,7 +34,13 @@ from decimal import Decimal
 from pathlib import Path
 from threading import Lock
 
-from tamias.budget import DEFAULT_RESERVATION_TTL_SECONDS, BudgetError, BudgetLedger, parse_usd
+from tamias.budget import (
+    DEFAULT_RESERVATION_TTL_SECONDS,
+    BudgetError,
+    BudgetLedger,
+    Limits,
+    parse_usd,
+)
 from tamias.store import sanitize_project
 
 KEY_PREFIX = "vk-"
@@ -51,20 +57,29 @@ CREATE TABLE IF NOT EXISTS {KEY_TABLE} (
     created_at TEXT NOT NULL,
     revoked_at TEXT,
     budget_usd TEXT,
-    period_days INTEGER
+    period_days INTEGER,
+    rpm INTEGER,
+    tpm INTEGER,
+    model_caps TEXT
 );
 """
 
 # Columns added after the first release.  ``CREATE TABLE IF NOT EXISTS`` does not
 # touch a table that already exists, so a database written before budgets needs
 # them added in place; both are nullable, so an old row simply has no budget.
-_ADDED_COLUMNS = {"budget_usd": "TEXT", "period_days": "INTEGER"}
+_ADDED_COLUMNS = {
+    "budget_usd": "TEXT",
+    "period_days": "INTEGER",
+    "rpm": "INTEGER",
+    "tpm": "INTEGER",
+    "model_caps": "TEXT",
+}
 
 _INSERT = (
     f"INSERT INTO {KEY_TABLE} "
     "(key_id, token_hash, label, project, models, created_at, revoked_at, "
-    "budget_usd, period_days) "
-    "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)"
+    "budget_usd, period_days, rpm, tpm, model_caps) "
+    "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)"
 )
 
 
@@ -100,6 +115,32 @@ def _stored_usd(value: object) -> Decimal | None:
         return None
 
 
+def _stored_caps(value: object) -> tuple[tuple[str, Decimal], ...]:
+    """Model sub-caps read back from the column; a malformed row caps nothing."""
+    if not isinstance(value, str) or not value:
+        return ()
+    try:
+        raw = json.loads(value)
+    except ValueError:
+        return ()
+    if not isinstance(raw, list):
+        return ()
+    caps: list[tuple[str, Decimal]] = []
+    for entry in raw:
+        if not isinstance(entry, list) or len(entry) != 2:
+            continue
+        name, amount = entry
+        if not isinstance(name, str) or not name:
+            continue
+        try:
+            cap = parse_usd(amount)
+        except BudgetError:
+            continue
+        if cap is not None:
+            caps.append((name, cap))
+    return tuple(sorted(caps))
+
+
 @dataclass(frozen=True, slots=True)
 class Key:
     """One company key's identity, without its secret.
@@ -117,15 +158,29 @@ class Key:
     revoked_at: str | None = None
     budget_usd: Decimal | None = None
     period_days: int | None = None
+    rpm: int | None = None
+    tpm: int | None = None
+    model_caps: tuple[tuple[str, Decimal], ...] = ()
 
     @property
     def revoked(self) -> bool:
         return self.revoked_at is not None
 
     @property
-    def budgeted(self) -> bool:
-        """True when the gateway must enforce a USD ceiling for this key."""
-        return self.budget_usd is not None
+    def limits(self) -> Limits:
+        """This key's limits, in the shape the ledger enforces."""
+        return Limits(
+            budget_usd=self.budget_usd,
+            period_days=self.period_days,
+            rpm=self.rpm,
+            tpm=self.tpm,
+            model_caps=self.model_caps,
+        )
+
+    @property
+    def limited(self) -> bool:
+        """True when the gateway must enforce any limit for this key."""
+        return self.limits.enforced
 
     @property
     def unrestricted(self) -> bool:
@@ -191,6 +246,9 @@ class KeyStore:
         models: Iterable[str] = (),
         budget_usd: object = None,
         period_days: int | None = None,
+        rpm: int | None = None,
+        tpm: int | None = None,
+        model_caps: Iterable[tuple[str, object]] = (),
     ) -> tuple[Key, str]:
         """Mint a key.  Returns the stored :class:`Key` and the token to hand out.
 
@@ -227,6 +285,25 @@ class KeyStore:
                 raise KeysError("period_days must be a positive whole number of days")
             if budget is None:
                 raise KeysError("period_days means nothing without a budget")
+        for name, rate in (("rpm", rpm), ("tpm", tpm)):
+            if rate is not None and (
+                isinstance(rate, bool) or not isinstance(rate, int) or rate <= 0
+            ):
+                raise KeysError(f"{name} must be a positive whole number")
+        caps: list[tuple[str, Decimal]] = []
+        for model, amount in model_caps:
+            if not isinstance(model, str) or not model.strip():
+                raise KeysError("a model cap needs a non-empty model id")
+            try:
+                parsed = parse_usd(amount)
+            except BudgetError as exc:
+                raise KeysError(f"model cap for {model!r}: {exc}") from exc
+            if parsed is None:
+                raise KeysError(f"model cap for {model!r} needs a USD amount")
+            cleaned = model.strip()
+            caps = [(name, cap) for name, cap in caps if name != cleaned]
+            caps.append((cleaned, parsed))
+        caps.sort()
 
         stamp = _now()
         with self._lock:
@@ -244,13 +321,26 @@ class KeyStore:
                             stamp,
                             None if budget is None else str(budget),
                             period_days,
+                            rpm,
+                            tpm,
+                            json.dumps([[name, str(cap)] for name, cap in caps]) if caps else None,
                         ),
                     )
                     self._conn.commit()
                 except sqlite3.IntegrityError:
                     continue
                 return Key(
-                    key_id, label, project, tuple(allow), stamp, None, budget, period_days
+                    key_id,
+                    label,
+                    project,
+                    tuple(allow),
+                    stamp,
+                    None,
+                    budget,
+                    period_days,
+                    rpm,
+                    tpm,
+                    tuple(caps),
                 ), token
         raise KeysError("could not mint a unique key id")
 
@@ -304,4 +394,7 @@ class KeyStore:
             revoked_at=row["revoked_at"],
             budget_usd=_stored_usd(row["budget_usd"]),
             period_days=row["period_days"],
+            rpm=row["rpm"],
+            tpm=row["tpm"],
+            model_caps=_stored_caps(row["model_caps"]),
         )
