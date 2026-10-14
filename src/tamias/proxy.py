@@ -9,8 +9,9 @@ Shadow mode is the default and is strictly read-only with respect to the
 upstream: :func:`tamias.router.decide` is called for every request, its decision
 is written to the request log and to this module's logger, and the bytes handed
 to the upstream are the bytes that arrived.  Only ``router_mode="active"`` may
-rewrite ``model``, and only the opt-in ``inject_usage`` may add
-``stream_options``.
+rewrite ``model``; only ``effort_mode="apply"`` may add a reasoning
+effort, and only for a model the capability registry vouches for; only
+the opt-in ``inject_usage`` may add ``stream_options``.
 
 A request's session is a salted digest, produced by
 :func:`tamias.session.derive_session_id` from the request's authorization
@@ -47,8 +48,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import anthropic_adapter, pricing, responses_adapter, router, session
 from tamias import sse as sse_module
-from tamias.effort import apply_effort
+from tamias.effort import EFFORT_MODES, apply_effort
 from tamias.pricing import PriceSheet
+from tamias.registry import Registry, empty_registry
 from tamias.router import RouterConfig
 from tamias.store import sanitize_generation_id, sanitize_project
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
@@ -383,15 +385,27 @@ def create_app(
     max_concurrency: int | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     effort_style: str = "openrouter",
+    effort_mode: str = "off",
+    registry: Registry | None = None,
 ) -> FastAPI:
     if router_mode == "active":
         raise ValueError("active routing is disabled for the public alpha; use shadow or off")
     if router_mode not in ("shadow", "off"):
         raise ValueError(f"unknown router mode: {router_mode}")
+    if effort_mode not in EFFORT_MODES:
+        allowed = ", ".join(EFFORT_MODES)
+        raise ValueError(f"unknown effort mode: {effort_mode} (allowed: {allowed})")
     base = upstream_url.rstrip("/")
     timeout = upstream_timeout_seconds()
     client = httpx.AsyncClient(timeout=timeout, transport=transport)
     routing = router.DEFAULT_CONFIG if config is None else config
+    if effort_mode != "off" and not routing.effort_policy:
+        # The mode is the operator's switch; the config only shapes the
+        # policy.  meter and apply both need the policy on so decide()
+        # computes a would-be effort: otherwise there is nothing to
+        # record or send.
+        routing = replace(routing, effort_policy=True)
+    capabilities = registry if registry is not None else empty_registry()
     table = SessionTable()
     session_salt = getattr(store, "session_salt", None)
 
@@ -417,6 +431,8 @@ def create_app(
     app.state.inject_usage = inject_usage
     app.state.request_usage_cost = request_usage_cost
     app.state.effort_style = effort_style
+    app.state.effort_mode = effort_mode
+    app.state.registry = capabilities
     app.state.sessions = table
 
     if auth_token is not None:
@@ -508,13 +524,41 @@ def create_app(
         )
         return decision
 
-    def outbound(raw: bytes, body: dict[str, Any], decision: Decision) -> bytes:
+    def resolve_effort(model: str, decision: Decision) -> str | None:
+        """The effort to actually send, or None when none should be sent.
+
+        Only ``effort_mode == "apply"`` ever sends an effort, and only for a
+        model the registry vouches for: an unknown model, or one whose entry
+        does not list reasoning, is never sent an effort field, so apply mode
+        cannot make a request the model is known to reject.  A requested level
+        the model does not list is downgraded to the nearest supported one by
+        :meth:`~tamias.registry.Registry.resolve_effort`.
+        """
+        if effort_mode != "apply" or decision.target_effort is None:
+            return None
+        resolved = capabilities.resolve_effort(model, decision.target_effort)
+        if resolved is None:
+            logger.info(
+                "effort %s not applied: %s is not in the registry or does not "
+                "support reasoning",
+                decision.target_effort,
+                model,
+            )
+        return resolved
+
+    def outbound(
+        raw: bytes,
+        body: dict[str, Any],
+        decision: Decision,
+        applied_effort: str | None = None,
+    ) -> bytes:
         """The exact bytes to send upstream.
 
         Shadow mode returns ``raw`` unchanged: the decision is recorded, never
-        applied.  Only ``router_mode == "active"`` may rewrite ``model`` or add
-        a router-selected reasoning effort; only the opt-in ``inject_usage`` may
-        add ``stream_options``.
+        applied.  Only ``router_mode == "active"`` may rewrite ``model``, and
+        only an ``applied_effort`` resolved for this model (effort_mode
+        ``apply``) adds the reasoning field; only the opt-in ``inject_usage``
+        may add ``stream_options``.
         """
         if (
             router_mode == "active"
@@ -524,8 +568,8 @@ def create_app(
         ):
             body = {**body, "model": decision.target_model}
             raw = json.dumps(body).encode()
-        if router_mode == "active" and decision.target_effort is not None:
-            body = apply_effort(body, decision.target_effort, style=app.state.effort_style)
+        if applied_effort is not None:
+            body = apply_effort(body, applied_effort, style=app.state.effort_style)
             raw = json.dumps(body).encode()
         if request_usage_cost:
             raw = with_usage_cost_included(body)
@@ -613,16 +657,20 @@ def create_app(
         if not isinstance(effort_requested, str):
             effort_requested = None
         decision = plan(session_id, body, model_requested)
-        effort_used = (
-            decision.target_effort
-            if router_mode == "active" and decision.target_effort is not None
-            else effort_requested
+        routed_model = (
+            decision.target_model
+            if router_mode == "active"
+            and decision.action == "SWITCH"
+            and decision.target_model
+            else model_requested
         )
+        applied_effort = resolve_effort(routed_model, decision)
+        effort_used = applied_effort if applied_effort is not None else effort_requested
 
         outgoing = client.build_request(
             "POST",
             base + CHAT_PATH,
-            content=outbound(raw, body, decision),
+            content=outbound(raw, body, decision, applied_effort),
             headers=forward_headers(request),
         )
         started = time.perf_counter()

@@ -40,12 +40,14 @@ from tamias.config import (
     preset_names,
     preset_upstream,
 )
+from tamias.effort import EFFORT_MODES
 from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
 from tamias.pricing_fetch import (
     OPENROUTER_MODELS_URL,
     fetch_models,
     render_sheet,
 )
+from tamias.registry import Registry, default_registry_path, load_registry
 from tamias.router import EASY_TOOLS, RouterConfig
 from tamias.router_config import load_router_config
 from tamias.store import Store
@@ -516,6 +518,8 @@ def build_serve_app(
     router_config: RouterConfig | None = None,
     transport: Any | None = None,
     effort_style: str = "openrouter",
+    effort_mode: str = "off",
+    registry: Registry | None = None,
     auth_token: str | None = None,
     max_body_bytes: int | None = None,
     max_concurrency: int | None = None,
@@ -547,6 +551,8 @@ def build_serve_app(
         request_usage_cost=request_usage_cost,
         transport=transport,
         effort_style=effort_style,
+        effort_mode=effort_mode,
+        registry=registry,
         auth_token=auth_token,
         max_body_bytes=max_body_bytes,
         max_concurrency=max_concurrency,
@@ -635,6 +641,7 @@ def config_command(args: argparse.Namespace) -> int:
         "cheap_model",
         "strong_model",
         "effort_style",
+        "effort_mode",
         "host",
         "port",
         "min_gap",
@@ -663,6 +670,7 @@ def serve(args: argparse.Namespace) -> int:
         return 2
     args.upstream = upstream
     args.router_mode = _resolve_router_mode(args, cfg)
+    args.effort_mode = _resolve_effort_mode(args, cfg)
     if not _flag_given(args, "--host") and cfg.host is not None:
         args.host = cfg.host
     if not _flag_given(args, "--port") and cfg.port is not None:
@@ -730,6 +738,8 @@ def serve(args: argparse.Namespace) -> int:
         request_usage_cost=args.request_usage_cost,
         router_config=_serve_router_config(args),
         effort_style=args.effort_style,
+        effort_mode=args.effort_mode,
+        registry=_load_registry(args),
         auth_token=auth_token,
         max_body_bytes=max_body_bytes,
         max_concurrency=max_concurrency,
@@ -933,11 +943,38 @@ def _serve_router_config(args: argparse.Namespace) -> RouterConfig:
         shell_tools=config.shell_tools,
         error_markers=config.error_markers,
         big_output_chars=config.big_output_chars,
-        effort_policy=args.effort_policy == "easy-low",
+        effort_policy=args.effort_mode != "off",
         cheap_model=args.cheap_model or config.cheap_model,
         strong_model=args.strong_model or config.strong_model,
         min_gap=args.min_gap if args.min_gap is not None else config.min_gap,
     )
+
+
+def _load_registry(args: argparse.Namespace) -> Registry:
+    """The registry named by ``--registry``, else the default path.
+
+    An explicitly named file must exist (a typo should not silently disable
+    apply mode); the default path may be absent, which yields an empty
+    registry - and apply mode then sends no effort, by design.
+    """
+    named = getattr(args, "registry", None)
+    if named:
+        return load_registry(named)
+    return load_registry(default_registry_path(), missing_ok=True)
+
+
+def _resolve_effort_mode(args: argparse.Namespace, cfg: Config) -> str:
+    """Precedence: --effort-mode > config file > the built-in default."""
+    if _flag_given(args, "--effort-mode"):
+        mode: object = args.effort_mode
+    elif cfg.effort_mode is not None:
+        mode = cfg.effort_mode
+    else:
+        mode = args.effort_mode
+    if mode not in EFFORT_MODES:
+        allowed = ", ".join(EFFORT_MODES)
+        raise ConfigError(f"effort_mode {mode!r} is not one of: {allowed}")
+    return str(mode)
 
 
 def _choose_port() -> int:
@@ -1060,6 +1097,10 @@ def run(args: argparse.Namespace) -> int:
         serve_command.extend(("--router-mode", args.mode))
     if args.router_config:
         serve_command.extend(("--router-config", args.router_config))
+    if args.effort_mode:
+        serve_command.extend(("--effort-mode", args.effort_mode))
+    if args.registry:
+        serve_command.extend(("--registry", args.registry))
 
     try:
         proxy_process = subprocess.Popen(serve_command)
@@ -1173,10 +1214,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="shadow records the routing decision; off disables routing (default: shadow)",
     )
     serve_parser.add_argument(
-        "--effort-policy",
-        choices=("off", "easy-low"),
+        "--effort-mode",
+        choices=EFFORT_MODES,
         default="off",
-        help="apply high effort to planning/errors and low effort to easy tools (default: off)",
+        help="off computes nothing; meter records the effort the policy would use; "
+        "apply also sends it, but only for a model --registry vouches for "
+        "(default: off)",
+    )
+    serve_parser.add_argument(
+        "--registry",
+        default=None,
+        help="TOML capability catalogue; apply mode sends an effort only for a "
+        "model it lists (default: $TAMIAS_REGISTRY or ~/.tamias/models.toml)",
     )
     serve_parser.add_argument(
         "--effort-style",
@@ -1246,6 +1295,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = sub.add_parser("run", help="run one command through a short-lived proxy")
     run_parser.add_argument("--mode", choices=ROUTER_MODES, default=None)
+    run_parser.add_argument("--effort-mode", choices=EFFORT_MODES, default=None)
+    run_parser.add_argument("--registry", default=None)
     run_parser.add_argument("--project")
     run_parser.add_argument("--cheap-model", default="")
     run_parser.add_argument("--strong-model", default="")

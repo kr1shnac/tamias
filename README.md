@@ -106,7 +106,7 @@ tamias dashboard --db requests.db --prices prices.toml
 environment or config-file fallback; see Configuration above). Its available
 flags are `--provider`, `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--router-config`, `--cheap-model`, `--strong-model`, `--min-gap`,
-`--effort-policy`, `--effort-style`, `--inject-usage`,
+`--effort-mode`, `--registry`, `--effort-style`, `--inject-usage`,
 `--request-usage-cost`, `--auth-token`, `--tls-cert`, `--tls-key`,
 `--max-body-bytes`, `--max-concurrency`, and `--verbose`.
 
@@ -127,11 +127,14 @@ installed metadata.
 
 
 Public alpha routing is limited to `shadow` and `off`; `active` routing is
-disabled because it rewrites provider requests. `--effort-policy easy-low` is
-available for metering policy decisions but does not enable model rewriting.
-`--effort-style` chooses OpenRouter's `reasoning.effort` field or OpenAI's
-`reasoning_effort` field. The log records the requested setting; it does not
-prove the provider applied it.
+disabled because it rewrites provider requests. The effort axis is separate
+and off by default: `--effort-mode meter` records the effort the policy would
+have chosen without changing the request, and `--effort-mode apply` sends it,
+but only for a model listed in `--registry` (a capability catalogue); a level
+a model does not list is downgraded to one it does. `--effort-style` chooses
+OpenRouter's `reasoning.effort` field or OpenAI's `reasoning_effort` field.
+The log records the requested setting; it does not prove the provider applied
+it.
 
 If an agent's tools return `Error: ...`, configure `error_markers`; see
 [`examples/router.example.toml`](examples/router.example.toml).

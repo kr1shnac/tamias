@@ -38,6 +38,11 @@ def test_explicit_missing_config_is_an_error(tmp_path: Path) -> None:
         load_config(tmp_path / "absent.toml")
 
 
+def test_config_accepts_effort_mode(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path / "c.toml", 'effort_mode = "meter"\n'))
+    assert cfg.effort_mode == "meter"
+
+
 def test_default_path_uses_env_else_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(CONFIG_ENV_VAR, str(tmp_path / "x.toml"))
     assert default_config_path() == tmp_path / "x.toml"

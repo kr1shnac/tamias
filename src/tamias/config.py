@@ -49,6 +49,7 @@ CONFIG_KEYS = (
     "cheap_model",
     "strong_model",
     "effort_style",
+    "effort_mode",
     "host",
     "port",
     "min_gap",
@@ -73,6 +74,7 @@ class Config:
     cheap_model: str | None = None
     strong_model: str | None = None
     effort_style: str | None = None
+    effort_mode: str | None = None
     host: str | None = None
     port: int | None = None
     min_gap: int | None = None

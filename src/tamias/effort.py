@@ -3,6 +3,16 @@
 import copy
 from typing import Any
 
+#: The operator-facing scopes for the effort axis, kept separate from the
+#: model-routing mode: effort can be metered or applied even though active model
+#: routing (which rewrites the model) is disabled, so the two switches no longer
+#: share one dead gate.
+#:
+#: ``off``   - compute nothing; the request is untouched.
+#: ``meter`` - record the effort the policy would have used, without sending it.
+#: ``apply`` - also send it, but only for a model the registry vouches for.
+EFFORT_MODES: tuple[str, ...] = ("off", "meter", "apply")
+
 
 def apply_effort(
     body: dict[str, Any], effort: str | None, style: str = "openrouter"

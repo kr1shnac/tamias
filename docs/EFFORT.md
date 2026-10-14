@@ -29,5 +29,19 @@ This feature adds optional `reasoning.effort` (OpenRouter style) or `reasoning_e
 
 ## CLI Flags
 
-- `--effort-policy {off,easy-low}` (default: `off`) — enables effort-based routing decisions in the router.
+- `--effort-mode {off,meter,apply}` (default: `off`) — the scope of the
+  effort axis, independent of `--router-mode`. `off` computes nothing;
+  `meter` records the effort the policy would have used (the
+  `decision_target_effort` column) without changing the request; `apply`
+  also sends it. `apply` is gated by `--registry`: an effort is sent only
+  for a model the registry lists as supporting reasoning, and a level the
+  model does not list is downgraded to the nearest one it does.
+- `--registry PATH` (default: `$TAMIAS_REGISTRY`, else
+  `~/.tamias/models.toml`) — the capability catalogue `apply` consults. The
+  default path may be absent (empty registry, so nothing is applied); an
+  explicitly named file must exist.
 - `--effort-style {openrouter,openai}` (default: `openrouter`) — controls whether the proxy sets `reasoning.effort` (OpenRouter) or `reasoning_effort` (OpenAI) in upstream requests.
+
+Effort switching is off by default, and `apply` stays opt-in until the
+benchmark (see the project plan) measures it against a fixed-effort baseline;
+`meter` is the evidence-gathering step on the way there.
