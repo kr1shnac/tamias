@@ -13,6 +13,7 @@
 | SSE parsing | Implemented | Shared assembler and adversarial parser fixtures; live providers unverified |
 | Authentication | Opt-in | `--auth-token` / `$TAMIAS_AUTH_TOKEN`; constant-time bearer check; required for a non-loopback bind |
 | Listener hardening | Implemented | Body cap (413) and concurrency limit; optional TLS via `--tls-cert`/`--tls-key` |
+| Signed policy manifest | Opt-in | `serve --manifest` verifies an Ed25519-signed policy at startup and serves it at `GET /policy`; expired/altered/mis-pinned manifests are refused (404/401/403/503). Needs `tamias[manifest]`; agent-side application is not enforced by the gateway |
 | Configuration | Implemented | `~/.tamias/config.toml` (or `$TAMIAS_CONFIG`); provider presets; `tamias config` |
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |

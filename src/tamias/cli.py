@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 from urllib.request import build_opener, urlopen
 
+from tamias import manifest as manifest_mod
 from tamias.config import (
     PROVIDER_PRESETS,
     Config,
@@ -552,6 +553,8 @@ def build_serve_app(
     max_body_bytes: int | None = None,
     max_concurrency: int | None = None,
     request_ceiling_usd: object = None,
+    manifest: dict[str, Any] | None = None,
+    manifest_key: object = None,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
@@ -588,6 +591,8 @@ def build_serve_app(
         max_body_bytes=max_body_bytes,
         max_concurrency=max_concurrency,
         request_ceiling_usd=request_ceiling_usd,
+        manifest=manifest,
+        manifest_key=manifest_key,
     )
     app.state.store = store
     return app
@@ -715,11 +720,14 @@ def _fmt_ceiling(value: object) -> str:
 
 
 def admin_command(args: argparse.Namespace) -> int:
-    """``tamias admin key issue|list|revoke``.
+    """``tamias admin key ...`` and ``tamias admin manifest ...``.
 
-    The token is printed here and nowhere else: only its SHA-256 hash is
+    The key token is printed here and nowhere else: only its SHA-256 hash is
     stored, so no later command can recover it, and ``list`` never shows it.
+    Manifest subcommands are dispatched to :func:`manifest_command`.
     """
+    if getattr(args, "admin_command", None) == "manifest":
+        return manifest_command(args)
     store = KeyStore(args.keys_db)
     try:
         if args.key_command == "issue":
@@ -777,6 +785,75 @@ def admin_command(args: argparse.Namespace) -> int:
             return 1
     finally:
         store.close()
+    return 2
+
+
+def _load_policy_toml(path: str) -> dict[str, Any]:
+    """Read a company policy TOML into the dict a manifest carries."""
+    import tomllib
+
+    try:
+        with open(path, "rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"could not read policy {path}: {exc}") from exc
+
+
+def manifest_command(args: argparse.Namespace) -> int:
+    """``tamias admin manifest keygen|sign|verify``.
+
+    ``keygen`` writes the signing keypair; ``sign`` turns a policy TOML into a
+    signed manifest; ``verify`` checks one without the private key, which is
+    exactly what the gateway does before it will serve the policy.
+    """
+    command = args.manifest_command
+    if command == "keygen":
+        private, public_raw = manifest_mod.generate_keypair()
+        private_path = Path(args.private_out)
+        public_path = Path(args.public_out)
+        private_path.write_text(manifest_mod.private_key_pem(private), encoding="utf-8")
+        private_path.chmod(0o600)
+        public_path.write_text(
+            manifest_mod.public_key_pem(public_raw), encoding="utf-8"
+        )
+        print(f"private: {private_path}")
+        print(f"public:  {public_path}")
+        print(
+            "Keep the private key off the gateway; it needs only the public key.",
+            file=sys.stderr,
+        )
+        return 0
+    if command == "sign":
+        policy = _load_policy_toml(args.policy)
+        private = manifest_mod.load_private_key(args.key)
+        signed = manifest_mod.sign_manifest(
+            policy,
+            args.project,
+            private,
+            expires=args.expires,
+            issued_at=args.issued_at,
+        )
+        text = manifest_mod.dump_manifest(signed, args.out)
+        if args.out is None:
+            print(text, end="")
+        else:
+            print(f"wrote {args.out}")
+        print(f"project: {signed['project'] or '-'}")
+        print(f"expires: {signed['expires']}")
+        print(f"use_case: {manifest_mod.policy_use_case(policy) or '-'}")
+        return 0
+    if command == "verify":
+        document = manifest_mod.load_manifest(args.manifest)
+        trusted = manifest_mod.load_public_key(args.key) if args.key else None
+        verified = manifest_mod.verify_manifest(
+            document, expected_project=args.project, trusted_public_key=trusted
+        )
+        print(
+            f"ok: project={verified['project'] or '-'} "
+            f"expires={verified['expires']} "
+            f"use_case={manifest_mod.policy_use_case(verified['policy']) or '-'}"
+        )
+        return 0
     return 2
 
 
@@ -838,6 +915,34 @@ def serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    # Managed mode: a signed policy manifest the gateway verifies before it
+    # will serve anything, so serving a policy is bound to holding a valid
+    # manifest.  A manifest with no authentication would hand the policy to an
+    # anonymous caller, so that combination is refused rather than warned.
+    manifest_doc: dict[str, Any] | None = None
+    manifest_key: bytes | None = None
+    if args.manifest:
+        if auth_token is None and not args.keys_db:
+            print(
+                "tamias serve: --manifest needs authentication: pass --auth-token "
+                "or --keys-db so the policy is served only to an authenticated "
+                "caller.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            manifest_doc = manifest_mod.load_manifest(args.manifest)
+            if args.manifest_key:
+                manifest_key = manifest_mod.load_public_key(args.manifest_key)
+            manifest_mod.verify_manifest(
+                manifest_doc, trusted_public_key=manifest_key
+            )
+        except manifest_mod.ManifestError as exc:
+            print(f"tamias serve: refusing to start: {exc}", file=sys.stderr)
+            return 2
+    elif args.manifest_key:
+        print("tamias serve: --manifest-key needs --manifest", file=sys.stderr)
+        return 2
     try:
         tls_cert, tls_key = _resolve_tls(args.tls_cert, args.tls_key)
     except ConfigError as exc:
@@ -876,6 +981,8 @@ def serve(args: argparse.Namespace) -> int:
         max_body_bytes=max_body_bytes,
         max_concurrency=max_concurrency,
         request_ceiling_usd=args.request_ceiling_usd,
+        manifest=manifest_doc,
+        manifest_key=manifest_key,
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -916,6 +1023,13 @@ def serve(args: argparse.Namespace) -> int:
     if args.request_usage_cost:
         print(
             "tamias serve: --request-usage-cost is ON: requests include usage.include=true",
+            file=sys.stderr,
+        )
+    if manifest_doc is not None:
+        print(
+            f"tamias serve: signed policy manifest is ON for project "
+            f"{manifest_doc.get('project') or '(any)'}; GET /policy serves it to "
+            f"authenticated callers",
             file=sys.stderr,
         )
     _warn_if_exposed(args.host)
@@ -1451,6 +1565,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"limit concurrent in-flight requests (default: {DEFAULT_MAX_CONCURRENCY}, "
         f"overridable via ${MAX_CONCURRENCY_ENV}; 0 disables the limit)",
     )
+    serve_parser.add_argument(
+        "--manifest",
+        default=None,
+        help="signed policy manifest (JSON) this gateway verifies at startup and "
+        "serves at GET /policy; needs --auth-token or --keys-db (default: off)",
+    )
+    serve_parser.add_argument(
+        "--manifest-key",
+        default=None,
+        help="pin the manifest to this Ed25519 public key (PEM or base64); a "
+        "manifest signed by any other key is refused",
+    )
 
     run_parser = sub.add_parser("run", help="run one command through a short-lived proxy")
     run_parser.add_argument("--mode", choices=ROUTER_MODES, default=None)
@@ -1532,7 +1658,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print what would be deleted without deleting"
     )
 
-    admin_parser = sub.add_parser("admin", help="manage company API keys")
+    admin_parser = sub.add_parser(
+        "admin", help="manage company keys and signed project manifests"
+    )
     admin_sub = admin_parser.add_subparsers(dest="admin_command", required=True)
     key_parser = admin_sub.add_parser("key", help="issue, list or revoke company keys")
     key_sub = key_parser.add_subparsers(dest="key_command", required=True)
@@ -1568,6 +1696,49 @@ def build_parser() -> argparse.ArgumentParser:
     revoke_parser = key_sub.add_parser("revoke", help="revoke a key by its key_id")
     revoke_parser.add_argument("key_id")
     revoke_parser.add_argument("--keys-db", default=_default_keys_db())
+
+    manifest_parser = admin_sub.add_parser(
+        "manifest", help="sign, verify and generate keys for project manifests"
+    )
+    manifest_sub = manifest_parser.add_subparsers(
+        dest="manifest_command", required=True
+    )
+    keygen_parser = manifest_sub.add_parser(
+        "keygen", help="generate an Ed25519 signing keypair"
+    )
+    keygen_parser.add_argument(
+        "--private-out", required=True, help="where to write the private key (PEM)"
+    )
+    keygen_parser.add_argument(
+        "--public-out", required=True, help="where to write the public key (PEM)"
+    )
+    sign_parser = manifest_sub.add_parser(
+        "sign", help="sign a policy TOML into a manifest"
+    )
+    sign_parser.add_argument("--policy", required=True, help="path to the policy TOML")
+    sign_parser.add_argument(
+        "--key", required=True, help="path to the Ed25519 private key (PEM)"
+    )
+    sign_parser.add_argument(
+        "--project", required=True, help="project the manifest is bound to"
+    )
+    sign_parser.add_argument(
+        "--expires", required=True, help="ISO-8601 expiry, e.g. 2099-12-31T00:00:00Z"
+    )
+    sign_parser.add_argument(
+        "--issued-at", default=None, help="ISO-8601 issue time (default: now)"
+    )
+    sign_parser.add_argument(
+        "-o", "--out", default=None, help="write the manifest here (default: stdout)"
+    )
+    verify_parser = manifest_sub.add_parser("verify", help="verify a signed manifest")
+    verify_parser.add_argument("manifest", help="path to the manifest JSON")
+    verify_parser.add_argument(
+        "--key", default=None, help="pin the expected public key (PEM or base64)"
+    )
+    verify_parser.add_argument(
+        "--project", default=None, help="require the manifest to be for this project"
+    )
 
     config_parser = sub.add_parser("config", help="show the effective configuration")
     config_sub = config_parser.add_subparsers(dest="config_command", required=True)
@@ -1676,7 +1847,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "admin":
         try:
             return admin_command(args)
-        except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+        except (
+            OSError,
+            ValueError,
+            sqlite3.DatabaseError,
+            manifest_mod.ManifestError,
+        ) as exc:
             print(f"tamias admin: {exc}", file=sys.stderr)
             return 1
     return 2

@@ -11,6 +11,12 @@ Public alpha from PyPI (Python 3.11 or newer):
 pip install tamias
 ```
 
+Signing company policies needs the optional `manifest` extra:
+
+```sh
+pip install 'tamias[manifest]'
+```
+
 To work on tamias itself, install the checkout in editable mode:
 
 ```sh
@@ -186,6 +192,7 @@ Three client protocols are metered. Any other path is relayed unlogged.
 | Proxy authentication | Opt-in bearer token; required off loopback |
 | Company keys (identity + model allowlist) | Yes — opt-in via `--keys-db` |
 | Per-key budget, model sub-caps, RPM/TPM | Yes — enforced by the gateway, `docs/BUDGET.md` |
+| Signed policy manifest (company policy) | Opt-in — `serve --manifest`; verified at startup and served at `GET /policy`, `docs/MANIFEST.md` |
 | Prompt / response text storage | No — never stored |
 | Multi-user or remote hardening | Not supported — single user |
 
@@ -201,6 +208,9 @@ Three client protocols are metered. Any other path is relayed unlogged.
   which model a provider actually runs.
 - It does not prove that a provider honoured a requested reasoning effort; the
   log records the request only.
+- It does not force a running agent to obey a served policy; it verifies and
+  serves one. An agent still has to fetch it and apply it. See
+  [`docs/MANIFEST.md`](docs/MANIFEST.md).
 - It does not promise that a remaining budget is exact. A key's spend is
   reserved as a flat per-request ceiling and settled at the request's real cost,
   so the request that exhausts a budget can overshoot it by at most
@@ -222,6 +232,8 @@ Three client protocols are metered. Any other path is relayed unlogged.
 - [`docs/EFFORT.md`](docs/EFFORT.md) — optional reasoning-effort switching.
 - [`docs/KEYS.md`](docs/KEYS.md) — company keys: per-caller identity and model
   allowlists (identity only, not spend caps).
+- [`docs/MANIFEST.md`](docs/MANIFEST.md) — signed policy manifests: a company
+  policy the gateway verifies and serves at `GET /policy`.
 - [`docs/PLATFORMS.md`](docs/PLATFORMS.md) — supported Python and OS, and the
   Windows database-permission caveat.
 - [`demo/RUNBOOK.md`](demo/RUNBOOK.md) — how to produce and read the two-arm

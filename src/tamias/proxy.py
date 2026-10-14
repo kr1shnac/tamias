@@ -67,7 +67,14 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from tamias import anthropic_adapter, pricing, responses_adapter, router, session
+from tamias import (
+    anthropic_adapter,
+    pricing,
+    responses_adapter,
+    router,
+    session,
+)
+from tamias import manifest as manifest_mod
 from tamias import sse as sse_module
 from tamias.budget import (
     CURRENT_KEY_ID,
@@ -348,6 +355,48 @@ def _rate_limited(key: Key, reserve: Reserve) -> JSONResponse:
     )
 
 
+def _policy_absent() -> JSONResponse:
+    """404: this gateway was not started with a signed policy manifest."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": "no policy manifest is configured on this gateway",
+                "type": "not_found_error",
+            }
+        },
+        status_code=404,
+    )
+
+
+def _policy_unavailable(detail: str) -> JSONResponse:
+    """503: a manifest is configured but no longer verifies (expired, altered)."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": f"policy manifest is not valid: {detail}",
+                "type": "service_unavailable",
+            }
+        },
+        status_code=503,
+    )
+
+
+def _policy_forbidden(bound: str, caller: object) -> JSONResponse:
+    """403: the manifest belongs to another project than the caller's key."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": (
+                    f"policy manifest is for project {bound!r}, but this key "
+                    f"belongs to {caller!r}"
+                ),
+                "type": "invalid_request_error",
+            }
+        },
+        status_code=403,
+    )
+
+
 def _unmetered_forbidden(model: str) -> JSONResponse:
     """403 when a budgeted key names a model on the unlogged passthrough route."""
     return JSONResponse(
@@ -611,6 +660,8 @@ def create_app(
     registry: Registry | None = None,
     key_store: KeyStore | None = None,
     request_ceiling_usd: object = None,
+    manifest: dict[str, Any] | None = None,
+    manifest_key: object = None,
 ) -> FastAPI:
     if router_mode not in ("shadow", "off", "active"):
         raise ValueError(
@@ -671,6 +722,10 @@ def create_app(
     app.state.effort_mode = effort_mode
     app.state.registry = capabilities
     app.state.key_store = key_store
+    # The verified policy manifest this gateway serves at GET /policy (D12),
+    # and the optional pinned public key its signature must chain to.
+    app.state.manifest = manifest
+    app.state.manifest_key = manifest_key
     app.state.budget_ledger = ledger
     app.state.request_ceiling_usd = ceiling
     app.state.sessions = table
@@ -965,6 +1020,34 @@ def create_app(
         if not key.limited or ledger is None:
             return None
         return budget_gate(request, key, target, body)
+
+    @app.get("/policy")
+    async def policy_manifest(request: Request) -> Response:
+        """Serve the signed policy manifest for the caller's project (D12).
+
+        The policy is *verified*, not merely stored: an expired or altered
+        manifest is refused here, so a gateway that loaded one at startup stops
+        serving it the moment its expiry passes.  A manifest bound to one
+        project is served only to a caller the key store placed in that project;
+        the key's project is authoritative, so a client cannot relabel its way
+        to another project's policy.
+        """
+        stored = getattr(app.state, "manifest", None)
+        if stored is None:
+            return _policy_absent()
+        bound = stored.get("project") or ""
+        caller = getattr(request.state, "project", None)
+        if bound and caller != bound:
+            return _policy_forbidden(bound, caller)
+        try:
+            verified = manifest_mod.verify_manifest(
+                stored,
+                expected_project=bound or None,
+                trusted_public_key=getattr(app.state, "manifest_key", None),
+            )
+        except manifest_mod.ManifestError as exc:
+            return _policy_unavailable(str(exc))
+        return JSONResponse(verified)
 
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
         try:

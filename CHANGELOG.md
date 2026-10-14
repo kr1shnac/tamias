@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-model sub-caps, and per-minute request and token rates. Money uses
   reserve-then-settle; refusals are 402 for money and 429 for rate. See
   `docs/BUDGET.md`.
+- Signed project manifests (`tamias admin manifest keygen|sign|verify`,
+  `serve --manifest`): a company policy TOML becomes a JSON document with an
+  Ed25519 signature, verified at startup and served at `GET /policy`. A missing,
+  expired, altered or mis-pinned manifest is refused; the private key never
+  reaches the gateway. Needs the optional `cryptography` extra:
+  `pip install 'tamias[manifest]'`.
 
 ### Changed
 
