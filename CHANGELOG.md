@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A real OpenRouter price sheet is bundled inside the package. When neither
+  `./prices.toml` nor `~/.tamias/prices.toml` exists, `serve` and `run` price
+  against it and print a provenance warning on stderr, so a fresh install
+  prices a request above `$0.00` instead of looking like a broken proxy (F-20).
+  The sheet is a dated snapshot; run `tamias prices fetch` for current rates.
+
 ## [0.1.0a6] - 2026-10-15
 
 Supersedes the mis-versioned `v0.1.0a5` tag, which was cut from `0.1.0a4` content and never uploaded to TestPyPI.

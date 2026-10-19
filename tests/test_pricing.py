@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import sys
 from pathlib import Path
 
@@ -527,3 +528,21 @@ def test_a_fully_specified_all_zero_model_still_returns_zero(tmp_path):
     breakdown = compute_cost("free", Usage(10_000, 2_000, 3_000, 500), sheet)
     assert breakdown.usd == 0.0
     assert breakdown.source == "computed"
+
+
+def test_the_bundled_default_sheet_is_present_and_prices_above_zero() -> None:
+    """F-20: a fresh install must be able to price a request above $0.00.
+
+    The sheet shipped inside the package is a real OpenRouter snapshot, not the
+    free-model demo sheet, so it is what stops a first run from printing $0.00
+    and looking like a broken proxy.
+    """
+    resource = importlib.resources.files("tamias").joinpath("data", "prices.default.toml")
+    sheet = load_price_sheet(str(resource))
+    assert sheet.simulated is False
+    assert sheet.provenance is not None
+    assert sheet.provenance["source"] == "openrouter-models-api"
+    assert sheet.models, "the bundled sheet must contain models"
+    assert any(
+        price.input is not None and price.input > 0 for price in sheet.models.values()
+    ), "the bundled sheet must price at least one model above zero (F-20)"

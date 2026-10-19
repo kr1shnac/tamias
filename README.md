@@ -57,8 +57,12 @@ Run one agent command through a temporary local proxy with `tamias run`:
 tamias run -- your-agent
 ```
 
-`--prices` defaults to `./prices.toml` and then `~/.tamias/prices.toml`. If
-neither file exists the run stops with exit code 2 and
+`--prices` defaults to `./prices.toml`, then `~/.tamias/prices.toml`, and,
+failing both, the OpenRouter snapshot bundled inside the package. Falling back
+to the bundle prints a provenance warning on stderr and prices against a dated
+snapshot, so run `tamias prices fetch --out prices.toml` for current rates.
+Naming an explicit `--prices` path that does not exist is still an error (exit
+code 2):
 
 ```text
 no price sheet found; run: tamias prices fetch --out ./prices.toml

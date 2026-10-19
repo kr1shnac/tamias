@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import importlib.resources
 import json
 import logging
 import os
@@ -71,6 +72,12 @@ PRICE_SHEET_STALE_DAYS = 30
 # so `run` can default to a real provider when the flag is omitted.
 DEFAULT_UPSTREAM = "https://openrouter.ai/api"
 DEFAULT_PRICES_NAME = "prices.toml"
+#: The price sheet shipped inside the package, used only when neither
+#: ./prices.toml nor ~/.tamias/prices.toml exists.  Without it a fresh install
+#: could not price a request at all, and the repo's demo sheets price only
+#: free models -- so a first run either refused to start or printed $0.00, and
+#: neither is distinguishable from a broken proxy (F-20).
+BUNDLED_PRICES_PARTS = ("data", "prices.default.toml")
 UPSTREAM_ENV_VAR = "TAMIAS_UPSTREAM"
 
 # Serve hardening (G1/G2/G3). All are opt-in knobs: the token protects a
@@ -894,6 +901,9 @@ def serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    notice = _bundled_prices_notice(prices_path)
+    if notice is not None:
+        print(notice, file=sys.stderr)
     args.prices = str(prices_path)
     args.db = str(pick(args.db, cfg.db, "requests.db"))
     if not _flag_given(args, "--effort-style") and cfg.effort_style is not None:
@@ -1290,8 +1300,32 @@ def _reserve_run_db(db: str | None, project: str | None) -> str:
         return str(path)
 
 
+def _bundled_prices_path() -> Path | None:
+    """The price sheet shipped with the installed package, if it is on disk."""
+    candidate = Path(str(importlib.resources.files("tamias").joinpath(*BUNDLED_PRICES_PARTS)))
+    return candidate if candidate.is_file() else None
+
+
+def _bundled_prices_notice(path: Path) -> str | None:
+    """A one-line provenance warning when a command falls back to the bundle."""
+    bundled = _bundled_prices_path()
+    if bundled is None or path != bundled:
+        return None
+    return (
+        f"tamias: no price sheet at ./{DEFAULT_PRICES_NAME} or "
+        f"~/.tamias/{DEFAULT_PRICES_NAME}; using the OpenRouter snapshot bundled "
+        f"with tamias ({bundled}). Run `tamias prices fetch` for current rates."
+    )
+
+
 def _resolve_prices_path(explicit: str | None) -> Path | None:
-    """The sheet `run` uses: the flag, else ./prices.toml, else ~/.tamias/prices.toml."""
+    """The sheet a command prices with: the flag, else ./prices.toml, else
+    ~/.tamias/prices.toml, else the snapshot bundled inside the package.
+
+    An *explicit* path that does not exist is still an error -- the caller
+    named a file, and silently pricing with a different one would be worse than
+    stopping.
+    """
     if explicit is not None:
         path = Path(explicit)
         return path if path.is_file() else None
@@ -1299,7 +1333,7 @@ def _resolve_prices_path(explicit: str | None) -> Path | None:
     for candidate in (Path(DEFAULT_PRICES_NAME), home_sheet):
         if candidate.is_file():
             return candidate
-    return None
+    return _bundled_prices_path()
 
 
 def run(args: argparse.Namespace) -> int:
@@ -1317,6 +1351,9 @@ def run(args: argparse.Namespace) -> int:
         target = pick(args.prices, cfg.prices, None) or f"./{DEFAULT_PRICES_NAME}"
         print(f"no price sheet found; run: tamias prices fetch --out {target}", file=sys.stderr)
         return 2
+    notice = _bundled_prices_notice(prices_path)
+    if notice is not None:
+        print(notice, file=sys.stderr)
     upstream = _resolve_upstream(args, cfg) or DEFAULT_UPSTREAM
     db_override = pick(args.db, cfg.db, None)
 

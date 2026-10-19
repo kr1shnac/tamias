@@ -246,15 +246,33 @@ def test_run_prices_default_falls_back_to_the_home_sheet(monkeypatch, tmp_path: 
     assert command[command.index("--upstream") + 1] == cli.DEFAULT_UPSTREAM
 
 
-def test_run_explains_how_to_create_a_missing_default_price_sheet(
+def test_run_falls_back_to_the_sheet_bundled_with_the_package(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "no-home-sheet"))
+    monkeypatch.delenv("TAMIAS_UPSTREAM", raising=False)
+    command = _capture_serve_command(monkeypatch)
 
-    assert cli.main(["run", "--", "fake-child"]) == 2
+    assert cli.main(["run", "--", "fake-child"]) == 1
+    bundled = cli._bundled_prices_path()
+    assert bundled is not None
+    assert command[command.index("--prices") + 1] == str(bundled)
+    # The provenance warning must name the bundle, so a real run is never
+    # mistaken for one priced against the caller's own sheet (F-20).
+    assert "bundled with tamias" in capsys.readouterr().err
+
+
+def test_run_rejects_an_explicitly_named_missing_price_sheet(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_prices(tmp_path)  # a default sheet exists, so only --prices can be wrong
+    missing = tmp_path / "missing.toml"
+
+    assert cli.main(["run", "--prices", str(missing), "--", "fake-child"]) == 2
     assert capsys.readouterr().err.splitlines() == [
-        "no price sheet found; run: tamias prices fetch --out ./prices.toml"
+        f"no price sheet found; run: tamias prices fetch --out {missing}"
     ]
 
 
