@@ -53,7 +53,9 @@ published: `https://test.pypi.org/pypi/tamias/json` serves `0.1.0a3`, and the
 `v0.1.0a3`, `v0.1.0a4` and `v0.1.0a5` tags are on GitHub. Real PyPI still has
 nothing (`https://pypi.org/pypi/tamias/json` → 404): the tag-triggered publish
 workflow is gated on the `pypi` environment, which the owner has not approved.
-Current state: `master` is 16 commits ahead of `origin/master` and unpushed as
-of 2026-10-19 (recompute with `git rev-list --count origin/master..master`).
-Publishing `0.1.0a6` still needs the owner's pending publisher, the `pypi`
-environment approval, and a TestPyPI token for the rehearsal.
+Current state: `master` and the annotated tag `v0.1.0a6` are **pushed** to
+`origin` (0 ahead / 0 behind) and CI is green on both. Publishing `0.1.0a6` is
+now blocked only on the owner adding a PyPI pending publisher
+(`kr1shnac/tamias`, workflow `publish.yml`, environment `pypi`); the publish job
+currently fails with `invalid-publisher`. A TestPyPI rehearsal still needs the
+owner's token.
