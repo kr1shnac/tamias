@@ -1,5 +1,13 @@
 # Tamias — Final Architecture
 
+> **Identity superseded (F-36).** On *what Tamias is*, this document is
+> superseded by [`TAMIAS-SSOT.md`](../TAMIAS-SSOT.md) (Design Spec v1.1). This
+> file began as the architecture for a read-only cost-observability tool
+> ("v0.1 is not: a proxy", §5.1); the project is now a **transparent
+> request-rewriting proxy** (SSOT §1). Read the SSOT first, then use this file
+> for the cache-semantics detail in §7.3/§8.1. The scope freeze in §23/§24
+> still stands.
+
 **Version:** 1.2 — Final Baseline  
 **Date:** 2026-09-30  
 **Status:** FINAL BASELINE FOR IMPLEMENTATION  
@@ -347,6 +355,10 @@ If the scheduler gate fails, Tamias remains a complete measurement/research inst
 # 5. Product v0.1 — Tamias Observer
 
 ## 5.1 Product boundary
+
+> **Superseded on identity (F-36).** The "not a proxy" boundary below describes
+> the earlier *Tamias Observer*. The shipped product **is** a transparent
+> request-rewriting proxy; see [`TAMIAS-SSOT.md`](../TAMIAS-SSOT.md) §1.
 
 v0.1 is:
 

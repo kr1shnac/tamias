@@ -1,27 +1,40 @@
 # Tamias
 
-Tamias is a local proxy for recording token usage and cost per request while
-optionally applying rule-based model routing.
+Tamias is a transparent, stateless-per-request, OpenAI-compatible
+request-rewriting proxy. It meters token usage and cost for every request, and
+it can rewrite which model handles a request.
+
+**Coverage:** Tamias rewrites model selection for OpenAI-compatible agents on
+`/v1/chat/completions` and `/v1/messages` (Anthropic Messages wire). Codex-style
+`/v1/responses` traffic gets metering and cost visibility today, **zero**
+rewriting.
+
+**Savings are estimated, not yet measured.** No measured savings exist; every
+dollar figure in this project is hypothetical. The single source of truth for
+what Tamias is, what is `PROVEN`, and what remains unvalidated is
+[`TAMIAS-SSOT.md`](TAMIAS-SSOT.md) — read it before citing anything here.
 
 ## Install
 
-Public alpha from PyPI (Python 3.11 or newer):
+Tamias is **not yet on PyPI**. A pre-release alpha (`0.1.0a3`, 2026-10-07) is on
+TestPyPI; the source in this checkout is newer than that. For the current state,
+install from the checkout (Python 3.11 or newer):
 
 ```sh
-pip install tamias
+python -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+```
+
+To try the published TestPyPI pre-release instead:
+
+```sh
+pip install -i https://test.pypi.org/simple/ tamias
 ```
 
 Signing company policies needs the optional `manifest` extra:
 
 ```sh
 pip install 'tamias[manifest]'
-```
-
-To work on tamias itself, install the checkout in editable mode:
-
-```sh
-python -m venv .venv
-.venv/bin/pip install -e '.[dev]'
 ```
 
 ## Quickstart
@@ -220,11 +233,13 @@ Three client protocols are metered. Any other path is relayed unlogged.
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the frozen architecture and
-  research design (v1.2, 2026-09-30). It is the spec; the code is an
-  implementation of a subset of it, and
-  [`docs/RELEASE-STATUS.md`](docs/RELEASE-STATUS.md) records which parts exist
-  and which do not.
+- [`TAMIAS-SSOT.md`](TAMIAS-SSOT.md) — **the single source of truth** (Design
+  Spec v1.1). On what Tamias *is*, it outranks every other document here.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the older frozen architecture
+  (v1.2, 2026-09-30), still the detailed reference for cache semantics but
+  **superseded on product identity** by the SSOT. The code implements a subset
+  of it; [`docs/RELEASE-STATUS.md`](docs/RELEASE-STATUS.md) records which parts
+  exist and which do not.
 - [`docs/ROUTING.md`](docs/ROUTING.md) — the router's matcher, profiles and
   TOML keys.
 - [`docs/PRICING.md`](docs/PRICING.md) — how token counts become a dollar
