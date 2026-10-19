@@ -247,11 +247,13 @@ Three client protocols are priced. Any other path is relayed unpriced, but each 
 
 - [`TAMIAS-SSOT.md`](TAMIAS-SSOT.md) — **the single source of truth** (Design
   Spec v1.1). On what Tamias *is*, it outranks every other document here.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the older frozen architecture
-  (v1.2, 2026-09-30), still the detailed reference for cache semantics but
-  **superseded on product identity** by the SSOT. The code implements a subset
-  of it; [`docs/RELEASE-STATUS.md`](docs/RELEASE-STATUS.md) records which parts
-  exist and which do not.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — a short pointer: the
+  cache-semantics detail that is still current, plus a map of where each topic
+  now lives. The full frozen v1.2 architecture (2026-09-30) is archived verbatim
+  at [`docs/ARCHITECTURE.legacy.md`](docs/ARCHITECTURE.legacy.md), superseded on
+  product identity by the SSOT. The code implements a subset of it;
+  [`docs/RELEASE-STATUS.md`](docs/RELEASE-STATUS.md) records which parts exist
+  and which do not.
 - [`docs/ROUTING.md`](docs/ROUTING.md) — the router's matcher, profiles and
   TOML keys.
 - [`docs/PRICING.md`](docs/PRICING.md) — how token counts become a dollar

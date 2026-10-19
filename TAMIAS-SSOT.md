@@ -230,7 +230,7 @@ Outside the repo: `/home/krish/Desktop/TAMIAS_PROJECT_BRIEF`-class documents and
 | File | Problem | Disposition | Status |
 |---|---|---|---|
 | `README.md` | framing predates router-first identity | rewritten: router-first summary, coverage wording per §1, "not yet on PyPI" banner, link to this file | **DONE** (commit `a68f7e9`) |
-| `docs/ARCHITECTURE.md` | §5.1/§23 "not a proxy" charter conflict (F-36); scope freeze still valid | banner added: identity superseded by this file; §7.3/§8.1 kept as the cache-semantics detail | **DONE** (`a68f7e9`) |
+| `docs/ARCHITECTURE.md` | §5.1/§23 "not a proxy" charter conflict (F-36); scope freeze still valid | rewritten to a short pointer (cache-semantics detail kept); full v1.2 preserved at `docs/ARCHITECTURE.legacy.md` | **DONE** |
 | `AGENTS.md` | destructive `git reset --hard a0f6ca1`; stale 915 baseline; pointed at out-of-repo `/home/krish/Desktop/HANDOFF-CODEX.md` (F-22) | rewritten: destructive command and pointer removed, baseline 932, handoff named only as obsolete legacy | **DONE** (`a68f7e9`) |
 | `EXECUTION-REPORT.md` (Desktop) | 0.1.0a4-readiness report framed by an external plan | renamed `EXECUTION-REPORT.legacy.md` with a legacy banner | **DONE** (archived 2026-10-19) |
 | `HANDOFF-CODEX.md` (Desktop) | out-of-repo handoff (F-22 source); contents superseded | renamed `HANDOFF-CODEX.legacy.md` with a legacy banner | **DONE** (archived 2026-10-19) |
