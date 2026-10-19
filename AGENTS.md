@@ -37,7 +37,8 @@ No measured savings exist.
 - **Build order / roadmap:** `TAMIAS-SSOT.md` §11 and the council verdicts in
   §14.
 - **Release state:** `docs/RELEASE-STATUS.md`, `BLOCKED.md`. Tamias is **not yet
-  on PyPI**; the newest published artifact is TestPyPI `0.1.0a3`.
+  on PyPI**; the source and tag are `0.1.0a6`, and the newest published artifact
+  is TestPyPI `0.1.0a3`.
 - **Legacy, do not treat as authority:** `AGENT-RULES.md` (written for a
   five-parallel-agent phase that forbade merging — obsolete, and it does not
   exist in this checkout) and the external

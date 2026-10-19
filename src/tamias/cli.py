@@ -1526,7 +1526,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--allow-non-loopback",
         action="store_true",
-        help="acknowledge the missing authentication and bind beyond loopback",
+        help=(
+            "skip the non-loopback authentication requirement (--auth-token / "
+            "$TAMIAS_AUTH_TOKEN / --keys-db) and bind anyway"
+        ),
     )
     serve_parser.add_argument(
         "--router-mode",
@@ -1691,7 +1694,10 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument(
         "--allow-non-loopback",
         action="store_true",
-        help="acknowledge the missing authentication and bind beyond loopback",
+        help=(
+            "skip the non-loopback authentication requirement (--auth-token / "
+            "$TAMIAS_AUTH_TOKEN / --keys-db) and bind anyway"
+        ),
     )
     agent_parser = sub.add_parser("agent-config", help="print an agent configuration snippet")
     agent_parser.add_argument("agent", choices=("claude-code", "codex", "opencode"))

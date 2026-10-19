@@ -16,9 +16,10 @@ what Tamias is, what is `PROVEN`, and what remains unvalidated is
 
 ## Install
 
-Tamias is **not yet on PyPI**. A pre-release alpha (`0.1.0a3`, 2026-10-07) is on
-TestPyPI; the source in this checkout is newer than that. For the current state,
-install from the checkout (Python 3.11 or newer):
+Tamias is **not yet on PyPI**. The source and the annotated tag in this
+repository are `0.1.0a6` (2026-10-19); the newest *published* artifact is the
+TestPyPI pre-release `0.1.0a3` (2026-10-07), which predates the current source.
+For the current state, install from the checkout (Python 3.11 or newer):
 
 ```sh
 python -m venv .venv
@@ -137,8 +138,10 @@ Give `--tls-cert` and `--tls-key` together to serve HTTPS; the startup banner
 then prints the `https://` URL. TLS is independent of `--auth-token`, which a
 non-loopback bind still requires.
 
-Binding to a non-loopback `--host` requires `--auth-token`: `serve` refuses to
-start otherwise. The token is checked as a bearer credential in constant time,
+Binding to a non-loopback `--host` requires authentication: `serve` refuses to
+start unless you pass `--auth-token` (or set `$TAMIAS_AUTH_TOKEN`) or configure
+company keys with `--keys-db`. The token is checked as a bearer credential in
+constant time,
 and every response carries a `WWW-Authenticate: Bearer` header on a 401. The
 three limits are also settable through the environment — `TAMIAS_AUTH_TOKEN`,
 `TAMIAS_MAX_BODY_BYTES` (default 10 MiB, larger bodies are rejected with 413),
@@ -216,7 +219,8 @@ Three client protocols are priced. Any other path is relayed unpriced, but each 
 ## What Tamias does not do
 
 - It does not proxy arbitrary web traffic: only the three routes above are
-  metered; everything else is passed through without a log row.
+  metered; everything else is passed through counted-only (one
+  `route="passthrough"` row with no tokens and no cost), never priced.
 - It does not store prompt or response text, and it does not log credentials.
 - It does not authenticate with the upstream provider; it forwards the
   credentials the client already sends.

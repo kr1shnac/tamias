@@ -111,7 +111,7 @@ Supersedes the mis-versioned `v0.1.0a5` tag, which was cut from `0.1.0a4` conten
 - Effort behavior is verified with fixtures only; whether a provider honours a
   requested effort remains unverified.
 
-[0.1.0a3]: https://pypi.org/project/tamias/0.1.0a3/
+[0.1.0a3]: https://github.com/kr1shnac/tamias/releases/tag/v0.1.0a3
 
 ## [0.1.0a2] - 2026-10-06
 
@@ -180,7 +180,7 @@ apart: `feat/cli`, `feat/pricing`, `feat/router` and `ui/restyle`.
 - Reasoning-effort switching is not in this release.
 - No budgets, caps, alerts or spend controls.
 
-[0.1.0a2]: https://pypi.org/project/tamias/0.1.0a2/
+[0.1.0a2]: https://github.com/kr1shnac/tamias/releases/tag/v0.1.0a2
 
 ## [0.1.0a1] - 2026-10-04
 
@@ -234,4 +234,4 @@ First pre-alpha. Not published to PyPI. Expect breakage.
   `default` session.
 - No budgets, caps, alerts or spend controls.
 
-[0.1.0a1]: https://pypi.org/project/tamias/0.1.0a1/
+[0.1.0a1]: https://github.com/kr1shnac/tamias/releases/tag/v0.1.0a1
