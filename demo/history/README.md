@@ -18,13 +18,22 @@ traffic would have cost on the strong model alone.
 
 | file | what it is |
 | --- | --- |
-| `agent-3weeks.db` | a real tamias request log, same schema `tamias serve` writes |
-| `agent-3weeks.json` | per-session, per-day and per-week summary |
-| `SUMMARY.md` | the same summary as a table, for reading on screen |
+| `agent-3weeks.db` | a real tamias request log, same schema `tamias serve` writes — **not tracked; regenerate it first** |
+| `agent-3weeks.json` | per-session, per-day and per-week summary — not tracked; regenerate it first |
+| `SUMMARY.md` | the same summary as a table, for reading on screen (tracked) |
 | `../make_history.py` | the generator; not a fake table but a script |
 
-The row closest to hand is `agent-3weeks.db`.  Because it is written by the real
-`tamias.store.Store`, every existing reader works on it with no special case:
+The row closest to hand is `agent-3weeks.db`. It is **not committed** (it is
+machine-local, and a binary log does not belong in git); generate it before
+running the commands below:
+
+```sh
+# generate the log and its summary for the window the table above was built for
+.venv/bin/python demo/make_history.py --end 2026-10-06 --days 21 --seed 7 --out demo/history
+```
+
+Because it is written by the real `tamias.store.Store`, every existing reader
+works on it with no special case:
 
 ```sh
 # the numbers, priced at list prices
@@ -34,7 +43,8 @@ The row closest to hand is `agent-3weeks.db`.  Because it is written by the real
 .venv/bin/python -m tamias.cli dashboard --db demo/history/agent-3weeks.db --prices prices.simulated.toml
 ```
 
-Regenerate (same seed reproduces the same numbers):
+Regenerate (same seed reproduces the same numbers; `SUMMARY.md` is the tracked
+table):
 
 ```sh
 .venv/bin/python demo/make_history.py --end 2026-10-06 --days 21 --seed 7

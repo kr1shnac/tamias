@@ -32,11 +32,12 @@ arm configures none, so its SWITCH decisions have no target. The saving figure
 `tamias report` prints is an **estimate**, labelled as such, not a measurement.
 
 Each run writes `demo/runs/<arm>-<n>.db` (the request log) and
-`demo/runs/<arm>-<n>.json` (the score). `.gitignore` ignores `*.db` and
-`demo/runs/`, so a run you produce yourself stays out of a commit unless you
-`git add -f` it deliberately. The runs committed under `demo/runs/` are the
-reproducible dry-run evidence; a live run would leave that evidence alone only
-if you pass `--force`.
+`demo/runs/<arm>-<n>.json` (the score). `.gitignore` ignores `demo/runs/*.log`
+and any run whose name is not one of the committed `<arm>-<n>` files, so a run
+you produce yourself stays out of a commit unless you `git add -f` it
+deliberately. The runs committed under `demo/runs/` are the reproducible
+dry-run evidence; a live run would leave that evidence alone only if you pass
+`--force`.
 
 ---
 
