@@ -115,12 +115,22 @@ esac
 [ "$N" -ge 1 ] || die "run number '$N' must be 1 or more"
 
 [ -n "$PYTHON" ] || die "no python interpreter found; create .venv or set TAMIAS_PYTHON"
-[ -f "$CONFIG" ] || die "no $CONFIG; copy demo/config.env.example to demo/config.env"
 
-# shellcheck disable=SC1090
-set -a
-. "$CONFIG"
-set +a
+# demo/config.env is a machine-local copy of the committed template and is not
+# tracked; every value it can set has a default below, and --dry-run overrides
+# the model/price/upstream ones anyway. Source it when present, and fall back to
+# the committed example so a fresh clone works unchanged.
+if [ -f "$CONFIG" ]; then
+	# shellcheck disable=SC1090
+	set -a
+	. "$CONFIG"
+	set +a
+elif [ -f "$CONFIG.example" ]; then
+	# shellcheck disable=SC1090
+	set -a
+	. "$CONFIG.example"
+	set +a
+fi
 
 : "${STRONG_MODEL:=$SIM_STRONG}"
 : "${CHEAP_MODEL:=$SIM_CHEAP}"
