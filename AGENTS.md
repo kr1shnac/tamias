@@ -41,6 +41,7 @@ No measured savings exist.
 - **Legacy, do not treat as authority:** `AGENT-RULES.md` (written for a
   five-parallel-agent phase that forbade merging — obsolete, and it does not
   exist in this checkout) and the external
-  `/home/krish/Desktop/HANDOFF-CODEX.md` (an out-of-repo handoff from earlier
-  work; its contents are superseded by the SSOT and scheduled for archival, so
-  do not follow it for build order or product identity).
+  `/home/krish/Desktop/HANDOFF-CODEX.legacy.md` (an out-of-repo handoff from
+  earlier work; its contents are superseded by the SSOT, and it was archived
+  under a `.legacy` name on 2026-10-19, so do not follow it for build order or
+  product identity).

@@ -21,9 +21,9 @@
 | Designing the benchmark | this file | §8, §10, §18 |
 | CI / lint discipline (future) | this file | §13 exit criteria can be machine-checked as release gates |
 
-Concretely, other project files should **point here** instead of restating the architecture: `tamias/README.md`, `TAMIAS-PROJECT-BRIEF.md`, `ARCHITECTURE.md`, and any future `INTEGRATION.md`/`ROUTER-ARCHITECTURE.md` should be short summaries with a link to this file (dispositions in §16). Any agent session working on Tamias should be given this file path as the first context input.
+Concretely, other project files should **point here** instead of restating the architecture: `tamias/README.md`, the archived `*.legacy.md` briefs, `ARCHITECTURE.md`, and any future `INTEGRATION.md`/`ROUTER-ARCHITECTURE.md` should be short summaries with a link to this file (dispositions in §16). Any agent session working on Tamias should be given this file path as the first context input.
 
-This file supersedes, for architecture questions: `TAMIAS-PROJECT-BRIEF.md`, `CLAUDE-REVIEW-PROMPT.md`, `OBSERVE-EXPERIMENT-CONTROL.md`, `ARCHITECTURE.md` (scope sections), and `README.md` framing. Those describe the *earlier* cost-observability project; where they conflict with this file on what Tamias *is*, this file wins. `docs/audit/claims.md` remains the authority on what has been **verified in the codebase** and is not duplicated here; on any code question, claims.md outranks this file.
+This file supersedes, for architecture questions: the archived `TAMIAS-PROJECT-BRIEF.legacy.md`, `CLAUDE-REVIEW-PROMPT.legacy.md`, `OBSERVE-EXPERIMENT-CONTROL.legacy.md` briefs, `ARCHITECTURE.md` (scope sections), and `README.md` framing. Those describe the *earlier* cost-observability project; where they conflict with this file on what Tamias *is*, this file wins. `docs/audit/claims.md` remains the authority on what has been **verified in the codebase** and is not duplicated here; on any code question, claims.md outranks this file.
 
 ---
 
@@ -223,19 +223,22 @@ Even after these, the file may be called final **for design**; claims of *saving
 | `tests/` | 48 files, 932 collected (2026-10-19): fixtures + mock upstreams; `mock_upstream.py`, `mock_anthropic_upstream.py` | `PROVEN` fixture-level |
 | `TAMIAS-SSOT.md` (this file, repo root) | the single source of truth | v1.1 |
 
-Outside the repo: `/home/krish/Desktop/TAMIAS-PROJECT-BRIEF.md`, `CLAUDE-REVIEW-PROMPT.md`, `OBSERVE-EXPERIMENT-CONTROL.md` (legacy framing — §16); `/home/krish/Desktop/tamias-agent/` (the old agent harness; **deferred**, used only as a benchmark testbed for §18); stray `tamias_agent*.py` on the Desktop (legacy experiments; disposition with §16); `/home/krish/Desktop/.council/runs/` (14 council runs, §14).
+Outside the repo: `/home/krish/Desktop/TAMIAS_PROJECT_BRIEF`-class documents and the old handoff are archived as `*.legacy.md` on the Desktop and in the separate `tamias-agent/` repo (see §16); `/home/krish/Desktop/tamias-agent/` (the old agent harness; **deferred**, used only as a benchmark testbed for §18); `/home/krish/Desktop/.council/runs/` (14 council runs, §14).
 
-## 16. Misrepresenting files — dispositions (in-repo edits executed 2026-10-19; Desktop items owner-gated)
+## 16. Misrepresenting files — dispositions (applied 2026-10-19; the only open item is the deferred `tamias-agent/` repo)
 
 | File | Problem | Disposition | Status |
 |---|---|---|---|
 | `README.md` | framing predates router-first identity | rewritten: router-first summary, coverage wording per §1, "not yet on PyPI" banner, link to this file | **DONE** (commit `a68f7e9`) |
 | `docs/ARCHITECTURE.md` | §5.1/§23 "not a proxy" charter conflict (F-36); scope freeze still valid | banner added: identity superseded by this file; §7.3/§8.1 kept as the cache-semantics detail | **DONE** (`a68f7e9`) |
 | `AGENTS.md` | destructive `git reset --hard a0f6ca1`; stale 915 baseline; pointed at out-of-repo `/home/krish/Desktop/HANDOFF-CODEX.md` (F-22) | rewritten: destructive command and pointer removed, baseline 932, handoff named only as obsolete legacy | **DONE** (`a68f7e9`) |
-| `TAMIAS-PROJECT-BRIEF.md` (Desktop) | old cost-observability/bounded-agent framing | rewrite as a 1-page pointer to this file, or rename `TAMIAS-PROJECT-BRIEF.legacy.md` | **PENDING** — owner-gated, outside the repo |
-| `CLAUDE-REVIEW-PROMPT.md` (Desktop) | obsolete review framing | rename `.legacy.md` | **PENDING** — owner-gated |
-| `OBSERVE-EXPERIMENT-CONTROL.md` (Desktop) | obsolete economics-vs-governance framing | rename `.legacy.md` | **PENDING** — owner-gated |
-| Desktop `tamias_agent*.py` | stray legacy scripts | archive under `tamias-agent/legacy/` or delete | **PENDING** — owner-gated |
+| `EXECUTION-REPORT.md` (Desktop) | 0.1.0a4-readiness report framed by an external plan | renamed `EXECUTION-REPORT.legacy.md` with a legacy banner | **DONE** (archived 2026-10-19) |
+| `HANDOFF-CODEX.md` (Desktop) | out-of-repo handoff (F-22 source); contents superseded | renamed `HANDOFF-CODEX.legacy.md` with a legacy banner | **DONE** (archived 2026-10-19) |
+| `TAMIAS-COMPANY-GATEWAY-CONTEXT.md` (Desktop) | superseded company-gateway brief | renamed `TAMIAS-COMPANY-GATEWAY-CONTEXT.legacy.md` + banner | **DONE** (archived 2026-10-19) |
+| `TAMIAS_COMPLETE_PLAN.md` (Desktop) | superseded package-first plan | renamed `TAMIAS_COMPLETE_PLAN.legacy.md` + banner | **DONE** (archived 2026-10-19) |
+| `tamias-refs-2026-10-06.bundle` (Desktop) | stale git bundle of refs | renamed `tamias-refs-2026-10-06.legacy.bundle` (bundle untouched) | **DONE** (archived 2026-10-19) |
+| `TAMIAS-PROJECT-BRIEF.md` / `CLAUDE-REVIEW-PROMPT.md` (earlier listed as "Desktop") | old framing/brief — these actually live in the separate `tamias-agent/` repo | left in place: `tamias-agent/` is a **deferred** repo used only as the §18 benchmark testbed; not renamed here | **DEFERRED** |
+| `tamias-agent/legacy/` for `tamias_agent*.py` | no such scripts exist on the Desktop as of 2026-10-19 | nothing to archive | **N/A** |
 | Future `INTEGRATION.md` | — | write from §9/§19 only; never claim "any agent" | rule |
 
 ## 17. Decided-against list (do not re-propose without new evidence)
