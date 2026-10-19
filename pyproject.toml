@@ -64,9 +64,16 @@ Changelog = "https://github.com/kr1shnac/tamias/blob/master/CHANGELOG.md"
 packages = ["src/tamias"]
 
 [tool.hatch.build.targets.sdist]
-exclude = [
-    "/demo/config.env",
-    "/demo/history",
+# Allowlist, not a denylist: only the package and the files a consumer needs
+# ship in the source distribution. Anything not named here (tests/, docs/,
+# demo/, scripts/, AGENTS.md, BLOCKED.md, TAMIAS-SSOT.md, the root prices.*.toml
+# sheets) is excluded by default. Metadata files (pyproject.toml, LICENSE,
+# README.md, CHANGELOG.md, PKG-INFO) are always added by the builder.
+include = [
+    "/src/tamias",
+    "/LICENSE",
+    "/README.md",
+    "/CHANGELOG.md",
 ]
 
 [tool.pytest.ini_options]

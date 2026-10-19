@@ -41,6 +41,30 @@ jobs:
           assert all(name.startswith("tamias/") or ".dist-info/" in name for name in names)
           assert not any(name.startswith(("agent", "tui", "demo")) for name in names)
           PY
+      - name: Audit sdist contents
+        # The sdist is a public download; it must carry only the package and the
+        # files a consumer needs, never the internals (tests, docs, demo,
+        # scripts, the SSOT/BLOCKED/AGENTS notes, or the root price sheets).
+        run: |
+          python - <<'PY'
+          import tarfile
+          from pathlib import Path
+
+          sdist = next(Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist) as archive:
+              names = [member.name.split("/", 1)[-1] for member in archive.getmembers()]
+          allowed_prefixes = (
+              "src/tamias/",
+              "LICENSE",
+              "README.md",
+              "CHANGELOG.md",
+              "PKG-INFO",
+              "pyproject.toml",
+              ".gitignore",
+          )
+          offenders = [name for name in names if name and not name.startswith(allowed_prefixes)]
+          assert not offenders, "sdist ships non-allowlisted entries: " + ", ".join(offenders)
+          PY
 
   audit:
     runs-on: ubuntu-latest
