@@ -20,8 +20,10 @@ from tamias.store import (  # noqa: E402
     COLUMNS,
     EFFORT_VALUES,
     GENERATION_ID_MAX_CHARS,
+    ROUTE_VALUES,
     Store,
     sanitize_effort,
+    sanitize_route,
 )
 from tamias.types import CostBreakdown, Decision, Usage  # noqa: E402
 
@@ -60,6 +62,7 @@ def log(
     effort_requested: str | None = None,
     effort_used: str | None = None,
     decision_target_effort: str | None = None,
+    route: str | None = None,
 ) -> int:
     return store.log_request(
         ts,
@@ -77,6 +80,7 @@ def log(
         effort_requested=effort_requested,
         effort_used=effort_used,
         decision_target_effort=decision_target_effort,
+        route=route,
     )
 
 
@@ -326,6 +330,7 @@ def test_columns_are_the_documented_set(store: Store) -> None:
         "failure_stage",
         "failure_type",
         "router_mode",
+        "route",
     )
 
 
@@ -432,6 +437,8 @@ def test_reopening_an_old_schema_adds_nullable_audit_columns(tmp_path: Path) -> 
         "cost_source",
         "failure_stage",
         "failure_type",
+        "router_mode",
+        "route",
     } <= columns
 
 
@@ -522,6 +529,66 @@ def test_sanitize_effort_is_pure_and_type_tolerant() -> None:
     assert sanitize_effort(True) is None
     assert sanitize_effort(b"high") is None
     assert sanitize_effort("high") == "high"
+
+
+# --- route is a closed vocabulary, never a request path -----------------------
+
+
+def test_every_known_route_survives_the_round_trip(store: Store) -> None:
+    """Each route label is stored verbatim, so the coverage matrix is exact."""
+    for value in sorted(ROUTE_VALUES):
+        log(store, route=value)
+        assert store.rows()[-1]["route"] == value
+    assert len(store.rows()) == len(ROUTE_VALUES)
+    assert store.rows()[0]["route"] == "chat"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/v1/embeddings",
+        "PASSTHROUGH",
+        "passthrough ",
+        "sk-or-v1-0123456789abcdef",
+        "SECRET-PROMPT",
+        "",
+        "a" * 4096,
+        None,
+        123,
+        ["chat"],
+    ],
+    ids=[
+        "request-path",
+        "wrong-case",
+        "with-space",
+        "api-key",
+        "prompt-like",
+        "empty",
+        "very-long",
+        "none-value",
+        "not-a-string",
+        "not-a-scalar",
+    ],
+)
+def test_a_route_that_is_not_known_is_stored_as_null(store: Store, value: object) -> None:
+    """The store refuses it, whatever the caller passes.
+
+    A route label is written by the proxy's own handlers, never from the wire,
+    but the store is the last line: a value that is not one of tamias's own
+    routes -- a request path, a header, a key -- becomes NULL rather than text.
+    """
+    log(store, route=value)  # type: ignore[arg-type]
+
+    (row,) = store.rows()
+    assert row["route"] is None
+
+
+def test_sanitize_route_is_pure_and_type_tolerant() -> None:
+    """A non-string is never coerced into a route label."""
+    assert sanitize_route(None) is None
+    assert sanitize_route(True) is None
+    assert sanitize_route(b"chat") is None
+    assert sanitize_route("chat") == "chat"
 
 
 def test_a_new_database_and_any_sidecars_are_private_to_the_user(tmp_path: Path) -> None:

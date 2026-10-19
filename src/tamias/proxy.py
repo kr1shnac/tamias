@@ -144,6 +144,10 @@ DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", SESSION_HEADER}
 PROJECT_HEADER = "x-tamias-project"
 
 PASSTHROUGH_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+# The count-only passthrough row still needs a non-NULL model (the log's schema
+# requires one).  A read that names no model is recorded under this placeholder,
+# never under a model name the caller did not send.
+PASSTHROUGH_MODEL = "-"
 UPSTREAM_TIMEOUT_ENV = "TAMIAS_UPSTREAM_TIMEOUT_SECONDS"
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 600.0
 
@@ -167,6 +171,7 @@ class RequestLog(Protocol):
         price_simulated: bool | None = None,
         generation_id: object = None,
         project: object = None,
+        route: str | None = None,
     ) -> int: ...
 
 
@@ -462,6 +467,20 @@ def _body_model(raw: bytes) -> str | None:
         if isinstance(model, str) and model:
             return model
     return None
+
+
+def _json_object(raw: bytes) -> dict[str, Any]:
+    """A JSON object body, or {} when the body is not one.
+
+    The passthrough's session derivation needs a mapping to group by, and
+    off-route traffic may carry anything, so a non-object body is treated as
+    empty rather than raising.
+    """
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _payload_too_large() -> JSONResponse:
@@ -898,6 +917,7 @@ def create_app(
         effort_used: str | None = None,
         failure_stage: str | None = None,
         failure_type: str | None = None,
+        route: str = "chat",
     ) -> None:
         cost = pricing.compute_cost(model_used, usage, sheet)
         metered.log_request(
@@ -923,6 +943,7 @@ def create_app(
             failure_stage=failure_stage,
             failure_type=failure_type,
             router_mode=router_mode,
+            route=route,
         )
 
     def budget_gate(
@@ -933,10 +954,10 @@ def create_app(
         Called only for a key that carries a limit.  The rules are deliberately
         narrow, because a limit is a promise about what the gateway measures: a
         metered route must name a model when money is at stake, and the
-        passthrough -- which the gateway neither prices nor logs -- may not name
-        a model at all.  ``named`` is the model the request will actually run
-        on, which under active routing is the router's target rather than the
-        one the caller typed.
+        passthrough -- which the gateway logs as a count-only row but never
+        prices -- may not name a model at all.  ``named`` is the model the
+        request will actually run on, which under active routing is the
+        router's target rather than the one the caller typed.
         """
         assert ledger is not None  # callers only reach here with a key store
         limits = key.limits
@@ -1257,9 +1278,16 @@ def create_app(
     @app.api_route("/{path:path}", methods=PASSTHROUGH_METHODS)
     async def passthrough(path: str, request: Request) -> Response:
         raw = await request.body()
-        denied = authorize(request, _body_model(raw), raw)
+        model = _body_model(raw)
+        denied = authorize(request, model, raw)
         if denied is not None:
             return denied
+        # The passthrough is never priced and never budget-gated, but it is not
+        # invisible: one count-only row records that a request reached the
+        # upstream off the metered routes, so traffic cannot leave the ledger
+        # without at least a trace (F-12).  Token counts and cost stay NULL --
+        # the route prices nothing -- so the row can never inflate a total.
+        started = time.perf_counter()
         outgoing = client.build_request(
             request.method,
             f"{base}/{path}",
@@ -1268,6 +1296,31 @@ def create_app(
             params=request.query_params,
         )
         upstream = await client.send(outgoing, stream=True)
+        record(
+            session.derive_session_id(
+                dict(request.headers.items()),
+                _json_object(raw),
+                session_salt,
+                wire=session.WIRE_PASSTHROUGH,
+            ),
+            model or PASSTHROUGH_MODEL,
+            model or PASSTHROUGH_MODEL,
+            Usage(
+                input_tokens=None,
+                output_tokens=None,
+                cached_input_tokens=None,
+                cache_write_tokens=None,
+            ),
+            started,
+            upstream.status_code,
+            Decision(
+                action="STAY",
+                target_model=None,
+                reason="passthrough route is not metered",
+            ),
+            project=request.state.project,
+            route="passthrough",
+        )
         return StreamingResponse(
             relay(upstream),
             status_code=upstream.status_code,

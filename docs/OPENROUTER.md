@@ -235,8 +235,9 @@ the report shows the throttling rather than hiding it.
   `STAY` (`reason = "responses route is meter-only"`) and never emits a `SWITCH`.
   So a client on the responses API still sees cost in the report, but will not
   see model switching. Pick `@ai-sdk/openai-compatible` (chat-completions) for
-  full routing; `@ai-sdk/openai` (responses) meters only. Only the catch-all
-  relay for *other* paths forwards without writing a row.
+  full routing; `@ai-sdk/openai` (responses) meters only. The catch-all relay
+  for *other* paths forwards without a price, but it still writes one count-only
+  row per request (`route="passthrough"`).
 - **The endpoint shape here is read off `proxy.py`; the live behaviour is in
   [live-evidence.md](live-evidence.md).** The config shape is from the OpenCode
   docs; the model ids and the `openrouter/free` description are quoted from a

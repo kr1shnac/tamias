@@ -882,13 +882,25 @@ async def test_passthrough_keeps_the_configured_upstream_host_query_and_method(
     store.close()
 
 
-async def test_passthrough_does_not_log_rows(db_path: Path, prices_path: Path) -> None:
-    """Passthrough traffic is relayed, not priced, so it must not invent log rows."""
+async def test_passthrough_logs_one_count_only_row(db_path: Path, prices_path: Path) -> None:
+    """Passthrough is relayed and never priced, but it is counted (F-12).
+
+    The row is the gateway's proof that a request left the metered routes: it
+    records the route, the status and the decision -- and nothing else.  No
+    token counts and no cost are written, so the row can never inflate a total.
+    """
     recorder = Recorder()
     app, store = build_proxy(create_recording_upstream(recorder), db_path, prices_path)
 
     async with proxy_client(app) as client:
-        await client.get(f"{PROXY_URL}//evil.example/x?alpha=1")
+        response = await client.get(f"{PROXY_URL}//evil.example/x?alpha=1")
 
-    assert store.rows() == []
+    (row,) = store.rows()
+    assert row["route"] == "passthrough"
+    assert row["status"] == str(response.status_code)
+    assert row["decision_reason"] == "passthrough route is not metered"
+    assert row["input_tokens"] is None
+    assert row["output_tokens"] is None
+    assert row["computed_list_cost_usd"] is None
+    assert row["cost_source"] == "unknown"
     store.close()

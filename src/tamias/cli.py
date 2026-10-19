@@ -345,6 +345,13 @@ def report(db_path: str, prices_path: str) -> None:
         if _stored_simulated(row) is None or _stored_price_sheet(row) is None
     )
     print(f"requests: {len(rows)}")
+    passthrough = sum(
+        1 for row in rows if isinstance(row, dict) and row.get("route") == "passthrough"
+    )
+    if passthrough:
+        print(
+            f"passthrough requests (count-only, never priced): {passthrough}"
+        )
     # Determine provenance qualifier for total cost
     stored_rows_simulated = any(flag is True for flag in stored_flags)
     is_legacy = unknown_provenance > 0 or (

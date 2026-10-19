@@ -720,7 +720,11 @@ async def test_registers_next_to_the_chat_completions_route(
         relayed = await client.get("/v1/models")
 
     assert response.json()["type"] == "message"
-    assert store.last["model_requested"] == MODEL_CACHED
+    # The relayed GET is now a count-only passthrough row (F-12), so pick the
+    # messages row out by route rather than by position.
+    messages_rows = [row for row in store.rows if row.get("route") == "messages"]
+    assert len(messages_rows) == 1
+    assert messages_rows[0]["model_requested"] == MODEL_CACHED
     assert relayed.status_code == 200
 
 

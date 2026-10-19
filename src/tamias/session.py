@@ -46,6 +46,9 @@ _SALT = os.urandom(16)
 WIRE_CHAT = "chat"
 WIRE_RESPONSES = "responses"
 WIRE_ANTHROPIC = "anthropic"
+# Off-route traffic (the count-only passthrough) carries no shape tamias parses,
+# so it groups by credential and any explicit session header alone.
+WIRE_PASSTHROUGH = "passthrough"
 
 SYSTEM_ROLES = frozenset({"system", "developer"})
 USER_ROLES = frozenset({"user"})
@@ -173,6 +176,9 @@ def identity(headers: dict[str, str], body: dict[str, Any], wire: str) -> str:
     elif wire == WIRE_RESPONSES:
         system_text = ""
         user_text = _responses_user_text(body)
+    elif wire == WIRE_PASSTHROUGH:
+        system_text = ""
+        user_text = ""
     else:
         raise ValueError(f"unknown wire format: {wire!r}")
     return json.dumps(

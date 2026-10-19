@@ -98,8 +98,9 @@ discovered later:
   That is the honest reading of "you cannot afford a request this large".
 - **Money limits need a priced model.** A model the sheet cannot price produces
   `UNKNOWN`, which cannot be spent against, so a limited key may not reach it.
-- **A model-naming passthrough is refused.** The unlogged passthrough route is
-  open only when its body names no model.
+- **A model-naming passthrough is refused.** The passthrough route is never
+  priced (it writes a count-only row only) and is open only when its body names
+  no model.
 - **`tpm` can overshoot by output tokens.** Only the prompt is estimated at
   admission; the completion is counted at settlement.
 - **An unmeasured cost is charged the ceiling**, so an operator whose sheet lacks

@@ -110,6 +110,7 @@ def log(
     model_used: str = "gpt-4o",
     model_requested: str = "gpt-4o",
     price_sheet: str | None = None,
+    route: str | None = None,
 ) -> None:
     store = Store(db)
     store.log_request(
@@ -128,6 +129,7 @@ def log(
         decision=Decision(action=action, target_model=None, reason="test"),
         price_sheet=price_sheet,
         price_simulated=False if price_sheet is not None else None,
+        route=route,
     )
     store.close()
 
@@ -167,6 +169,25 @@ def test_report_counts_requests_and_totals_known_costs(
     assert money(out, "total cost") == pytest.approx(BIG_ON_STRONG + 2 * SMALL_ON_STRONG)
     assert "billed cost: UNKNOWN" in out
     assert "price provenance: provenance unknown (3 of 3 priced rows)" in out
+
+
+def test_report_counts_passthrough_rows_without_pricing_them(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-12: off-route traffic is counted by the report, and only counted.
+
+    A passthrough row carries no token counts and no cost, so the number of
+    rows the report shows must equal the number of requests the proxy logged --
+    the ledger can say "this happened" without inventing a price for it.
+    """
+    db = str(tmp_path / "log.db")
+    log(db, BIG, BIG_ON_STRONG, "STAY")
+    log(db, Usage(None, None, None, None), None, "STAY", model_used="-", route="passthrough")
+    log(db, Usage(None, None, None, None), None, "STAY", model_used="-", route="passthrough")
+    code, out = run(capsys, db, write_prices(tmp_path))
+    assert code == 0
+    assert "requests: 3" in out
+    assert "passthrough requests (count-only, never priced): 2" in out
 
 
 def test_report_prints_unknown_when_any_cost_is_missing(

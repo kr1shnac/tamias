@@ -41,9 +41,11 @@ __all__ = [
     "sanitize_generation_id",
     "sanitize_project",
     "sanitize_effort",
+    "sanitize_route",
     "GENERATION_ID_MAX_CHARS",
     "EFFORT_MAX_CHARS",
     "EFFORT_VALUES",
+    "ROUTE_VALUES",
 ]
 
 TABLE = "requests"
@@ -70,6 +72,12 @@ _PROJECT = re.compile(r"[A-Za-z0-9_.-]+")
 EFFORT_VALUES = frozenset({"low", "medium", "high", "minimal", "none", "auto"})
 EFFORT_MAX_CHARS = max(len(value) for value in EFFORT_VALUES)
 
+# The route a row arrived on.  A closed vocabulary like EFFORT_VALUES, so a
+# value tamias did not itself choose is stored as NULL rather than as text.
+# "passthrough" is the count-only catch-all: it records that a request reached
+# the upstream off the metered routes, without pricing it (F-12).
+ROUTE_VALUES = frozenset({"chat", "messages", "responses", "passthrough"})
+
 FAILURE_STAGES = frozenset({"setup", "stream"})
 FAILURE_TYPES = frozenset(
     {
@@ -89,6 +97,13 @@ def sanitize_effort(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     return value if value in EFFORT_VALUES else None
+
+
+def sanitize_route(value: object) -> str | None:
+    """Return `value` when it names a known route, else None (SQL NULL)."""
+    if not isinstance(value, str):
+        return None
+    return value if value in ROUTE_VALUES else None
 
 
 def sanitize_failure(value: object, allowed: frozenset[str]) -> str | None:
@@ -152,6 +167,7 @@ COLUMNS = (
     "failure_stage",
     "failure_type",
     "router_mode",
+    "route",
 )
 
 _CREATE_TABLE = f"""
@@ -184,7 +200,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     cost_source TEXT,
     failure_stage TEXT,
     failure_type TEXT,
-    router_mode TEXT
+    router_mode TEXT,
+    route TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_session ON {TABLE}(session_id);
 CREATE TABLE IF NOT EXISTS {META_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -248,6 +265,7 @@ class Store:
             ("failure_stage", "TEXT"),
             ("failure_type", "TEXT"),
             ("router_mode", "TEXT"),
+            ("route", "TEXT"),
         ):
             if name not in present:
                 self._conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
@@ -308,6 +326,7 @@ class Store:
         failure_stage: str | None = None,
         failure_type: str | None = None,
         router_mode: str | None = None,
+        route: str | None = None,
     ) -> int:
         """Append one request and return its row id.
 
@@ -357,6 +376,7 @@ class Store:
             sanitize_failure(failure_stage, FAILURE_STAGES),
             sanitize_failure(failure_type, FAILURE_TYPES),
             router_mode,
+            sanitize_route(route),
         )
         with self._lock:
             cursor = self._conn.execute(_INSERT, row)

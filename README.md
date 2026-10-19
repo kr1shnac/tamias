@@ -189,14 +189,14 @@ If an agent's tools return `Error: ...`, configure `error_markers`; see
 
 ## Client matrix
 
-Three client protocols are metered. Any other path is relayed unlogged.
+Three client protocols are priced. Any other path is relayed unpriced, but each such request is still counted (one `route="passthrough"` row with no tokens and no cost, shown by `tamias report`).
 
 | Client protocol | Route | Streaming | Buffered |
 | --- | --- | --- | --- |
 | OpenAI Chat Completions | `POST /v1/chat/completions` | metered | metered |
 | Anthropic Messages | `POST /v1/messages` | metered | metered |
 | OpenAI Responses | `POST /v1/responses` | metered | metered |
-| Anything else | `/{path}` | relayed, not logged | relayed, not logged |
+| Anything else | `/{path}` | relayed, count-only | relayed, count-only |
 
 ## Capability matrix
 

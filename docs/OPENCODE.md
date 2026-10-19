@@ -242,7 +242,7 @@ number appear. `?` in a report means exactly that.
 | Model missing from `/models` in OpenCode | Check `opencode debug config`, and that `models` keys match the ids in your price sheet. |
 | Every row has `session_id = default` | No `x-tamias-session` header arrived, so all requests fell into the `default` session. OpenCode does not appear to send this header (unverified — see below); a plugin is needed to group rows by conversation. |
 | `tamias serve` exits 1 at startup | Price sheet missing, unreadable, or missing its top-level `date`. The message names the file. |
-| Nothing logged after a request | The path was neither `/v1/chat/completions`, `/v1/messages`, nor `/v1/responses` — those three are logged. Every other path is relayed by the catch-all without a row. |
+| Nothing priced after a request | The path was neither `/v1/chat/completions`, `/v1/messages`, nor `/v1/responses` — those three are priced. Every other path is relayed by the catch-all without a price, though it still leaves one count-only row (`route="passthrough"`, shown by `tamias report`). |
 
 ## What I could not verify
 

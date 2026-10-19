@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against it and print a provenance warning on stderr, so a fresh install
   prices a request above `$0.00` instead of looking like a broken proxy (F-20).
   The sheet is a dated snapshot; run `tamias prices fetch` for current rates.
+- The catch-all passthrough now writes one **count-only** row per request
+  (`route="passthrough"`, token counts and cost NULL, reason `passthrough
+  route is not metered`), and `tamias report` prints
+  `passthrough requests (count-only, never priced): N`. Off-route traffic is
+  still never priced or budget-gated, but it can no longer leave the ledger
+  invisible (F-12). The request log gains a `route` column
+  (`chat`/`messages`/`responses`/`passthrough`); existing logs get it via the
+  usual append-only migration.
 
 ## [0.1.0a6] - 2026-10-15
 

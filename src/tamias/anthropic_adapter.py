@@ -111,6 +111,7 @@ class RequestLog(Protocol):
         price_sheet: str | None = None,
         price_simulated: bool | None = None,
         project: object = None,
+        route: str | None = None,
     ) -> int: ...
 
 
@@ -488,6 +489,7 @@ def register_routes(
             project=project,
             failure_stage=failure_stage,
             failure_type=failure_type,
+            route="messages",
         )
 
     async def _stream_messages(

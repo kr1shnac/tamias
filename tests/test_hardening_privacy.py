@@ -256,6 +256,7 @@ EXPECTED_COLUMNS = (
     "failure_stage",
     "failure_type",
     "router_mode",
+    "route",
 )
 
 # Every column whose declared SQL type can hold text, and the single thing allowed
@@ -358,6 +359,16 @@ TEXT_COLUMN_ALLOW_LIST = {
     "router_mode": (
         "the proxy's router mode at record time, e.g. 'shadow', 'active' or 'off', "
         "written from the running configuration alone and never from a request or response"
+    ),
+    # The route a row arrived on, for the count-only passthrough (F-12) and the
+    # coverage matrix.  Like the effort columns it is a closed vocabulary, not a
+    # shape: store.sanitize_route admits the four literals in store.ROUTE_VALUES
+    # ("chat", "messages", "responses", "passthrough") and NULLs everything else,
+    # so it is written by the proxy's own route handlers and cannot carry a
+    # request path, a prompt or a key.
+    "route": (
+        "the proxy's own route label, store.sanitize_route: one of "
+        "store.ROUTE_VALUES or NULL, never a request path or header"
     ),
 }
 

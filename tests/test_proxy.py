@@ -770,7 +770,12 @@ async def test_other_paths_and_methods_pass_through(
     assert deleted.status_code == 200
     assert deleted.json()["echo"]["path"] == "/v1/threads/abc"
 
-    assert store.rows == []
+    # Every passthrough request leaves exactly one count-only row: the traffic is
+    # relayed and never priced, but it can no longer leave the ledger invisible
+    # (F-12).  The rows carry no token counts and no cost.
+    assert [row["route"] for row in store.rows] == ["passthrough"] * 3
+    assert all(row["usage"].input_tokens is None for row in store.rows)
+    assert all(row["cost"].usd is None for row in store.rows)
 
 
 async def test_passthrough_response_is_relayed(client: httpx.AsyncClient) -> None:
