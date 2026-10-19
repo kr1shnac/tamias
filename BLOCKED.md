@@ -47,3 +47,12 @@ Codex could not resolve `pypi.org`/`github.com`. Earlier work in this repo
 had already pushed `master` and the `v0.1.0a2` tag to GitHub; the
 `v0.1.0a3` effort-routing release remains to be pushed and uploaded.
 TestPyPI still requires the user's API token (`~/.pypirc` / T-23).
+
+**STATUS 2026-10-19.** Both halves above are now stale. `v0.1.0a3` **is**
+published: `https://test.pypi.org/pypi/tamias/json` serves `0.1.0a3`, and the
+`v0.1.0a3`, `v0.1.0a4` and `v0.1.0a5` tags are on GitHub. Real PyPI still has
+nothing (`https://pypi.org/pypi/tamias/json` → 404): the tag-triggered publish
+workflow is gated on the `pypi` environment, which the owner has not approved.
+Current state: `master` is 11 commits ahead of `origin/master` and unpushed.
+Publishing `0.1.0a6` still needs the owner's pending publisher, the `pypi`
+environment approval, and a TestPyPI token for the rehearsal.

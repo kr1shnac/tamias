@@ -1,6 +1,9 @@
 # Release Status
 
-## Public alpha (0.1.0a4)
+## Public alpha — source `0.1.0a6` (unreleased); newest published is TestPyPI `0.1.0a3`
+
+The table below describes the current source tree. Nothing is published on real
+PyPI; TestPyPI serves `0.1.0a3` (2026-10-07).
 
 | Area | Status | Evidence or limitation |
 | --- | --- | --- |
