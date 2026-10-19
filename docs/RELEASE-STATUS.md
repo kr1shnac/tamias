@@ -21,6 +21,7 @@ PyPI; TestPyPI serves `0.1.0a3` (2026-10-07).
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
+| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised. The 2026-10-19 EVIDENCE GATE resolves to **Option 3** — the governance/metering layer is v1 — with the caveat "budgets UNTESTED" and no savings claim (`TAMIAS-SSOT.md` §10) |
 | Live provider behavior | Unverified | CI uses offline/injected transports only |
 | Package build | CI-gated | Build, `twine check`, and fresh-venv wheel smoke run in GitHub Actions |
 | Publish | Not done | Requires a PyPI pending publisher and explicit approval (see RELEASE-CHECKLIST.md) |

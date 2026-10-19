@@ -3,7 +3,7 @@
 > **STATUS BANNER — read first.**
 > This document is **Design Spec v1.1 — status: DESIGNED, UNVALIDATED.** It is the reference artifact for Tamias **from now until production**; after production it is updated, not replaced. It is *not* "final" and must not be cited as evidence of savings or quality — three independent councils (§14) established that the savings instrument could not yet falsify its own claim and that **zero savings have ever been measured**. That formula half is now fixed (2026-10-19: `saved` is cache-aware and can be negative, F-1), but no figure has been reconciled against a real invoice. §10 lists the three exit criteria that must be met before any later version may be called final or cited in a paper.
 > **Every factual claim carries a status tag:** `PROVEN` = verified by test, live run, or audit spot-check, with source cited. `DESIGNED` = decided in design/council, not implemented or measured. `UNTESTED` = implemented but only fixture/mock-tested or unverified against a live provider. `UNVERIFIED` = asserted, evidence not checked. **An untagged sentence must be treated as `UNVERIFIED`.** Factual claims carry a verification date when they describe the moving codebase.
-> **v1.1 changes vs v1.0 (all re-verified 2026-10-19 against the repo by grep):** §6 session-digest description corrected (first user message, not last; `x-tamias-session` precedence); §9 coverage matrix corrected — `/v1/messages` **does** rewrite the model (router.decide + applied_target) — only `/v1/responses` is meter-only, and **effort** is chat-completions-only; §3 error-marker description made precise (default vs generic profile); test count refreshed (915 collected, 48 test files); §15–§20 added (file map, misrepresenting-file dispositions, decided-against list, benchmark protocol, per-agent integration status, update policy).
+> **v1.1 changes vs v1.0 (all re-verified 2026-10-19 against the repo by grep):** §6 session-digest description corrected (first user message, not last; `x-tamias-session` precedence); §9 coverage matrix corrected — `/v1/messages` **does** rewrite the model (router.decide + applied_target) — only `/v1/responses` is meter-only, and **effort** is chat-completions-only; §3 error-marker description made precise (default vs generic profile); test count refreshed (932 collected, 48 test files); §15–§20 added (file map, misrepresenting-file dispositions, decided-against list, benchmark protocol, per-agent integration status, update policy).
 > **Later fixes, 2026-10-19 (each re-verified against the repo):** **F-20** — a real, dated OpenRouter price sheet is now bundled, so first run prices above `$0.00`; **F-6** — resolved with evidence (published TestPyPI `0.1.0a3` accepts `--router-mode active`; only the never-published `v0.1.0a4`/`a5` tags reject it); **F-12** — the catch-all passthrough now writes one count-only row per request and `tamias report` counts them; **F-1 (code half)** — the savings arithmetic is now **cache-aware and can go negative**: the dashboard `saved` and both `tamias report` saving lines price the stay model with a warm cache and the switch model on the row's real counts, so a constructed cache-miss replay yields `saved ≤ 0` (provider-invoice reconciliation, F-5, is still pending).
 > Update rule: change a tag only by changing the underlying evidence, and say where the evidence is (§14, §20).
 
@@ -117,7 +117,7 @@ Enumerated bypasses / weaknesses:
 - **Invoice reconciliation** is the cheapest oracle-free ground truth for the *cost* half of the claim: compare the meter to the provider bill; no quality question needed. `DESIGNED` (peer review).
 - **F-19:** the experiment itself costs money (both arms of a paired/executing-shadow benchmark) and can rival the savings it tests; budget it and get consent for real-traffic manipulation. `DESIGNED` concern.
 - **F-16:** streaming usage undercount may partly explain $0.00/UNKNOWN rows (`claims.md:42` VERIFIED; other causes there: model not in price sheet; provider omits `prompt_tokens_details.cached_tokens`; sheet prices cached_input differently). `PROVEN` known causes, extent `UNTESTED`.
-- First run prints **$0.00** because shipped price sheets are all zero (`claims.md:15` VERIFIED) — indistinguishable from a broken proxy (F-20). Seed real rates; add a first-run banner. `PROVEN` symptom.
+- First run used to print **$0.00** because shipped price sheets were all zero (`claims.md:15` VERIFIED) — indistinguishable from a broken proxy (F-20). **Fixed 2026-10-19:** the package now ships a dated OpenRouter snapshot bundled at `src/tamias/prices.toml` and the resolver falls back flag → `./prices.toml` → `~/.tamias/prices.toml` → bundle (a `--prices` path given explicitly but missing still exits 2). A clean install prints a non-zero cost line without any price file of its own.
 
 ## 9. Coverage matrix (per endpoint × stage) — verified against source 2026-10-19
 
@@ -125,7 +125,7 @@ Enumerated bypasses / weaknesses:
 |---|---|---|---|
 | METER | implemented (`PROVEN`) | implemented (`PROVEN`, anthropic_adapter) | implemented (`PROVEN`) |
 | CLASSIFY | implemented (messages[-1] rules, `PROVEN`) | implemented — calls `router.decide` (anthropic_adapter.py:427, `PROVEN`) | **never** |
-| ROUTE L1 model | implemented in source (`UNTESTED` live; F-6 conflict) | implemented — `router.applied_target`, gated on active mode + allowlist (anthropic_adapter.py:556, `PROVEN`) | **never — meter-only by design** (responses_adapter.py:2-3) |
+| ROUTE L1 model | implemented in source (`UNTESTED` live; F-6 resolved 2026-10-19 — `active` accepted in every published artifact) | implemented — `router.applied_target`, gated on active mode + allowlist (anthropic_adapter.py:556, `PROVEN`) | **never — meter-only by design** (responses_adapter.py:2-3) |
 | ROUTE L2 effort | implemented, fixture-only (`UNTESTED`; proxy.py:872) | **not applied** (`PROVEN` absence; EFFORT.md:29-30) | **not applied** |
 | CACHE-GATE (L4) | designed | designed | n/a |
 | SHAPE (L3) | designed | designed | designed |
@@ -144,12 +144,14 @@ v1.0 of this matrix wrongly said `/v1/messages` routing was "not implemented" �
 
 Even after these, the file may be called final **for design**; claims of *savings* additionally require a positive signed net delta from the paired benchmark; claims of *quality non-inferiority* additionally require the off-proxy oracle and held-out grading (§4).
 
+**EVIDENCE GATE — assessed 2026-10-19 (council `20261019-1732`).** The gate is reached after the measurement-honesty phase. Of its six tasks, four are **done**: B1 (real rates, F-20), B3 (`saved` falsifiable, F-1 code half), B4 (passthrough counter, F-12) and B5 (F-6). Two are **unfunded**: B2 (paid provider reconciliation) and B6 (the null-hypothesis arm, F-18). With the phase done only partially and no owner-named buyer, the council's rule resolves to **Option 3 — the governance/metering layer is the finished v1 — with the explicit caveat "budgets UNTESTED" and no savings claim.** The "passthrough leak open (F-12)" caveat the rule attaches no longer applies: F-12 is closed. Reaching Phase D (the paid paired benchmark, §18) still requires the budget and a writable task oracle (F-35). The formal declaration is the owner's; this records the assessment.
+
 ## 11. Roadmap and build order (dependency-ordered; `DESIGNED`)
 
-**Phase 0 — documentation truth (done in this file; the remaining doc edits are §16 dispositions).**
+**Phase 0 — documentation truth (DONE 2026-10-19):** this file plus the in-repo §16 dispositions (`README.md`, `docs/ARCHITECTURE.md`, `AGENTS.md`). The remaining §16 items are Desktop files and are owner-gated.
 
 **Phase 1 — measurement honesty (the chairman's concrete next step, run 2321):**
-1. Seed real rates into price sheets; first run must not print $0.00 (F-20). Check: fresh install + one request → non-zero cost line.
+1. Seed real rates into price sheets; first run must not print $0.00 (F-20). Check: fresh install + one request → non-zero cost line. **DONE 2026-10-19** — bundle-and-fallback as in §8; the committed wheel ships `src/tamias/prices.toml`.
 2. Make the meter externally falsifiable: reconcile logged token counts/cost against provider-reported usage for the recorded live runs; recompute `saved` with a cache-aware formula that can emit a negative number (F-1). Check: ≥95% of rows match provider usage within a stated tolerance; a constructed cache-miss replay yields `saved ≤ 0`. **Half DONE 2026-10-19** — the arithmetic is cache-aware (`pricing.assume_cache_warm`; `dashboard.py:_price`; `cli.py:_saving`/realised saving) and a constructed replay asserts `saved ≤ 0` (`tests/test_dashboard.py::test_a_cache_miss_replay_can_show_a_negative_saving`, `tests/test_cli.py::test_report_shows_a_negative_saving_when_a_switch_would_have_lost`). **The provider-reconciliation half is still open** — it needs a paid, non-zero-price live run.
 3. Count-only meter on the passthrough route (F-12). Check: proxy-level counter == `tamias report` count. **DONE 2026-10-19** — every catch-all request logs one `route="passthrough"` row with NULL tokens/cost; `tamias report` prints the count (`tests/test_cli.py::test_report_counts_passthrough_rows_without_pricing_them`, `tests/test_hardening_proxy.py::test_passthrough_logs_one_count_only_row`).
 
@@ -193,9 +195,11 @@ Even after these, the file may be called final **for design**; claims of *saving
   - `20261018-1820` — architecture approach: Tamias = rewriter, not orchestrator (orchestrator disqualified: merge = harness change); register T-1..T-25; cache-rebuild can invert savings; model identity load-bearing; transcript portability.
   - `20261018-2248` — quality guard: no quality guarantee observable from inside the proxy; failure undefined; durable outcome ledger first; executing shadow; off-proxy oracle; segmentation; idempotency; feedback channel adversarial; register T-13..T-33.
   - `20261018-2321` — final review (whole-project): Option 3 verdict; F-1..F-36; reviewer consensus ranked Contrarian and First Principles highest; six peer-review-only findings folded in (null hypothesis F-18, concurrency F-15, streaming undercount F-16, registry supply chain F-17, invoice reconciliation §8, experiment cost F-19).
-- **Simulation flags:** all three councils used real isolated subagents (5+5+1 per run); no fabricated outputs; run 2321 was clean (no retries); one anonymization deviation noted in run 1820's transcript.
+  - `20261019-1732` — finish plan (whole-project): **Option 2 sequence with an Option 3 ceiling** — land the truth, then Phase 1 measurement honesty, then an EVIDENCE GATE. Produced the Phase A/B roadmap in §11 and the artifact-disposition table in §16; its EVIDENCE-GATE verdict is recorded in §10.
+- **Other runs:** the same `.council/runs/` root holds **14** run directories in total — the three above, six agent-integration runs (`20261019-0058`, `0131`, `1330`, `1417`, `1550`, `2330`), the finish-plan run, and two SQLite-vs-Postgres evaluations (`20261016-1516`, `20261018-1625`). Only the runs named here bear on identity, governance and build order; the rest settle narrower runtime or agent-coverage choices.
+- **Simulation flags:** all council runs used real isolated subagents (5+5+1 per run); no fabricated outputs; run 2321 was clean (no retries); one anonymization deviation noted in run 1820's transcript.
 - **Code-truth authority:** `tamias/docs/audit/claims.md` outranks this file on any code question; this file outranks the older briefs/architecture docs on what Tamias *is*.
-- **Verification practice:** v1.1 claims about the moving codebase were re-checked 2026-10-19 by grep (dashboard baseline, cli ROUTER_MODES, router markers, effort scope, anthropic routing, session derivation, registry fields, budget/keys existence, LICENSE, 915 collected tests across 48 test files). A final consistency pass the same day re-located the unlogged passthrough route (proxy.py:1257-1275; the claims.md-internal citation 799-802 is stale, claim still holds), corrected the bearer-token comparison to proxy.py:740 (the loopback policy is what security.py enforces — it refuses wider binds, stronger than "default"), and removed a duplicated phrase in §4. All three council run directories re-listed and complete (framed-question, advisors, reviews, mapping, aggregate, chairman, verification, transcript, report.html).
+- **Verification practice:** v1.1 claims about the moving codebase were re-checked 2026-10-19 by grep (dashboard baseline, cli ROUTER_MODES, router markers, effort scope, anthropic routing, session derivation, registry fields, budget/keys existence, LICENSE, 932 collected tests across 48 test files). A final consistency pass the same day re-located the unlogged passthrough route (proxy.py:1257-1275; the claims.md-internal citation 799-802 is stale, claim still holds), corrected the bearer-token comparison to proxy.py:740 (the loopback policy is what security.py enforces — it refuses wider binds, stronger than "default"), and removed a duplicated phrase in §4. All 14 council run directories re-listed and complete (framed-question, advisors, reviews, mapping, aggregate, chairman, verification, transcript, report.html).
 
 ## 15. Project file map (repo: `/home/krish/Desktop/tamias`, package `src/tamias/`, 932 tests, MIT)
 
@@ -219,20 +223,20 @@ Even after these, the file may be called final **for design**; claims of *saving
 | `tests/` | 48 files, 932 collected (2026-10-19): fixtures + mock upstreams; `mock_upstream.py`, `mock_anthropic_upstream.py` | `PROVEN` fixture-level |
 | `TAMIAS-SSOT.md` (this file, repo root) | the single source of truth | v1.1 |
 
-Outside the repo: `/home/krish/Desktop/TAMIAS-PROJECT-BRIEF.md`, `CLAUDE-REVIEW-PROMPT.md`, `OBSERVE-EXPERIMENT-CONTROL.md` (legacy framing — §16); `/home/krish/Desktop/tamias-agent/` (the old agent harness; **deferred**, used only as a benchmark testbed for §18); stray `tamias_agent*.py` on the Desktop (legacy experiments; disposition with §16); `/home/krish/Desktop/.council/runs/` (three council runs, §14).
+Outside the repo: `/home/krish/Desktop/TAMIAS-PROJECT-BRIEF.md`, `CLAUDE-REVIEW-PROMPT.md`, `OBSERVE-EXPERIMENT-CONTROL.md` (legacy framing — §16); `/home/krish/Desktop/tamias-agent/` (the old agent harness; **deferred**, used only as a benchmark testbed for §18); stray `tamias_agent*.py` on the Desktop (legacy experiments; disposition with §16); `/home/krish/Desktop/.council/runs/` (14 council runs, §14).
 
-## 16. Misrepresenting files — dispositions (planned edits; not yet executed)
+## 16. Misrepresenting files — dispositions (in-repo edits executed 2026-10-19; Desktop items owner-gated)
 
-| File | Problem | Disposition |
-|---|---|---|
-| `TAMIAS-PROJECT-BRIEF.md` (Desktop) | old cost-observability/bounded-agent framing | rewrite as a 1-page pointer to this file, or rename `TAMIAS-PROJECT-BRIEF.legacy.md` |
-| `CLAUDE-REVIEW-PROMPT.md` (Desktop) | obsolete review framing | rename `.legacy.md` |
-| `OBSERVE-EXPERIMENT-CONTROL.md` (Desktop) | obsolete economics-vs-governance framing | rename `.legacy.md` |
-| `tamias/README.md` | framing predates router-first identity | rewrite top section: router-first summary + link to this file; coverage wording per §1 exactly |
-| `tamias/ARCHITECTURE.md` | §5.1/§23 "not a proxy" charter conflict (F-36); scope freeze still valid | add banner: superseded by TAMIAS-SSOT.md for identity; keep cache-semantics sections (§7.3/§8.1) as the detailed reference |
-| `tamias/AGENTS.md:3` | instructs reading `/home/krish/Desktop/HANDOFF-CODEX.md` — outside the repo (F-22) | move handoff into repo or document the external dependency |
-| Desktop `tamias_agent*.py` | stray legacy scripts | archive under `tamias-agent/legacy/` or delete |
-| Future `INTEGRATION.md` | — | write from §9/§19 only; never claim "any agent" |
+| File | Problem | Disposition | Status |
+|---|---|---|---|
+| `README.md` | framing predates router-first identity | rewritten: router-first summary, coverage wording per §1, "not yet on PyPI" banner, link to this file | **DONE** (commit `a68f7e9`) |
+| `docs/ARCHITECTURE.md` | §5.1/§23 "not a proxy" charter conflict (F-36); scope freeze still valid | banner added: identity superseded by this file; §7.3/§8.1 kept as the cache-semantics detail | **DONE** (`a68f7e9`) |
+| `AGENTS.md` | destructive `git reset --hard a0f6ca1`; stale 915 baseline; pointed at out-of-repo `/home/krish/Desktop/HANDOFF-CODEX.md` (F-22) | rewritten: destructive command and pointer removed, baseline 932, handoff named only as obsolete legacy | **DONE** (`a68f7e9`) |
+| `TAMIAS-PROJECT-BRIEF.md` (Desktop) | old cost-observability/bounded-agent framing | rewrite as a 1-page pointer to this file, or rename `TAMIAS-PROJECT-BRIEF.legacy.md` | **PENDING** — owner-gated, outside the repo |
+| `CLAUDE-REVIEW-PROMPT.md` (Desktop) | obsolete review framing | rename `.legacy.md` | **PENDING** — owner-gated |
+| `OBSERVE-EXPERIMENT-CONTROL.md` (Desktop) | obsolete economics-vs-governance framing | rename `.legacy.md` | **PENDING** — owner-gated |
+| Desktop `tamias_agent*.py` | stray legacy scripts | archive under `tamias-agent/legacy/` or delete | **PENDING** — owner-gated |
+| Future `INTEGRATION.md` | — | write from §9/§19 only; never claim "any agent" | rule |
 
 ## 17. Decided-against list (do not re-propose without new evidence)
 
