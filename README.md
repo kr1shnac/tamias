@@ -50,7 +50,11 @@ tamias serve --upstream https://your-provider.example --prices prices.toml --db 
 
 `tamias doctor` is offline by default. Add `--online` only when you want its
 short, timed upstream reachability check. It warns for a missing
-`OPENROUTER_API_KEY` without showing its value.
+`OPENROUTER_API_KEY` without showing its value, and it exits **0 when ready**
+and **1 when a blocking check fails** (unsupported Python, an unwritable log
+directory, or a busy port); WARN lines do not change the exit code. When no
+`--prices` is given it reports the bundled snapshot rather than warning about an
+absent `prices.toml`, matching what `serve` will actually price with.
 
 Run one agent command through a temporary local proxy with `tamias run`:
 

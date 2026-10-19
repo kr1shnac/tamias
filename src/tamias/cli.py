@@ -1151,11 +1151,19 @@ def doctor(
     port: int,
     online: bool,
     upstream: str,
+    explicit: bool = True,
     today: date | None = None,
     opener: Callable[..., Any] = urlopen,
     port_checker: Callable[[int], bool] | None = None,
 ) -> int:
-    """Print local readiness checks without contacting an upstream by default."""
+    """Print local readiness checks without contacting an upstream by default.
+
+    Exit code is a contract: **0 = ready, 1 = a blocking problem**. ``FAIL``
+    lines (unsupported Python, an unwritable DB directory, a busy port) set the
+    exit code; ``WARN`` lines (a stale price sheet, a missing API key, an
+    unreachable upstream) do not, so a WARN-only run still exits 0 and is safe
+    to chain with ``&&``.
+    """
     blocking = False
     python_version = (sys.version_info.major, sys.version_info.minor)
     if python_version >= (3, 11):
@@ -1173,7 +1181,19 @@ def doctor(
         else:
             print(f"OK Price sheet: {prices} ({age.days} days old)")
     except (OSError, ValueError) as exc:
-        print(f"WARN Price sheet: {exc}")
+        if not explicit:
+            # No sheet was named, and this is a fresh checkout/install: the
+            # resolver will price with the snapshot bundled in the package, so
+            # the missing local file is not a problem.
+            bundled = _bundled_prices_path()
+            if bundled is not None:
+                print(
+                    f"OK Price sheet: no local sheet; will use the bundled snapshot ({bundled})"
+                )
+            else:
+                print(f"WARN Price sheet: {exc}")
+        else:
+            print(f"WARN Price sheet: {exc}")
 
     db_directory = db.parent
     if db_directory.is_dir() and os.access(db_directory, os.W_OK):
@@ -1908,6 +1928,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             online=args.online,
             upstream=args.upstream,
+            explicit=_flag_given(args, "--prices"),
         )
     if args.command == "prune":
         return prune(args)

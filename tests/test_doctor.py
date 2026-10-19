@@ -127,3 +127,50 @@ def test_doctor_reports_a_large_db_and_suggests_prune(tmp_path: Path, capsys, mo
     out = capsys.readouterr().out
     assert "WARN DB size:" in out
     assert "tamias prune --db" in out
+
+
+def test_doctor_uses_the_bundled_snapshot_when_no_sheet_is_named(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    # No --prices given and no local sheet: the resolver prices with the bundled
+    # snapshot, so doctor must not warn (F-20 first-run trap).
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "_bundled_prices_path", lambda: Path("/bundled/prices.default.toml"))
+
+    code = doctor(
+        prices=tmp_path / "prices.toml",
+        db=tmp_path / "requests.db",
+        port=0,
+        online=False,
+        upstream="https://example.invalid",
+        explicit=False,
+        today=date(2026, 10, 6),
+        port_checker=lambda _: True,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "OK Price sheet: no local sheet; will use the bundled snapshot" in out
+    assert "WARN Price sheet:" not in out
+
+
+def test_doctor_still_warns_when_an_explicit_sheet_is_missing(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    # An explicitly named file that does not exist is a real problem: the caller
+    # named it, and silently pricing with another would be worse than stopping.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    code = doctor(
+        prices=tmp_path / "missing.toml",
+        db=tmp_path / "requests.db",
+        port=0,
+        online=False,
+        upstream="https://example.invalid",
+        explicit=True,
+        today=date(2026, 10, 6),
+        port_checker=lambda _: True,
+    )
+
+    assert code == 0
+    assert "WARN Price sheet:" in capsys.readouterr().out
