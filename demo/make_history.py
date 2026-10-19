@@ -713,7 +713,14 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# Three weeks of agent history -- SYNTHETIC",
         "",
+        "> ## SYNTHETIC DEMO DATA — NOT MEASURED SAVINGS",
+        ">",
         f"> {SYNTHETIC_NOTE}",
+        ">",
+        "> Every task, token count and `result` below is invented, and the rates are",
+        "> made up. The dollar figures are arithmetic over invented numbers, **not**",
+        "> evidence that Tamias saves money. **No savings have ever been measured in",
+        "> this project** (see [`TAMIAS-SSOT.md`](../../TAMIAS-SSOT.md) §8).",
         "",
         f"Window **{window['start']} .. {window['end']}** ({window['days']} days), "
         f"seed `{summary['seed']}`, priced with `{summary['price_sheet']['path']}` "
@@ -731,12 +738,14 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         f"{totals['output_tokens']:,} / {totals['cached_input_tokens']:,} |",
         f"| Same traffic, all on the strong model | ${totals['all_strong_usd']:.4f} |",
         f"| Same traffic, the mix the router chose | ${totals['actual_mix_usd']:.4f} |",
-        f"| **List-price saving** | **${totals['saving_usd']:.4f} "
-        f"({totals['saving_pct']:.1f}%)** |",
+        f"| **Same-tokens saving (an upper bound, not measured)** | "
+        f"**${totals['saving_usd']:.4f} ({totals['saving_pct']:.1f}%)** |",
+        "| Cache-aware `realised saving` | lower than the row above — a real switch "
+        "also pays to re-ingest context (`tamias report`) |",
         "",
         "## By week",
         "",
-        "| week | sessions | requests | switches | all strong | actual mix | saving |",
+        "| week | sessions | requests | switches | all strong | actual mix | saving (bound) |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for week in summary["weeks"]:
@@ -751,7 +760,7 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         "",
         "## Every session",
         "",
-        "| date | task | reqs | switches | all strong | actual mix | saving | result |",
+        "| date | task | reqs | switches | all strong | actual mix | saving (bound) | result |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for session in summary["sessions"]:
@@ -782,9 +791,12 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         "  every amount above is stamped `SIMULATED PRICES, NOT REAL SAVINGS` wherever",
         "  `tamias report` prints it. The rates are made up; the arithmetic is the real",
         "  `tamias.pricing.compute_cost`.",
-        "- **List prices, not a bill.** The saving is the gap between pricing the same",
-        "  tokens on the strong model and pricing them on the model that answered. It is",
-        "  not money that was spent, and not a measurement of quality.",
+        "- **List prices, not a bill, and an upper bound.** The saving in this table",
+        "  is the gap between pricing the same tokens on the strong model and on the",
+        "  model that answered. A real switch starts the new model with a cold cache,",
+        "  so it also pays to re-ingest context the strong model would have cached;",
+        "  `tamias report` prices that and prints a smaller, cache-aware `realised",
+        "  saving`. Neither figure is money that was spent, and neither measures quality.",
         "- **The history does not prove quality.** `result` is a field in this script, not",
         "  a test run. Nothing here shows the cheap model did the work well.",
         "",

@@ -2,12 +2,14 @@
 
 **SYNTHETIC. NOT A RECORD OF REAL WORK.**
 
-This folder exists only for the demo. Its rewritten rows are fabricated: in the
-0.1.0a4 alpha tamias rejects `active` routing, so **no current command can
-produce this log** — it shows what a routed history would look like and lets the
-reporting and dashboard paths be exercised offline. Nothing here is evidence
-that tamias routes traffic; it is evidence that the *reporters* handle a log of
-that shape.
+This folder exists only for the demo. Its rewritten rows are fabricated: the
+never-published `v0.1.0a4`/`v0.1.0a5` alpha tags rejected `active` routing, so
+those tags could not produce this log. Current source (`0.1.0a6`) re-adds
+`active` fail-closed, and the published TestPyPI `0.1.0a3` accepts it, but this
+log is still **not** a capture of any real run — it shows what a routed history
+would look like and lets the reporting and dashboard paths be exercised offline.
+Nothing here is evidence that tamias routes traffic; it is evidence that the
+*reporters* handle a log of that shape.
 
 It tells the "the agent coded intensively for three weeks" story behind the
 numbers the demo shows: which tasks the agent attempted, how many requests each
@@ -63,7 +65,7 @@ requests shadow mode would have switched: 428
 billed cost: UNKNOWN
 ...
 estimated saving: $0.00 ...
-realised saving (rows the proxy actually rewrote): $3.8563 over 428 rows ...
+realised saving (rows the proxy actually rewrote): $3.4258 over 428 rows ...
 ```
 
 The two saving lines are not contradictory:
@@ -73,8 +75,16 @@ The two saving lines are not contradictory:
   generated as if routing had been applied, so it has no shadow-only rows and
   that line is `$0.00`.
 - **realised saving** prices the rows the log marks as rewritten
-  (`model_used != model_requested`): `$3.8563` — the headline number. Those rows
-  are fabricated for the demo; the 0.1.0a4 alpha cannot produce them.
+  (`model_used != model_requested`): `$3.4258` — the report's number. It is
+  **cache-aware**: the stay model is priced with a warm cache and the switch
+  model with the row's real counts, so the switch is debited for re-ingesting
+  context the stay model would have read from cache. Those rows are fabricated
+  for the demo; the 0.1.0a4 alpha cannot produce them.
+
+`SUMMARY.md`'s headline saving (`$3.8563`, 33.8%) is **not** the report's
+figure. It is the older same-tokens gap with no cache-rebuild charge, so it is an
+**upper bound** on the simulated routing gap, not a measured saving. The
+cache-aware `realised saving` is lower precisely because it debits the switch.
 
 ## Honest limits (say these out loud)
 
@@ -83,8 +93,10 @@ The two saving lines are not contradictory:
 - **Simulated prices.**  `prices.simulated.toml` declares `simulated = true`;
   the rates are made up.  It would be wrong to call any amount here money that
   was spent.
-- **List prices, not a bill.**  The saving is the gap between pricing the same
-  tokens on the strong model and on the model that answered.
+- **List prices, not a bill, and an upper bound.**  `SUMMARY.md`'s saving is the
+  gap between pricing the same tokens on the strong model and on the model that
+  answered.  It does not charge a real switch for the cold cache it would start
+  with, so the report's cache-aware `realised saving` is smaller.
 - **No quality claim.**  A 40-request session "passing 14/14 tests" is a field
   in the script, not a test run.  The demo shows the cost arithmetic working,
   not that the cheap model did the work well.

@@ -20,6 +20,12 @@ routing is rejected outright: `tamias serve --router-mode active` fails with
 would do without touching the bytes. In both arms the upstream still runs the
 requested (strong) model, so **no row has `model_used != model_requested`**.
 
+> **Note (2026-10-19).** This boundary describes the never-published `v0.1.0a4`
+> tag these runs were captured under, not current source: `0.1.0a6` re-adds
+> `active` fail-closed (the target must be named in `--registry`, tool-capable
+> and priced), and the published TestPyPI `0.1.0a3` also accepts `active` (F-6,
+> `TAMIAS-SSOT.md` §10 criterion 3).
+
 What the two arms show is the router's recorded intent: the `routed` arm
 configures a cheap model, so its SWITCH decisions name a target; the `baseline`
 arm configures none, so its SWITCH decisions have no target. The saving figure
