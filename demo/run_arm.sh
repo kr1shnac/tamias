@@ -41,7 +41,16 @@ RUNS_DIR="$DEMO_DIR/runs"
 TASK_DIR="/tmp/tamias-demo-task"
 CONFIG="$DEMO_DIR/config.env"
 
-PYTHON="$REPO_ROOT/.venv/bin/python"
+# The interpreter to run the demo with.  Prefer the project venv, but fall back
+# to an interpreter on PATH so the runner still works where there is no repo
+# venv (e.g. CI, or a wheel install).  TAMIAS_PYTHON overrides both.
+if [ -n "${TAMIAS_PYTHON:-}" ]; then
+	PYTHON="$TAMIAS_PYTHON"
+elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+	PYTHON="$REPO_ROOT/.venv/bin/python"
+else
+	PYTHON="$(command -v python3 || command -v python || true)"
+fi
 PROXY_PORT=8000
 MOCK_PORT=9001
 AGENT_TIMEOUT=900
@@ -105,7 +114,7 @@ case "$N" in
 esac
 [ "$N" -ge 1 ] || die "run number '$N' must be 1 or more"
 
-[ -x "$PYTHON" ] || die "no venv python at $PYTHON"
+[ -n "$PYTHON" ] || die "no python interpreter found; create .venv or set TAMIAS_PYTHON"
 [ -f "$CONFIG" ] || die "no $CONFIG; copy demo/config.env.example to demo/config.env"
 
 # shellcheck disable=SC1090
@@ -196,6 +205,13 @@ wait_for_pid() {
 # before any work (task generation, key checks, etc.).
 if wait_for_port "$PROXY_PORT"; then
 	die "port $PROXY_PORT is already in use; stop that listener first (ss -ltnp | grep :$PROXY_PORT) and retry"
+fi
+
+# The interpreter must be able to import tamias, or the later steps fail with a
+# confusing traceback instead of a clear message.  Checked after the port guard
+# so a stale listener still fails fastest.
+if ! "$PYTHON" -c 'import tamias' >/dev/null 2>&1; then
+	die "python at $PYTHON cannot import tamias; use the project venv or set TAMIAS_PYTHON"
 fi
 
 # --------------------------------------------------------------------------

@@ -54,7 +54,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pip-audit cyclonedx-bom pip-licenses .
       - name: Known-vulnerability audit of installed dependencies
-        run: pip-audit --strict
+        # Audit the third-party dependencies, not the project itself: until it
+        # is released the package is not on PyPI, and `--strict` treats an
+        # unauditable distribution as a failure.
+        run: |
+          python -m pip freeze --exclude tamias > audit-requirements.txt
+          pip-audit --strict -r audit-requirements.txt
       - name: Software bill of materials
         run: cyclonedx-py environment --of json -o sbom.json
       - name: License report and copyleft check
