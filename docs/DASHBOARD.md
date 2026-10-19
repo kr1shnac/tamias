@@ -62,7 +62,14 @@ asked for (`model_requested`). This is the comparison, not a measurement: it
 assumes the stronger model would have handled the identical tokens, which is the
 assumption the whole estimate rests on.
 
-**Saving** — baseline minus routed, as an amount and a percentage of baseline.
+**Saving** — the falsifiable figure, as an amount and a percentage of the
+warm-baseline total. For a switch it prices the model that was asked for with a
+**warm cache** (the prompt a stay would have served from cache) and the model
+that answered with the row's real counts, so it charges the switch for
+re-ingesting context. It can therefore be **negative**: a switch that costs more
+than the cache it destroyed reports a loss. A request that was not switched has
+no counterfactual and saves exactly zero. The `baseline - routed` gap is kept
+separately as an upper bound (see below).
 
 **On the cheaper model** — the fraction of requests where the model that
 answered was not the model that was asked for.
@@ -77,9 +84,9 @@ legitimately zero (a free model), because that ratio is 0/0. An n/a never means
 "nothing happened"; it means the log cannot answer.
 
 The chart's two solid lines are cumulative cost per request: baseline on top,
-routed below, with the gap between them being what the routing was worth. The
-dashed line is the `--compare-db` run. The lines hold flat across a request
-that could not be priced, because no amount is known to add.
+routed below, with the gap between them being an upper bound on what the routing
+was worth. The dashed line is the `--compare-db` run. The lines hold flat across
+a request that could not be priced, because no amount is known to add.
 
 If the price sheet declares `simulated = true`, a red banner reading
 `SIMULATED PRICES - NOT REAL SAVINGS` appears, because the rates are invented
@@ -90,23 +97,33 @@ and the amounts are illustrations rather than money. Use
 
 `baseline` and `routed` are priced on **the same tokens**: each row is priced
 twice, once per model, from the one set of counts that row logged. The
-comparison is therefore model-only. It assumes:
+comparison is therefore model-only. The *headline Saving* is priced the
+falsifiable way instead: the stay model with a **warm** cache, the switch model
+with the row's real counts.
+
+Two caveats remain:
 
 - **Same tokens assumed.** The baseline assumes the stronger model would have
   produced the same input and output token counts. It usually would not: a
   different model generates different text, so the real baseline is an estimate,
   not a counterfactual that was actually run.
-- **Ignores cache rebuild cost.** Switching models means the prompt cache does
-  not carry over, so the first requests on a new model pay to re-ingest context
-  the baseline would have hit cached. That cost is not in either line, which
-  makes the routed line optimistic and the saving smaller in reality than shown.
-
-Both caveats push the same way: the reported saving is an upper bound.
+- **Cache rebuild is charged in the Saving, not in the lines.** Switching models
+  starts the new model with a cold cache, so its first requests pay to re-ingest
+  context the baseline would have hit cached. The Saving card charges that cost
+  against the switch — which is why it can go negative — while the two chart
+  lines, priced on identical tokens, do not. The `baseline - routed` gap is
+  therefore an **upper bound**; the Saving card is the number that can report a
+  loss.
 
 For a figure that does not rest on the counterfactual at all, run the same
 session twice -- once routed, once with `--router-mode off` -- and pass the
 unrouted log as `--compare-db`. That dashed line is a measurement; the baseline
 line is an estimate.
+
+If a switch's saving cannot be computed — the requested model quotes no
+cache-read rate, so the warm baseline is UNKNOWN — the row is still counted and
+the Saving card says how many priced rows were excluded, rather than treating
+them as zero.
 
 ## Reading an old log
 

@@ -8,8 +8,10 @@ external font, no fetched script.
 
 Two lines are drawn for every run.  The *baseline* re-prices each request on the
 model that was asked for, and the *routed* line prices it on the model that
-actually answered.  Both use the row's own token counts, so the gap between them
-is what the routing decision was worth and nothing else.
+actually answered.  Both use the row's own token counts, so their gap is an
+upper bound on what the routing decision was worth.  The headline *saving* is
+the falsifiable one instead: a switch prices the stay model with a warm cache
+and the switch model with the row's real counts, so it can be negative (F-1).
 
 An amount that cannot be computed is never shown as zero.  A row whose token
 counts were never reported is counted as a request, marked "not priced", and left
@@ -27,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
+from tamias.pricing import PriceSheet, assume_cache_warm, compute_cost, load_price_sheet
 from tamias.types import Usage
 
 __all__ = [
@@ -103,8 +105,12 @@ def build_rows(
 
     Each row carries ``actual_cost`` (the model that answered),
     ``baseline_cost`` (the model that was asked for, on the same tokens),
-    ``saved`` (their difference), ``switched`` (whether the two models differ)
-    and ``priced`` (whether either cost could be computed at all).
+    ``baseline_warm_cost`` (the asked-for model with a warm cache),
+    ``cache_rebuild_penalty`` (what the cold cache added),
+    ``saved_upper_bound`` (baseline minus actual, non-negative) and ``saved``
+    (the falsifiable cache-aware saving, which can be negative).  ``switched``
+    says whether the two models differ and ``priced`` whether the row could be
+    priced at all.
     """
     path = Path(db_path)
     if not path.is_file():
@@ -184,7 +190,22 @@ def _usage(row: dict[str, Any]) -> Usage:
 
 
 def _price(row: dict[str, Any], sheet: PriceSheet) -> dict[str, Any]:
-    """Add the cost fields to one row, leaving UNKNOWN as None."""
+    """Add the cost fields to one row, leaving UNKNOWN as None.
+
+    ``baseline_cost`` re-prices the row's own tokens on the requested model:
+    an unchanged comparison that pretends the requested model would have seen
+    the identical tokens.  ``saved_upper_bound`` is that difference -- always
+    non-negative for a cheaper substitute, so it is reported as an upper bound
+    only.
+
+    ``saved`` is the falsifiable number (F-1).  On a switch it prices the model
+    that was asked for with a **warm** cache (:func:`assume_cache_warm`) and the
+    model that answered with the row's real, cold counts, so it includes the
+    cost of re-ingesting context the stay model would have hit cached.  It can
+    therefore be negative.  ``cache_rebuild_penalty`` is the difference the
+    cache makes: ``baseline_cost - baseline_warm_cost``.  A request that was not
+    switched has no counterfactual and saves exactly zero.
+    """
     requested = row.get("model_requested")
     used = row.get("model_used")
     usage = _usage(row)
@@ -192,6 +213,15 @@ def _price(row: dict[str, Any], sheet: PriceSheet) -> dict[str, Any]:
     actual = compute_cost(used, usage, sheet).usd if used else None
     baseline = compute_cost(requested, usage, sheet).usd if requested else None
     priced = actual is not None and baseline is not None
+
+    switched = bool(
+        isinstance(requested, str) and isinstance(used, str) and requested != used
+    )
+    baseline_warm = (
+        compute_cost(requested, assume_cache_warm(usage), sheet).usd
+        if requested and switched
+        else baseline
+    )
 
     row["actual_cost"] = actual
     stored_cost = row.get("computed_list_cost_usd")
@@ -201,10 +231,22 @@ def _price(row: dict[str, Any], sheet: PriceSheet) -> dict[str, Any]:
         else None
     )
     row["baseline_cost"] = baseline
-    row["saved"] = baseline - actual if priced else None
-    row["switched"] = bool(
-        isinstance(requested, str) and isinstance(used, str) and requested != used
+    row["baseline_warm_cost"] = baseline_warm
+    row["cache_rebuild_penalty"] = (
+        baseline - baseline_warm
+        if baseline is not None and baseline_warm is not None and switched
+        else None
     )
+    row["saved_upper_bound"] = baseline - actual if priced else None
+    if not priced:
+        row["saved"] = None
+    elif not switched:
+        row["saved"] = 0.0
+    else:
+        row["saved"] = (
+            baseline_warm - actual if baseline_warm is not None else None
+        )
+    row["switched"] = switched
     row["priced"] = priced
     simulated = row.get("price_simulated")
     row["price_simulated"] = (
@@ -244,39 +286,61 @@ def summary(
     passes for a whole session.  ``saving_pct`` is None whenever it cannot be
     computed -- an empty log, a log with nothing priced in it, or a baseline
     that legitimately totals zero, where the ratio would be 0/0.
+
+    ``saving_total`` is the falsifiable, cache-aware saving (it can be negative);
+    ``saving_upper_total`` is the non-negative same-tokens difference, kept only
+    as an upper bound.  A row may be priced yet have no cache-aware saving when
+    the requested model quotes no cache-read rate; those are counted in
+    ``n_cache_unpriced``.  Rows are read with ``.get`` so a hand-built row in a
+    test need not carry every field.
     """
     n_requests = len(rows)
-    n_priced = sum(1 for row in rows if row["priced"])
-    n_switched = sum(1 for row in rows if row["switched"])
+    n_priced = sum(1 for row in rows if row.get("priced"))
+    n_switched = sum(1 for row in rows if row.get("switched"))
+    # Rows whose cache-aware saving could not be computed: the row is priced,
+    # but the requested model quotes no cache-read rate, so the warm baseline
+    # is UNKNOWN.  They are counted, never imputed.
+    n_cache_unpriced = sum(
+        1 for row in rows if row.get("priced") and row.get("saved") is None
+    )
 
     actual_total = 0.0
     baseline_total = 0.0
     cumulative_actual: list[float] = []
     cumulative_baseline: list[float] = []
     for row in rows:
-        if row["priced"]:
-            actual = row["actual_cost"] or 0.0
-            baseline = row["baseline_cost"] or 0.0
+        if row.get("priced"):
+            actual = row.get("actual_cost") or 0.0
+            baseline = row.get("baseline_cost") or 0.0
             actual_total += actual
             baseline_total += baseline
         cumulative_actual.append(actual_total)
         cumulative_baseline.append(baseline_total)
 
-    saving_total = baseline_total - actual_total
+    # The headline saving is the falsifiable one: each switched row's saving is
+    # its warm-baseline difference (see _price), which can be negative.  The
+    # non-negative same-tokens difference is kept separately as an upper bound.
+    saved_known = [row for row in rows if row.get("saved") is not None]
+    saving_total = sum(row["saved"] for row in saved_known)
+    saving_baseline = sum((row.get("baseline_warm_cost") or 0.0) for row in saved_known)
     saving_pct = None
-    if n_priced and baseline_total:
-        saving_pct = saving_total / baseline_total
+    if saved_known and saving_baseline:
+        saving_pct = saving_total / saving_baseline
+    saving_upper_total = baseline_total - actual_total
 
     report: dict[str, Any] = {
         "n_requests": n_requests,
         "n_priced": n_priced,
         "n_unpriced": n_requests - n_priced,
         "n_switched": n_switched,
+        "n_cache_unpriced": n_cache_unpriced,
         "share_cheap": (n_switched / n_requests) if n_requests else None,
         "actual_total": actual_total,
         "baseline_total": baseline_total,
         "saving_total": saving_total,
         "saving_pct": saving_pct,
+        "saving_upper_total": saving_upper_total,
+        "saving_baseline": saving_baseline,
         "cumulative_actual": cumulative_actual,
         "cumulative_baseline": cumulative_baseline,
     }
@@ -627,7 +691,7 @@ tbody tr.new td { animation: flash 1s cubic-bezier(0.4, 0, 0.2, 1); }
   <div class="card glass-panel">
     <div class="label">Saving</div>
     <div class="value" id="card-saving">n/a</div>
-    <div class="note" id="card-saving-note">baseline minus routed</div>
+    <div class="note" id="card-saving-note">cache-aware; can be negative</div>
   </div>
   <div class="card glass-panel">
     <div class="label">On the cheaper model</div>
@@ -763,7 +827,7 @@ tbody tr.new td { animation: flash 1s cubic-bezier(0.4, 0, 0.2, 1); }
     if (abs === 0) {
       return "$0.00";
     }
-    return "$" + (abs < 1 ? value.toFixed(6) : value.toFixed(4));
+    return (value < 0 ? "-$" : "$") + (abs < 1 ? abs.toFixed(6) : abs.toFixed(4));
   }
 
   function count(value) {
@@ -1112,7 +1176,11 @@ tbody tr.new td { animation: flash 1s cubic-bezier(0.4, 0, 0.2, 1); }
         : "nothing priced yet");
     } else {
       show(el.cardSaving, percent(report.saving_pct) + " (" + money(report.saving_total) + ")");
-      put(el.cardSavingNote, "baseline minus routed");
+      var savingNote = "cache-aware (warm stay vs cold switch); can be negative";
+      if (report.n_cache_unpriced) {
+        savingNote += "; " + report.n_cache_unpriced + " priced rows have no cache-aware saving";
+      }
+      put(el.cardSavingNote, savingNote);
     }
 
     if (report.share_cheap === null || report.share_cheap === undefined) {

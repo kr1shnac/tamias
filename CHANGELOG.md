@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`chat`/`messages`/`responses`/`passthrough`); existing logs get it via the
   usual append-only migration.
 
+### Changed
+
+- The saving arithmetic is now **cache-aware and can be negative** (F-1). The
+  dashboard's `saved` and both `tamias report` saving lines price the stay model
+  with a warm cache and the switch model on the row's real counts, so a switch
+  that re-ingests more context than it saves reports a loss instead of being
+  clamped to `$0.00`. New primitive `pricing.assume_cache_warm`. The old
+  non-negative same-tokens difference is kept as an explicit upper bound
+  (`saved_upper_bound` on a row, `saving_upper_total` in the summary). The
+  estimate label is now
+  `"[estimate; cache-aware, can be negative; not measured]"`, and the dashboard
+  Saving card says how many priced rows have no cache-aware saving. A losing
+  switch is asserted by
+  `tests/test_cli.py::test_report_shows_a_negative_saving_when_a_switch_would_have_lost`
+  and
+  `tests/test_dashboard.py::test_a_cache_miss_replay_can_show_a_negative_saving`.
+
 ## [0.1.0a6] - 2026-10-15
 
 Supersedes the mis-versioned `v0.1.0a5` tag, which was cut from `0.1.0a4` content and never uploaded to TestPyPI.

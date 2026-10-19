@@ -16,7 +16,10 @@ request rewriting has since become available, but opt-in and fail-closed (see
 earlier alpha and are kept verbatim. Act 1 shows only shadow decisions, and
 Act 2's rewritten rows are **synthetic** — no command at capture time could
 produce them. Every dollar figure below is arithmetic over a simulated price
-sheet, labelled as such in the output itself.
+sheet, labelled as such in the output itself. **The `estimate;` label and the
+saving arithmetic changed on 2026-10-19 (F-1): the saving is now cache-aware —
+a warm stay priced against a cold switch — and can be negative. The captures
+below predate that change and are kept verbatim.**
 
 Run everything from the repo root:
 

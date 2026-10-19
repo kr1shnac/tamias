@@ -192,6 +192,10 @@ and only until either the upstream reports a cache-write count or the pricing
 formula is changed to treat an unreported cache-write count as zero — which
 [CONTRACT.md](../CONTRACT.md) forbids ("unknown is NEVER treated as 0").
 
+*(The sample above predates the 2026-10-19 cache-aware saving change (F-1): the
+`estimate;` label is now `cache-aware, can be negative`, and the saving prices a
+warm stay against a cold switch.)*
+
 The number that matters in shadow mode is **requests shadow would have
 switched**. It tells you how much of your traffic the router thinks is
 mechanical, which is the input to deciding whether to run `--router-mode active`.

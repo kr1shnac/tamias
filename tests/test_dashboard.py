@@ -8,7 +8,7 @@ so a run never depends on a checked-in rate sheet being current.
 
 The shape (a) fixture is the one the task pins down: eight requests, rows 5
 and 8 rewritten onto the cheap model, the rest staying on the strong one.  The
-two switched rows' savings must add up to 0.0302168.
+two switched rows' cache-aware savings add up to 0.00361641.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from tamias.dashboard import build_rows, create_dashboard_app, summary
-from tamias.pricing import compute_cost, load_price_sheet
+from tamias.pricing import assume_cache_warm, compute_cost, load_price_sheet
 from tamias.store import Store
 from tamias.types import Decision, Usage
 
@@ -216,13 +216,17 @@ def _active_db(path: Path, sheet) -> Path:
 
 
 def test_two_switched_rows_save_exactly_the_expected_sum(tmp_path: Path, sheet) -> None:
-    """Rows 5 and 8 are the only rewrites, and their savings sum to 0.0302168."""
+    """Rows 5 and 8 are the only rewrites, and their savings sum to 0.00361641.
+
+    The sum is the cache-aware one (F-1), so it is far smaller than the
+    same-tokens difference: a switch must pay to re-ingest the context.
+    """
     rows = build_rows(_active_db(tmp_path / "active.db", sheet), sheet)
 
     assert len(rows) == 8
     switched = [row for row in rows if row["switched"]]
     assert [row["id"] for row in switched] == [5, 8]
-    assert sum(row["saved"] for row in switched) == pytest.approx(0.0302168, abs=1e-6)
+    assert sum(row["saved"] for row in switched) == pytest.approx(0.00361641, abs=1e-6)
 
 
 def test_every_row_carries_the_fields_the_page_renders(tmp_path: Path, sheet) -> None:
@@ -263,7 +267,13 @@ def test_baseline_is_the_requested_model_priced_on_the_same_tokens(tmp_path: Pat
     )
     assert switched["actual_cost"] == compute_cost(CHEAP, usage, sheet).usd
     assert switched["baseline_cost"] == compute_cost(STRONG, usage, sheet).usd
-    assert switched["saved"] == switched["baseline_cost"] - switched["actual_cost"]
+    # `saved` is cache-aware: the requested model priced with a WARM cache (the
+    # switch would have had to re-ingest its context).  That makes it smaller
+    # than the same-tokens difference, which is kept as an explicit bound.
+    warm = assume_cache_warm(usage)
+    assert switched["baseline_warm_cost"] == compute_cost(STRONG, warm, sheet).usd
+    assert switched["saved"] == switched["baseline_warm_cost"] - switched["actual_cost"]
+    assert switched["saved_upper_bound"] == switched["baseline_cost"] - switched["actual_cost"]
     assert switched["priced"] is True
 
 
@@ -273,6 +283,88 @@ def test_an_unswitched_row_saves_nothing(tmp_path: Path, sheet) -> None:
     assert staying["switched"] is False
     assert staying["actual_cost"] == staying["baseline_cost"]
     assert staying["saved"] == 0.0
+
+
+# --- (a2) a replay where the switch LOST money ---------------------------
+
+
+# A pair where the same-tokens difference looks like a win but the cache-aware
+# arithmetic says otherwise.  ``cached-giant`` is cheap only when its prompt is
+# already cached (0.1/M); ``cold-runner`` is cheaper per *cold* input (5.0 vs
+# 10.0) -- but it has no cache-read discount, so re-ingesting a warm prompt on
+# it costs 50x what staying would have.
+CACHE_MISS_PRICES = f"""
+simulated = false
+date = "{SHEET_DATE}"
+
+["cached-giant"]
+input = 10.0
+output = 40.0
+cached_input = 0.1
+cache_write = 1.0
+
+["cold-runner"]
+input = 5.0
+output = 20.0
+cached_input = 5.0
+cache_write = 5.0
+"""
+
+
+def test_a_cache_miss_replay_can_show_a_negative_saving(tmp_path: Path) -> None:
+    """F-1: ``saved`` is falsifiable, so a losing switch reports <= 0.
+
+    The request asked for ``cached-giant`` and ran on ``cold-runner``.  Priced on
+    the row's own tokens the switch looks like a 5.00 win, and ``saved_upper_bound``
+    says exactly that.  But the prompt was a replay: had we stayed, the giant would
+    have read its context from cache for 0.10, while the runner paid 5.00 to
+    re-ingest it.  The cache-aware ``saved`` is therefore -4.90 -- a loss the old
+    always-non-negative formula could never report.
+    """
+    path = tmp_path / "cache-miss.toml"
+    path.write_text(CACHE_MISS_PRICES, encoding="utf-8")
+    sheet = load_price_sheet(path)
+
+    db = tmp_path / "cache-miss.db"
+    store = Store(db)
+    try:
+        _log(
+            store,
+            ts="2026-10-04T09:00:00Z",
+            model_requested="cached-giant",
+            model_used="cold-runner",
+            usage=Usage(
+                input_tokens=1_000_000,
+                output_tokens=0,
+                cached_input_tokens=0,
+                cache_write_tokens=0,
+            ),
+            latency_ms=50,
+            decision=Decision(
+                action="SWITCH",
+                target_model="cold-runner",
+                reason="cheaper per cold token",
+            ),
+            sheet=sheet,
+        )
+    finally:
+        store.close()
+
+    (row,) = build_rows(db, sheet)
+    assert row["switched"] is True
+    assert row["priced"] is True
+    # Same-tokens difference: 10.00 - 5.00, a confident-looking "win".
+    assert row["saved_upper_bound"] == pytest.approx(5.0, abs=1e-9)
+    # Cache-aware: staying would have cost 0.10; the switch cost 5.00.
+    assert row["baseline_warm_cost"] == pytest.approx(0.1, abs=1e-9)
+    assert row["cache_rebuild_penalty"] == pytest.approx(9.9, abs=1e-9)
+    assert row["actual_cost"] == pytest.approx(5.0, abs=1e-9)
+    assert row["saved"] == pytest.approx(-4.9, abs=1e-9)
+    assert row["saved"] <= 0
+
+    report = summary([row], simulated=False)
+    assert report["saving_total"] == pytest.approx(-4.9, abs=1e-9)
+    assert report["saving_upper_total"] == pytest.approx(5.0, abs=1e-9)
 
 
 # --- (b) every token count UNKNOWN ---------------------------------------
@@ -423,7 +515,7 @@ def test_old_schema_row_is_still_priced(tmp_path: Path, sheet) -> None:
     """Losing latency_ms costs us a latency, never the cost arithmetic."""
     row = build_rows(_old_schema_db(tmp_path / "old.db"), sheet)[0]
     assert row["priced"] is True
-    assert row["saved"] == pytest.approx(0.022484, abs=1e-6)
+    assert row["saved"] == pytest.approx(0.0010298, abs=1e-6)
 
 
 def test_stored_provenance_controls_the_dashboard_banner(tmp_path: Path, sheet) -> None:
@@ -612,7 +704,7 @@ def test_summary_totals_only_the_priced_rows(tmp_path: Path, sheet) -> None:
     assert report["n_unpriced"] == 1
     assert report["actual_total"] == pytest.approx(0.002044, abs=1e-9)
     assert report["baseline_total"] == pytest.approx(0.024528, abs=1e-9)
-    assert report["saving_total"] == pytest.approx(0.022484, abs=1e-6)
+    assert report["saving_total"] == pytest.approx(0.0010298, abs=1e-6)
 
 
 def test_saving_pct_is_unknown_when_the_baseline_is_zero(tmp_path: Path, sheet) -> None:
@@ -815,7 +907,7 @@ def test_the_endpoints_agree_with_the_data_layer(tmp_path: Path, sheet_path: Pat
     assert [r["switched"] for r in served_rows] == [r["switched"] for r in rows]
     assert [r["model_used"] for r in served_rows] == [r["model_used"] for r in rows]
     assert sum(r["saved"] for r in served_rows if r["switched"]) == pytest.approx(
-        0.0302168, abs=1e-6
+        0.00361641, abs=1e-6
     )
 
     assert served_summary["n_requests"] == expected["n_requests"] == 8

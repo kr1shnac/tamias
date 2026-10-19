@@ -118,9 +118,9 @@ def test_realised_saving_scenarios(tmp_path, capsys, test_fn):
 def test_active_shape_two_rewritten(tmp_path, capsys):
     """Scenario (a): 8 rows; rows 5 and 8 rewritten with token counts.
 
-    Row 5: strong=7946/46/0, cheap=local-model → saving ≈ 0.024528
-    Row 8: strong uncached=8434-6528=1906, cheap → saving ≈ 0.0056888
-    Total realised ≈ 0.0302168, over 2 rows.
+    Row 5: strong(warm)=7946*0.3 + 46*15 = 3073.8; cheap=local-model real; ≈ 0.0010298
+    Row 8: strong(warm)=8434*0.3 + 53*15 = 3325.2; cheap real; ≈ 0.00258661
+    Total realised ≈ 0.00361641, over 2 rows (cache-aware, F-1).
     """
     db = str(tmp_path / "log.db")
     # Row 5: rewritten with counts
@@ -187,8 +187,8 @@ def test_active_shape_two_rewritten(tmp_path, capsys):
     assert "over 2 rows" in line, f"expected 'over 2 rows' in:\n{line}"
     # Within 1e-6 tolerance
     val = _money_realised(line)
-    assert abs(val - 0.0302168) < 1e-6, (
-        f"realised saving {val!r} not within 1e-6 of 0.0302168\n{out}"
+    assert abs(val - 0.00361641) < 1e-6, (
+        f"realised saving {val!r} not within 1e-6 of 0.00361641\n{out}"
     )
 
 

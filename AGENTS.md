@@ -14,7 +14,7 @@ No measured savings exist.
    ```bash
    .venv/bin/python -m pytest -q 2>&1 | tail -5 && .venv/bin/ruff check src tests
    ```
-   Baseline: **915 passed, ruff clean** (2026-10-19).
+   Baseline: **932 passed, ruff clean** (2026-10-19).
 2. **Never rewrite the working tree destructively.** Do not run
    `git reset --hard`, `git checkout -- .`, or `git clean -fd` while work is
    uncommitted. Roll back a merge with `git merge --abort`; prefer a new commit

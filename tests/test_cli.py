@@ -17,7 +17,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))  # noqa: E402
 
 from tamias.cli import main  # noqa: E402
-from tamias.pricing import ModelPrice, compute_cost, load_price_sheet  # noqa: E402
+from tamias.pricing import (  # noqa: E402
+    ModelPrice,
+    assume_cache_warm,
+    compute_cost,
+    load_price_sheet,
+)
 from tamias.store import COLUMNS, Store  # noqa: E402
 from tamias.types import CostBreakdown, Decision, Usage  # noqa: E402
 
@@ -88,12 +93,20 @@ SMALL = Usage(
 BIG_ON_STRONG = 0.04995
 #   local-model: (5000*0.25 + 4000*0.025 + 1000*0.3 + 2000*1.25) / 1e6
 BIG_ON_CHEAP = 0.00415
-BIG_SAVING = BIG_ON_STRONG - BIG_ON_CHEAP
+# The quoted saving is cache-aware (F-1): the stay model is priced with a WARM
+# cache -- all input billed at `cached_input`, nothing written -- so the context
+# a switch would have to re-ingest is charged against the saving.  It can be
+# negative.  Hand-computed from assume_cache_warm + compute_cost.
+#   gpt-4o warm:  (10000*0.3 + 2000*15.0) / 1e6
+BIG_WARM_ON_STRONG = 0.033
+BIG_SAVING = BIG_WARM_ON_STRONG - BIG_ON_CHEAP
 #   gpt-4o:      (2000*3.0 + 500*15.0) / 1e6
 SMALL_ON_STRONG = 0.0135
 #   local-model: (2000*0.25 + 500*1.25) / 1e6
 SMALL_ON_CHEAP = 0.001125
-SMALL_SAVING = SMALL_ON_STRONG - SMALL_ON_CHEAP
+#   gpt-4o warm:  (2000*0.3 + 500*15.0) / 1e6
+SMALL_WARM_ON_STRONG = 0.0081
+SMALL_SAVING = SMALL_WARM_ON_STRONG - SMALL_ON_CHEAP
 
 
 def write_prices(tmp_path: Path, body: str = STRONG_TABLE, date: str = SHEET_DATE) -> str:
@@ -135,12 +148,14 @@ def log(
 
 
 def money(text: str, label: str) -> float:
-    # Handle both old and new formats
-    match = re.search(rf"{label}[^\$]*\$([0-9.]+)", text)
+    # Handle both old and new formats, and a leading minus sign: a cache-aware
+    # saving can be negative (F-1).  The run before the amount must not swallow
+    # the "-", so it excludes both "$" and "-".
+    match = re.search(rf"{label}[^\$\-]*(-?\$[0-9.]+)", text)
     if match is None:
-        match = re.search(rf"{label}: \$([0-9.]+)", text)
+        match = re.search(rf"{label}: (-?\$[0-9.]+)", text)
     assert match is not None, f"no {label} amount in output:\n{text}"
-    return float(match.group(1))
+    return float(match.group(1).replace("$", ""))
 
 
 def run(capsys: pytest.CaptureFixture[str], db: str, prices: str) -> tuple[int, str]:
@@ -226,7 +241,7 @@ def test_report_labels_the_saving_as_an_estimate(
     log(db, SMALL, SMALL_ON_STRONG, "STAY")
     _, out = run(capsys, db, write_prices(tmp_path))
     line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
-    assert "estimate; ignores cache rebuild cost; not measured" in line
+    assert "estimate; cache-aware, can be negative; not measured" in line
     assert money(out, "estimated saving") == pytest.approx(2 * BIG_SAVING, abs=1e-6)
     # The assumed cheap model and the sheet date are surfaced, not hidden.
     assert "cheap model assumed: local-model" in out
@@ -263,7 +278,7 @@ def test_report_treats_a_zero_rate_as_free_not_unknown(
     log(db, BIG, BIG_ON_STRONG, "SWITCH")
     _, out = run(capsys, db, write_prices(tmp_path, FREE_SHEET))
     assert "cheap model assumed: free-model" in out
-    assert money(out, "estimated saving") == pytest.approx(BIG_ON_STRONG, abs=1e-6)
+    assert money(out, "estimated saving") == pytest.approx(BIG_WARM_ON_STRONG, abs=1e-6)
     assert "not priced" not in out
 
 
@@ -346,9 +361,10 @@ def test_report_saving_covers_only_the_requests_that_have_token_counts(
     counted = Usage(
         input_tokens=7_935, output_tokens=49, cached_input_tokens=0, cache_write_tokens=None
     )
-    # uncached 7935*3.0 + 0*0.30 + output 49*15.0 = 24540  -> 0.02454
-    # on lightning: 7935*0.25 + 0*0.03 + 49*1.25      =  2045  -> 0.002045
-    one_saving = 0.02454 - 0.002045
+    # The stay arm is cache-aware: ULTRA with a warm cache reads the whole
+    # prompt, 7935*0.30 + 49*15.0 = 3115.5 -> 0.0031155.
+    # lightning on the real counts: 7935*0.25 + 49*1.25 = 2045 -> 0.002045.
+    one_saving = 0.0031155 - 0.002045
 
     log(db, counted, 0.0, "STAY", model_used=ULTRA, model_requested=ULTRA)
     log(db, counted, 0.0, "SWITCH", model_used=ULTRA, model_requested=ULTRA)
@@ -398,7 +414,10 @@ def test_report_estimate_matches_the_proxys_own_arithmetic(
     db = str(tmp_path / "log.db")
     log(db, BIG, BIG_ON_STRONG, "SWITCH")
     _, out = run(capsys, db, prices)
-    expected = compute_cost("gpt-4o", BIG, sheet).usd - compute_cost("local-model", BIG, sheet).usd
+    # The stay model is priced warm; the switch model on the real counts.
+    expected = compute_cost("gpt-4o", assume_cache_warm(BIG), sheet).usd - compute_cost(
+        "local-model", BIG, sheet
+    ).usd
     assert expected == pytest.approx(BIG_SAVING, abs=1e-9)
     assert money(out, "estimated saving") == pytest.approx(expected, abs=1e-6)
 
@@ -410,6 +429,59 @@ def test_report_saving_of_a_small_request(
     log(db, SMALL, SMALL_ON_STRONG, "SWITCH")
     _, out = run(capsys, db, write_prices(tmp_path))
     assert money(out, "estimated saving") == pytest.approx(SMALL_SAVING, abs=1e-6)
+
+
+def test_report_shows_a_negative_saving_when_a_switch_would_have_lost(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-1: the saving is falsifiable, so a switch can report a loss.
+
+    ``cold-runner`` is the cheapest model in this sheet per cold token, so the
+    old always-non-negative formula reported a win.  Priced cache-aware -- the
+    row ran on ``cached-giant``, whose prompt would have been read from cache
+    had we stayed -- the switch is a loss, and the report says a negative number
+    instead of clamping to zero.
+    """
+    prices = tmp_path / "cache-miss.toml"
+    prices.write_text(
+        'date = "2026-01-05"\n'
+        "\n"
+        "[cached-giant]\n"
+        "input = 10.0\n"
+        "output = 40.0\n"
+        "cached_input = 0.1\n"
+        "cache_write = 1.0\n"
+        "\n"
+        "[cold-runner]\n"
+        "input = 5.0\n"
+        "output = 20.0\n"
+        "cached_input = 5.0\n"
+        "cache_write = 5.0\n",
+        encoding="utf-8",
+    )
+    db = str(tmp_path / "log.db")
+    log(
+        db,
+        Usage(
+            input_tokens=1_000_000,
+            output_tokens=0,
+            cached_input_tokens=0,
+            cache_write_tokens=0,
+        ),
+        0.1,
+        "SWITCH",
+        model_used="cached-giant",
+        model_requested="cached-giant",
+    )
+
+    code, out = run(capsys, db, str(prices))
+
+    assert code == 0
+    assert "cheap model assumed: cold-runner" in out
+    line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
+    # warm stay 0.10 vs the switch's 5.00 to re-ingest the prompt.
+    assert "-$4.9000" in line, line
+    assert money(out, "estimated saving") == pytest.approx(-4.9, abs=1e-6)
 
 
 def test_report_fails_cleanly_on_missing_database(
@@ -554,7 +626,7 @@ def test_report_reconciles_computed_and_provider_cost(tmp_path, capsys) -> None:
     assert code == 0
     assert "spent (billed by OpenRouter): $0.100000 over 1 of 1 requests" in out
     assert "computed cost: $0.120000 (computed from list prices (provenance unknown))" in out
-    assert "difference (billed - computed): $-0.020000 over 1 rows" in out
+    assert "difference (billed - computed): -$0.020000 over 1 rows" in out
 
 
 def test_report_labels_billed_cost_and_stored_price_sheet(tmp_path, capsys) -> None:
@@ -583,7 +655,7 @@ def test_report_labels_billed_cost_and_stored_price_sheet(tmp_path, capsys) -> N
     assert code == 0
     assert "spent (billed by OpenRouter): $0.100000 over 2 of 2 requests" in out
     assert f"computed cost: $0.120000 (computed from list prices ({prices}))" in out
-    assert "difference (billed - computed): $-0.020000 over 2 rows" in out
+    assert "difference (billed - computed): -$0.020000 over 2 rows" in out
 
 
 def test_report_fails_cleanly_on_a_sheet_without_a_date(

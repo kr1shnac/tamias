@@ -44,7 +44,7 @@ from tamias.config import (
 )
 from tamias.effort import EFFORT_MODES
 from tamias.keys import KeysError, KeyStore
-from tamias.pricing import PriceSheet, compute_cost, load_price_sheet
+from tamias.pricing import PriceSheet, assume_cache_warm, compute_cost, load_price_sheet
 from tamias.pricing_fetch import (
     OPENROUTER_MODELS_URL,
     fetch_models,
@@ -61,7 +61,7 @@ from tamias.types import Usage
 #: fetch implementation that replaced the older float one.
 DEFAULT_URL = OPENROUTER_MODELS_URL
 
-ESTIMATE_LABEL = "estimate; ignores cache rebuild cost; not measured"
+ESTIMATE_LABEL = "estimate; cache-aware, can be negative; not measured"
 ROUTER_MODES = ("shadow", "off", "active")
 SIMULATED_LABEL = "SIMULATED PRICES, NOT REAL SAVINGS"
 RUN_START_TIMEOUT_SECONDS = 15
@@ -121,7 +121,9 @@ def _warn_if_exposed(host: str) -> None:
 def _money(value: float) -> str:
     if value == 0:
         return "$0.00"
-    return f"${value:.6f}" if abs(value) < 1 else f"${value:.4f}"
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+    return f"{sign}${magnitude:.6f}" if magnitude < 1 else f"{sign}${magnitude:.4f}"
 
 
 def _cost_suffix(simulated: bool) -> str:
@@ -249,18 +251,31 @@ def _cheap_model(sheet: PriceSheet) -> str | None:
 
 
 def _saving(row: dict[str, Any], sheet: PriceSheet, cheap: str | None) -> float | None:
-    """What this request would have cost less, had the switch been acted on."""
+    """What this request would have cost less, had the switch been acted on.
+
+    The stay arm is the model that answered, priced with a **warm** cache
+    (:func:`assume_cache_warm`); the switch arm is the cheap model on the row's
+    real counts.  Charging the switch the context it would have to re-ingest is
+    what makes the estimate falsifiable: the result can be zero or negative, so
+    the report can show a switch that lost money instead of only ever showing
+    winnings (F-1).  It is still an estimate -- no counterfactual was ever run.
+    """
     if cheap is None:
         return None
-    used = _pick(row, MODEL_USED_COLUMNS)
-    if not isinstance(used, str) or not used:
+    stay = _pick(row, MODEL_USED_COLUMNS)
+    if not isinstance(stay, str) or not stay:
         return None
     usage = _usage(row)
-    actual = compute_cost(used, usage, sheet).usd
-    alternative = compute_cost(cheap, usage, sheet).usd
-    if actual is None or alternative is None:
+    staying = compute_cost(stay, assume_cache_warm(usage), sheet).usd
+    switching = compute_cost(cheap, usage, sheet).usd
+    if staying is None or switching is None:
         return None
-    return max(0.0, actual - alternative)
+    if stay == cheap:
+        # Already on the model a switch would choose: there is no switch to
+        # price, and comparing a warm price against a cold one for the same
+        # model would invent a loss out of a no-op.
+        return 0.0
+    return staying - switching
 
 
 def report(db_path: str, prices_path: str) -> None:
@@ -318,10 +333,14 @@ def report(db_path: str, prices_path: str) -> None:
             if _would_switch(row):
                 routed += 1
             usage = _usage(row)
-            cost_requested = compute_cost(row["model_requested"], usage, sheet).usd
+            cost_requested = compute_cost(
+                row["model_requested"], assume_cache_warm(usage), sheet
+            ).usd
             cost_used = compute_cost(model_used, usage, sheet).usd
             if cost_requested is not None and cost_used is not None:
-                realised_saved += max(0.0, cost_requested - cost_used)
+                # Cache-aware and unclamped: a switch that re-ingested more than
+                # it saved shows as a negative "realised saving" (F-1).
+                realised_saved += cost_requested - cost_used
                 realised_count += 1
             else:
                 realised_unpriced += 1

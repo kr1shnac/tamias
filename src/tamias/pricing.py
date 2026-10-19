@@ -8,7 +8,14 @@ from typing import Any
 
 from tamias.types import CostBreakdown, Usage
 
-__all__ = ["ModelPrice", "PriceSheet", "load_price_sheet", "can_price", "compute_cost"]
+__all__ = [
+    "ModelPrice",
+    "PriceSheet",
+    "load_price_sheet",
+    "can_price",
+    "compute_cost",
+    "assume_cache_warm",
+]
 
 TOKENS_PER_RATE_UNIT = 1_000_000
 UNKNOWN = "?"
@@ -162,6 +169,35 @@ def can_price(model: str, sheet: PriceSheet) -> bool:
     if price is None or price.tiers:
         return False
     return price.input is not None and price.output is not None
+
+
+def assume_cache_warm(usage: Usage) -> Usage:
+    """The same request as if the prompt cache had already been warm.
+
+    A warm cache serves the whole prompt from ``cached_input`` and writes
+    nothing.  ``input_tokens`` is the total prompt, so the transform sets
+    ``cached_input_tokens`` to it and zeroes the write counts; the difference
+    between this and the request's own counts is the context a switch forced
+    the new model to re-ingest.
+
+    Pricing a *stay* model this way is the most favourable reading of "what
+    staying would have cost", which makes the saving of switching the most
+    conservative one: the difference can be zero or negative, so the instrument
+    can report a failure instead of only ever confirming success (F-1).  A
+    request that logged no ``input_tokens`` has no prompt to mark cached, so it
+    is returned unchanged and the arithmetic reports UNKNOWN rather than
+    guessing.
+    """
+    if usage.input_tokens is None:
+        return usage
+    return Usage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_input_tokens=usage.input_tokens,
+        cache_write_tokens=0,
+        cache_write_1h_tokens=0,
+        provider_cost_usd=usage.provider_cost_usd,
+    )
 
 
 def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
