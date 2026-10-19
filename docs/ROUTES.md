@@ -9,7 +9,7 @@ it defaults to 600 seconds.  Invalid or non-positive values use that default.
 | `POST /v1/chat/completions` | OpenAI-compatible upstream; shadow mode preserves the request body, active mode may rewrite its model | OpenAI `prompt_tokens`, `completion_tokens`, and cached prompt tokens. Stream usage is logged when the upstream sends it; absent usage is NULL. | Real OpenRouter traffic is recorded in this repository's live evidence; the changes in this branch were fixture-tested only. |
 | `POST /v1/responses` | OpenAI Responses upstream; the body is always forwarded unchanged and this route never rewrites a model | Non-stream `usage.input_tokens`, `output_tokens`, and `input_tokens_details.cached_tokens`. Stream usage comes only from the final `response.completed` event. Reasoning tokens are already included in output tokens and are never added again. | Fixtures only; buffered, completed-stream, and truncated-stream cases. |
 | `POST /v1/messages` | Anthropic Messages upstream; shadow mode preserves the request body, active mode may rewrite its model | `input_tokens`, `output_tokens`, cache creation, and cache read usage. Stream `message_start` and `message_delta` usage are merged. Cache-read/write cost is UNKNOWN unless the sheet quotes that rate. | Fixtures only; no real Anthropic traffic is confirmed in this repository. |
-| Other paths | Catch-all byte relay | Not metered | Fixture-tested as a relay only. |
+| Other paths | Catch-all byte relay | Count-only: one `route="passthrough"` row per request, token counts and cost NULL, never priced (F-12) | Fixture-tested as a relay only. |
 
 Every upstream response retains `content-type`, `Retry-After`, and
 `x-ratelimit-*` headers.  Hop-by-hop headers are removed.  A disconnected stream

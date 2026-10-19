@@ -6,9 +6,11 @@ was. It can also send a request to a cheaper model instead, when a configured
 rule says that is safe. Point your agent at it instead of at the provider, and
 it records the traffic.
 
-Under the hood it is a transparent, stateless-per-request, OpenAI-compatible
-request-rewriting proxy. It meters token usage and cost for every request, and
-it can rewrite which model handles a request.
+Under the hood it is a transparent, OpenAI-compatible request-rewriting proxy. It
+is stateless per request payload — it holds no conversation state — though a
+bounded, in-memory session table keeps recent routing decisions so that
+`--min-gap` hysteresis can apply across a session. It meters token usage and
+cost for every request, and it can rewrite which model handles a request.
 
 **Coverage:** Tamias rewrites model selection for OpenAI-compatible agents on
 `/v1/chat/completions` and `/v1/messages` (Anthropic Messages wire). Codex-style
@@ -23,17 +25,10 @@ what Tamias is, what is `PROVEN`, and what remains unvalidated is
 ## Install
 
 Tamias is **not yet on PyPI**. The source and the annotated tag in this
-repository are `0.1.0a6` (2026-10-19); the newest *published* artifact is the
-TestPyPI pre-release `0.1.0a3` (2026-10-07), which predates the current source.
-
-Install the published pre-release (Python 3.11 or newer):
-
-```sh
-pip install -i https://test.pypi.org/simple/ tamias
-```
-
-Until `tamias` is on PyPI, install the current source from this checkout
-instead — this is what you want to run the reviewed code:
+repository are `0.1.0a7` (2026-10-20); the newest *published* artifact is the
+TestPyPI pre-release `0.1.0a3` (2026-10-07), which predates the current source
+and is **not** the reviewed code. Install the current source from this checkout
+— this is what you want to run the reviewed code:
 
 ```sh
 python -m venv .venv
@@ -233,7 +228,7 @@ Three client protocols are priced. Any other path is relayed unpriced, but each 
 | Reasoning-effort switching | Metering only; provider behaviour unverified |
 | Proxy authentication | Opt-in bearer token; required off loopback |
 | Company keys (identity + model allowlist) | Yes — opt-in via `--keys-db` |
-| Per-key budget, model sub-caps, RPM/TPM | Yes — enforced by the gateway, `docs/BUDGET.md` |
+| Per-key budget, model sub-caps, RPM/TPM | Yes — enforced by the gateway; **live behaviour UNTESTED**, see `docs/BUDGET.md` and `docs/RELEASE-STATUS.md` |
 | Signed policy manifest (company policy) | Opt-in — `serve --manifest`; verified at startup and served at `GET /policy`, `docs/MANIFEST.md` |
 | Prompt / response text storage | No — never stored |
 | Multi-user or remote hardening | Not supported — single user |

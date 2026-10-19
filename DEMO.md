@@ -25,7 +25,7 @@ below predate that change and are kept verbatim.**
 Run everything from the repo root:
 
 ```sh
-cd /home/krish/Desktop/tamias
+cd /path/to/tamias
 ```
 
 ---

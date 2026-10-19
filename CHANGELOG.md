@@ -5,7 +5,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0a7] - 2026-10-20
+
+### Changed
+
+- **The non-loopback bind rule is documented as what it is: two keys.** A
+  wider `serve` bind needs *both* authentication (`--auth-token` /
+  `$TAMIAS_AUTH_TOKEN` / `--keys-db`) *and* the explicit
+  `--allow-non-loopback` acknowledgement. `SECURITY.md` and `README.md`
+  previously said "either", which was wrong; `security.py` also printed "this
+  service has no authentication" even when a token or keys were configured
+  (council run 20261020-1500). The refusal message is now conditional and names
+  only what is actually missing.
+- `dashboard.py` no longer emits a `SyntaxWarning` at import: the CSV
+  formula-injection guard's JS regex had an invalid `\-` escape in a non-raw
+  string, which becomes a `SyntaxError` in a future Python.
 
 ### Added
 
@@ -22,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invisible (F-12). The request log gains a `route` column
   (`chat`/`messages`/`responses`/`passthrough`); existing logs get it via the
   usual append-only migration.
+- `tests/test_compile_clean.py` compiles every source module with
+  `SyntaxWarning` promoted to error, so the invalid-escape class cannot recur.
+- Bind-matrix tests pin the two-key rule (authentication and acknowledgement
+  are independent) and assert the refusal message never claims "no
+  authentication" when authentication is configured.
 
 ### Changed
 

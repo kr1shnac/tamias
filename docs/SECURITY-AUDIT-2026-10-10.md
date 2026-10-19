@@ -1,5 +1,11 @@
 # Security Audit — 2026-10-10
 
+> **Scope note (added 2026-10-20):** parts of this document review the separate,
+> now-*parked* `tamias-agent` repository as well as the `tamias` proxy. Where a
+> finding concerns `tamias-agent` (for example `run_shell`, a CLI the proxy does
+> not contain), it does not apply to this repository and is retained only as a
+> record of the joint review. The `tamias`-proxy findings in here stand.
+
 ## Scope
 
 Static review and offline tests of the Tamias proxy at commit `2dfca5a`, plus
