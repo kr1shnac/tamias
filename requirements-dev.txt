@@ -1,0 +1,13 @@
+# Direct development tools, pinned to the versions the 2026-10-20 gate passed
+# with (934 tests, ruff clean). Runtime dependencies stay bounded in pyproject.
+#
+# Reproduce the gate:
+#   python -m venv .venv && .venv/bin/pip install -e . -r requirements-dev.txt
+#   .venv/bin/python -m pytest -q && .venv/bin/ruff check src tests scripts
+#
+# These are the tools only; the dependency versions they pull in are resolved
+# from pyproject's bounded ranges. Bump a pin only with the gate green.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+ruff==0.16.10
+cryptography==50.0.2

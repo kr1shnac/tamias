@@ -1,6 +1,12 @@
 # Tamias
 
-Tamias is a transparent, stateless-per-request, OpenAI-compatible
+Tamias sits between your coding agent and the model API and shows you, per
+request, which model was used, how many tokens it cost, and how much money that
+was. It can also send a request to a cheaper model instead, when a configured
+rule says that is safe. Point your agent at it instead of at the provider, and
+it records the traffic.
+
+Under the hood it is a transparent, stateless-per-request, OpenAI-compatible
 request-rewriting proxy. It meters token usage and cost for every request, and
 it can rewrite which model handles a request.
 
@@ -19,23 +25,32 @@ what Tamias is, what is `PROVEN`, and what remains unvalidated is
 Tamias is **not yet on PyPI**. The source and the annotated tag in this
 repository are `0.1.0a6` (2026-10-19); the newest *published* artifact is the
 TestPyPI pre-release `0.1.0a3` (2026-10-07), which predates the current source.
-For the current state, install from the checkout (Python 3.11 or newer):
 
-```sh
-python -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-```
-
-To try the published TestPyPI pre-release instead:
+Install the published pre-release (Python 3.11 or newer):
 
 ```sh
 pip install -i https://test.pypi.org/simple/ tamias
+```
+
+Until `tamias` is on PyPI, install the current source from this checkout
+instead — this is what you want to run the reviewed code:
+
+```sh
+python -m venv .venv
+.venv/bin/pip install .
 ```
 
 Signing company policies needs the optional `manifest` extra:
 
 ```sh
 pip install 'tamias[manifest]'
+```
+
+To run the test suite and linter (contributors), install the `dev` extra — it
+adds pytest and ruff, which a normal install does not need:
+
+```sh
+.venv/bin/pip install -e '.[dev]'
 ```
 
 ## Quickstart
