@@ -758,6 +758,55 @@ def test_the_acknowledgement_flag_is_what_unlocks_a_wider_bind() -> None:
     assert refuse_non_loopback("serve", "0.0.0.0", allow_non_loopback=True) == 0
 
 
+@pytest.mark.parametrize(
+    "authenticated,allow,expected",
+    [
+        (False, False, 1),  # no ack -> refused, and the message says "no authentication"
+        (True, False, 1),   # auth but no ack -> still refused (ack is a separate key)
+        (True, True, 0),    # auth and ack -> may proceed past this gate
+    ],
+)
+def test_the_acknowledgement_gate_is_separate_from_authentication(
+    authenticated: bool, allow: bool, expected: int
+) -> None:
+    """The acknowledgement flag is its own key, not a substitute for auth.
+
+    ``refuse_non_loopback`` only owns the acknowledgement rule; the *auth*
+    requirement for ``serve`` is a second, independent check in ``cli.serve``
+    (``test_serve_refuses_a_non_loopback_host_before_building_anything`` and the
+    matrix run 20261020-1500 pinned both: auth alone does not lift the refusal,
+    and the ack alone does not either).
+    """
+    from tamias.security import refuse_non_loopback
+
+    assert (
+        refuse_non_loopback(
+            "serve", "0.0.0.0", allow_non_loopback=allow, authenticated=authenticated
+        )
+        == expected
+    )
+
+
+def test_the_refusal_message_never_claims_no_auth_when_auth_is_configured(capsys) -> None:
+    """The message must name only what is actually missing.
+
+    The old message asserted "this service has no authentication" even when a
+    token or keys were configured, which is false; and the docs said the flag
+    alone was enough. Both are wrong: the message must not lie, and the two-key
+    requirement is what the exit codes encode.
+    """
+    from tamias.security import refuse_non_loopback
+
+    assert refuse_non_loopback("serve", "0.0.0.0", False, authenticated=True) == 1
+    with_auth = capsys.readouterr().err
+    assert "no authentication" not in with_auth
+    assert "--allow-non-loopback" in with_auth
+
+    assert refuse_non_loopback("serve", "0.0.0.0", False, authenticated=False) == 1
+    without_auth = capsys.readouterr().err
+    assert "no authentication" in without_auth
+
+
 def test_serve_refuses_a_non_loopback_host_before_building_anything(monkeypatch) -> None:
     """serve must refuse a wider bind before any server-side work starts."""
     from tamias import cli
@@ -781,6 +830,46 @@ def test_serve_refuses_a_non_loopback_host_before_building_anything(monkeypatch)
             "d.db",
             "--host",
             "0.0.0.0",
+        ]
+    )
+    assert cli.serve(args) == 1
+    assert built is False
+
+
+def test_serve_refuses_the_acknowledgement_without_authentication(
+    monkeypatch, tmp_path
+) -> None:
+    """--allow-non-loopback is not a substitute for authentication on serve.
+
+    The second key: an operator who acknowledges a wider bind but configures no
+    token and no keys is refused (this is the cell the docs used to get wrong).
+    """
+    from tamias import cli
+
+    prices = tmp_path / "p.toml"
+    prices.write_text('date = "2026-10-04"\nsimulated = true\n', encoding="utf-8")
+
+    built = False
+
+    def boom(*args, **kwargs):
+        nonlocal built
+        built = True
+        raise AssertionError("a wider unauthenticated bind must not build an app")
+
+    monkeypatch.setattr(cli, "build_serve_app", boom)
+    monkeypatch.delenv("TAMIAS_AUTH_TOKEN", raising=False)
+    args = cli.build_parser().parse_args(
+        [
+            "serve",
+            "--upstream",
+            "http://x",
+            "--prices",
+            str(prices),
+            "--db",
+            str(tmp_path / "d.db"),
+            "--host",
+            "0.0.0.0",
+            "--allow-non-loopback",
         ]
     )
     assert cli.serve(args) == 1

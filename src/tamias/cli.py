@@ -108,12 +108,21 @@ DECISION_COLUMNS = ("decision_action", "decision")
 MODEL_USED_COLUMNS = ("model_used", "model")
 
 
-def _warn_if_exposed(host: str) -> None:
-    """Warn when a service is bound beyond loopback: it has no authentication."""
+def _warn_if_exposed(host: str, *, authenticated: bool = False) -> None:
+    """Warn when a service is bound beyond loopback.
+
+    ``authenticated`` reflects whether a token or company keys are configured,
+    so the warning never claims the service is unauthenticated when it is not.
+    """
     if host not in ("127.0.0.1", "localhost", "::1") and not host.startswith("127."):
+        posture = (
+            "it is authenticated but reachable beyond loopback"
+            if authenticated
+            else "this service has no authentication"
+        )
         print(
-            f"tamias: WARNING — binding to {host!r}; this service has no "
-            f"authentication, keep it on loopback unless you are on a trusted network",
+            f"tamias: WARNING — binding to {host!r}; {posture}, keep it on "
+            f"loopback unless you are on a trusted network",
             file=sys.stderr,
         )
 
@@ -913,8 +922,16 @@ def serve(args: argparse.Namespace) -> int:
     if not _flag_given(args, "--port") and cfg.port is not None:
         args.port = cfg.port
 
-    # Refuse a wider bind before any server-side work starts.
-    refused = refuse_non_loopback("serve", args.host, args.allow_non_loopback)
+    # Refuse a wider bind before any server-side work starts.  Authentication
+    # is determined first so the refusal message is accurate: naming "no
+    # authentication" when a token/keys *were* given would be a false message.
+    auth_token = args.auth_token or os.environ.get(AUTH_TOKEN_ENV)
+    refused = refuse_non_loopback(
+        "serve",
+        args.host,
+        args.allow_non_loopback,
+        authenticated=auth_token is not None or bool(args.keys_db),
+    )
     if refused:
         return refused
 
@@ -939,7 +956,6 @@ def serve(args: argparse.Namespace) -> int:
     if not _flag_given(args, "--strong-model") and cfg.strong_model is not None:
         args.strong_model = cfg.strong_model
 
-    auth_token = args.auth_token or os.environ.get(AUTH_TOKEN_ENV)
     # A wider bind needs *some* authentication.  Company keys count: requiring
     # the shared --auth-token here would force every deployment beyond loopback
     # to hand out an identity-less token that bypasses the model allowlist.
@@ -1068,7 +1084,7 @@ def serve(args: argparse.Namespace) -> int:
             f"authenticated callers",
             file=sys.stderr,
         )
-    _warn_if_exposed(args.host)
+    _warn_if_exposed(args.host, authenticated=auth_token is not None or bool(args.keys_db))
     ssl_kwargs = {"ssl_certfile": tls_cert, "ssl_keyfile": tls_key} if tls_cert else {}
     uvicorn.run(app, host=args.host, port=args.port, log_level="info", **ssl_kwargs)
     store: Store | None = getattr(app.state, "store", None)

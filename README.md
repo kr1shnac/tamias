@@ -151,15 +151,18 @@ flags are `--provider`, `--port`, `--host`, `--router-mode`, `--router-profile`,
 `--router-config`, `--cheap-model`, `--strong-model`, `--min-gap`,
 `--effort-mode`, `--registry`, `--effort-style`, `--inject-usage`,
 `--request-usage-cost`, `--auth-token`, `--keys-db`, `--tls-cert`, `--tls-key`,
-`--max-body-bytes`, `--max-concurrency`, and `--verbose`.
+`--max-body-bytes`, `--max-concurrency`, `--manifest`, `--manifest-key`,
+`--allow-non-loopback`, and `--verbose`.
 
 Give `--tls-cert` and `--tls-key` together to serve HTTPS; the startup banner
 then prints the `https://` URL. TLS is independent of `--auth-token`, which a
 non-loopback bind still requires.
 
-Binding to a non-loopback `--host` requires authentication: `serve` refuses to
+Binding to a non-loopback `--host` is a **two-key** act: `serve` refuses to
 start unless you pass `--auth-token` (or set `$TAMIAS_AUTH_TOKEN`) or configure
-company keys with `--keys-db`. The token is checked as a bearer credential in
+company keys with `--keys-db`, **and** you pass `--allow-non-loopback` to
+acknowledge the wider bind. Authentication alone does not lift the refusal.
+The token is checked as a bearer credential in
 constant time,
 and every response carries a `WWW-Authenticate: Bearer` header on a 401. The
 three limits are also settable through the environment — `TAMIAS_AUTH_TOKEN`,

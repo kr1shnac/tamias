@@ -1332,7 +1332,7 @@ tbody tr.new td { animation: flash 1s cubic-bezier(0.4, 0, 0.2, 1); }
       // Formula-injection guard: a leading = + - @ tab or CR would be
       // evaluated as a spreadsheet formula by Excel/Sheets.  Prefixing a
       // single quote turns the cell into inert text.
-      if (/^[=\-+@\t\r]/.test(text)) text = "'" + text;
+      if (/^[=\\-+@\t\r]/.test(text)) text = "'" + text;
       return '"' + text.replace(/"/g, '""') + '"';
     }
     state.rows.forEach(function(row) {
