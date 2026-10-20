@@ -59,6 +59,27 @@ C, a positive A-vs-B delta proves only that swapping models is cheaper — which
 the user can already do by editing one config line, with no proxy and no
 prefix-cache risk. A result that does not beat arm C does not justify Tamias.
 
+The three arms and their agent configurations are defined and tested in
+`tests/benchmark/arms.py` / `tests/benchmark/test_arms.py`:
+
+| Arm | Proxy | Model asked for | Isolates |
+|-----|-------|-----------------|----------|
+| A `off` | yes, routing off | strong | unmodified baseline |
+| B `on` | yes, routing active | strong (proxy rewrites to cheap) | the proxy's lever |
+| C `static_cheap` | **no proxy** | cheap, pinned | the null hypothesis (F-18) |
+
+Arms A and B are byte-identical configs — the tests assert this — so the A-vs-B
+delta cannot be an artifact of a config difference; the only thing that varies
+is the serve-time routing mode. Arm C changes the *model*, not the plumbing.
+
+The decision rule is therefore **B must beat C**, not merely beat A:
+
+- If `cost(B) < cost(C)` and `pass(B) ≥ pass(C)`: the proxy adds value beyond
+  "use a cheaper model", and only then is a savings claim warranted.
+- If `cost(C) ≤ cost(B)`: the null hypothesis wins — the same saving is
+  available by editing one line — and Tamias is a **meter**, not a saver.
+
+
 ## What is still open (do not mistake this file for a finished benchmark)
 
 - **F-35 caveat, restated honestly.** These five oracles make the benchmark
@@ -68,19 +89,24 @@ prefix-cache risk. A result that does not beat arm C does not justify Tamias.
   the harness, never as evidence of savings.
 - **No numbers.** Nothing here reports cost, tokens or savings. This file
   defines the completion predicate and nothing else.
-- **Arm C is specified but not yet wired.** It is a prerequisite of the
-  benchmark and is named here so it cannot be quietly dropped.
+- **No runner yet.** The arms, fixtures and oracles exist and are tested, but
+  nothing executes a full three-arm run and writes the §18 columns (turns,
+  wall time, tokens, cost). Wiring that — with a live provider and a budget —
+  is the remaining phase-C work; it is not done here.
 
-## The oracle's own test
+## The apparatus's own tests
 
-The oracles run offline and are checked by the regular gate:
+The apparatus runs offline and is checked by the regular gate:
 
 ```sh
-.venv/bin/python -m pytest tests/benchmark/test_oracles.py -q
+.venv/bin/python -m pytest tests/benchmark/ -q
 ```
 
-That command is the proof the apparatus exists. It builds each fixture, runs
-each oracle against **the buggy fixture** (must FAIL) and against **the fixed
-fixture** (must PASS), and asserts T5's anti-gaming clause rejects an edited
-test. A passing run means: five tasks are defined, each is scored by a
-predicate that is correct on both known outcomes.
+That command is the proof the apparatus exists. `test_oracles.py` builds each
+fixture, runs each oracle against **the buggy fixture** (must FAIL) and against
+**the fixed fixture** (must PASS), and asserts T5's anti-gaming clause rejects an
+edited test. `test_arms.py` asserts the three arms exist, that arm C uses no
+proxy and pins the cheap model, and that arms A and B are byte-identical configs
+differing only in the serve-time routing mode. A passing run means: five tasks
+are defined, each is scored by a predicate that is correct on both known
+outcomes, and the null-hypothesis arm (F-18) is present and correctly isolated.

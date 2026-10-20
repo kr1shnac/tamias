@@ -17,8 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries an anti-gaming clause (F-14): the oracle rejects any edit under the
   task's `tests/`, because the completion signal must not be authored by the
   graded agent. This is the apparatus `SSOT:160` calls "the entire gate". It
-  makes the benchmark *runnable*; power, sample size and the arm-C control
-  (F-18) remain open.
+  makes the benchmark *runnable*; power, sample size and the runner remain open.
+- **The three benchmark arms, including the F-18 null hypothesis.**
+  `tests/benchmark/arms.py` defines arm A (routing off), arm B (routing active)
+  and arm **C** (`static_cheap`): the cheap model pinned in the agent's own
+  configuration with **no proxy**. `tests/benchmark/test_arms.py` asserts arm C
+  uses no proxy and pins the cheap model, and that arms A and B are
+  byte-identical configs differing only in the serve-time routing mode. Without
+  arm C, a positive A-vs-B delta proves only that swapping models is cheaper —
+  which one config line already achieves.
 
 ### Fixed
 
