@@ -50,6 +50,16 @@ pip install tamias
 tamias --version                 # prints: tamias 0.1.0a8
 ```
 
+Every release so far is a **pre-release** (`0.1.0aN`). Plain `pip install tamias`
+works because PyPI holds no stable version yet: per pip's rule, pre-releases are
+used when no stable version satisfies the requirement. Once a stable `0.1.0` is
+published, later `0.1.1aN` pre-releases are hidden from a plain install and need
+`pip install --pre tamias`. To pin exactly:
+
+```sh
+pip install tamias==0.1.0a8
+```
+
 To install the reviewed source from this checkout instead:
 
 ```sh

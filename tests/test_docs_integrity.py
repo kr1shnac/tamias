@@ -75,12 +75,46 @@ def check_version_consistency():
     return f'PASS: version consistency ({version})'
 
 
+def check_no_contradictory_publish_state():
+    """The docs must not claim the package is unpublished while it is published.
+
+    This is the drift that caused a long debugging loop: README, AGENTS.md and
+    RELEASE-STATUS.md kept saying 'not yet on PyPI' after 0.1.0a7 shipped. The
+    published state is asserted from the CHANGELOG: once a version's entry says
+    the package is on PyPI, no authority file may claim otherwise.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    changelog = open(os.path.join(root, 'CHANGELOG.md')).read()
+    if 'pypi.org/project/tamias' not in changelog:
+        return 'PASS: publish-state check skipped (no published release recorded)'
+
+    stale_phrases = (
+        'not yet on PyPI',
+        'Nothing is on real PyPI',
+        'pip install tamias` will fail',
+        'pip install tamias will fail',
+    )
+    errors = []
+    for name in ('README.md', 'AGENTS.md', 'docs/RELEASE-STATUS.md', 'BLOCKED.md'):
+        path = os.path.join(root, name)
+        if not os.path.exists(path):
+            continue
+        text = open(path).read()
+        for phrase in stale_phrases:
+            if phrase in text:
+                errors.append(f'{name} still claims unpublished: {phrase!r}')
+    if errors:
+        return 'FAIL: contradictory publish state: ' + '; '.join(errors)
+    return 'PASS: publish state not contradicted'
+
+
 # Pytest will discover and run this function
 def test_docs_integrity():
     results = []
     results.append(check_no_stale_line_citations())
     results.append(check_anchors_resolve())
     results.append(check_version_consistency())
+    results.append(check_no_contradictory_publish_state())
     for r in results:
         print(r)
     if any('FAIL' in r for r in results):
