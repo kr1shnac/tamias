@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tamias — a local metering proxy for coding agents</title>
+  <meta name="description" content="Tamias sits between your coding agent and the model API and records one row per request: model, tokens, cost. It can switch a request to a cheaper model when a configured rule says it is safe. Alpha: savings estimated, not yet measured." />
+  <style>
+    :root {
+      --bg: #070b14;
+      --panel: #0d1424;
+      --panel-2: #111a2e;
+      --line: #1e2a44;
+      --text: #d7e0f0;
+      --muted: #8a97b1;
+      --accent: #06d6a0;
+      --accent-2: #118ab2;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: var(--mono); font-size: 0.92em; }
+    p code, li code, td code { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 0 20px; }
+
+    /* Header */
+    header { border-bottom: 1px solid var(--line); background: rgba(7, 11, 20, 0.9); }
+    .bar { display: flex; align-items: center; gap: 20px; height: 60px; }
+    .brand { font-weight: 700; font-size: 18px; color: var(--text); letter-spacing: 0.5px; }
+    .brand:hover { text-decoration: none; }
+    .brand span { color: var(--accent); }
+    nav { margin-left: auto; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+    nav a { color: var(--muted); font-size: 14px; }
+    nav a:hover { color: var(--text); text-decoration: none; }
+    .badge {
+      font-size: 12px; font-weight: 600; color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 999px; padding: 2px 10px;
+    }
+
+    /* Hero */
+    .hero { padding: 56px 0 40px; }
+    h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.15; letter-spacing: -0.5px; }
+    .lede { margin-top: 16px; font-size: 18px; color: var(--muted); max-width: 46rem; }
+    .banner {
+      margin-top: 22px; display: inline-block; background: rgba(6, 214, 160, 0.08);
+      border: 1px solid rgba(6, 214, 160, 0.45); border-radius: 8px;
+      padding: 8px 14px; font-size: 14px; color: var(--accent);
+    }
+    .cta { margin-top: 26px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .btn {
+      display: inline-flex; align-items: center; height: 42px; padding: 0 18px;
+      border-radius: 8px; font-size: 14px; font-weight: 600;
+    }
+    .btn:hover { text-decoration: none; transform: translateY(-1px); }
+    .btn-primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #050810; }
+    .btn-ghost { border: 1px solid var(--line); color: var(--text); background: var(--panel); }
+    .oneliner {
+      margin-top: 14px; display: flex; align-items: center; gap: 10px;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+      padding: 10px 14px; font-family: var(--mono); font-size: 13px; color: var(--text);
+      overflow-x: auto; white-space: nowrap;
+    }
+    .oneliner .p { color: var(--accent-2); }
+
+    /* Sections */
+    section { padding: 34px 0; border-top: 1px solid var(--line); }
+    h2 { font-size: 24px; letter-spacing: -0.3px; margin-bottom: 6px; }
+    .note { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+    p + p { margin-top: 12px; }
+    section > .wrap > p { max-width: 46rem; }
+
+    /* Terminal blocks */
+    .term {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+      padding: 16px 18px; font-family: var(--mono); font-size: 13.5px; line-height: 1.7;
+      color: var(--text); overflow-x: auto; margin-top: 16px;
+    }
+    .term .c { color: var(--muted); }
+    .term .g { color: var(--accent); }
+
+    /* Tables */
+    .tscroll { margin-top: 16px; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.4px; }
+    td code { white-space: nowrap; }
+    .yes { color: var(--accent); }
+    .no { color: var(--muted); }
+
+    /* Diagram */
+    .diagram { margin-top: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+    .flow { display: flex; align-items: stretch; justify-content: center; gap: 10px; flex-wrap: wrap; }
+    .node {
+      background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+      padding: 12px 16px; text-align: center; min-width: 160px; flex: 1 1 160px;
+      font-weight: 600; font-size: 14.5px;
+    }
+    .node span { display: block; font-weight: 400; font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+    .node.hi { border-color: var(--accent); box-shadow: 0 0 18px rgba(6, 214, 160, 0.12); }
+    .link { align-self: center; color: var(--accent); font-size: 20px; }
+    .strip {
+      margin-top: 14px; background: var(--panel-2); border: 1px dashed var(--line);
+      border-radius: 8px; padding: 9px 14px; font-size: 13px; color: var(--muted);
+      text-align: center;
+    }
+    .strip b { color: var(--text); font-weight: 600; }
+    .caption { margin-top: 14px; font-size: 13.5px; color: var(--muted); }
+
+    /* Status cards */
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 18px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+    .card h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); margin-bottom: 8px; }
+    .card.warn h3 { color: #ffbd2e; }
+    .card p { font-size: 14px; color: var(--muted); }
+    .card p b { color: var(--text); font-weight: 600; }
+
+    ul.plain { list-style: none; margin-top: 14px; }
+    ul.plain li { padding-left: 22px; position: relative; margin-bottom: 10px; color: var(--muted); font-size: 15px; }
+    ul.plain li::before { content: "—"; position: absolute; left: 0; color: var(--accent); }
+    ul.plain li b, ul.plain li strong { color: var(--text); }
+
+    /* Docs grid */
+    .docs { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; margin-top: 18px; }
+    .doc {
+      display: block; background: var(--panel); border: 1px solid var(--line);
+      border-radius: 8px; padding: 12px 14px;
+    }
+    .doc:hover { border-color: var(--accent); text-decoration: none; }
+    .doc code { color: var(--accent); font-size: 13px; }
+    .doc span { display: block; color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+
+    footer { border-top: 1px solid var(--line); padding: 26px 0 40px; color: var(--muted); font-size: 13.5px; }
+    footer .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+    footer .guard { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+
+    @media (max-width: 640px) {
+      nav a:not(.badge) { display: none; }
+      .flow .link { transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wrap bar">
+    <a class="brand" href="#">Tamias<span>.</span></a>
+    <nav>
+      <a href="#install">Install</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="#how">How it works</a>
+      <a href="#status">Status</a>
+      <a href="#docs">Docs</a>
+      <a href="https://github.com/kr1shnac/tamias" target="_blank" rel="noopener noreferrer">GitHub</a>
+      <span class="badge">Alpha</span>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero wrap">
+    <h1>One row for every request your agent makes.</h1>
+    <p class="lede">
+      Tamias is a local proxy that sits between your coding agent and the model API.
+      It records which model ran, how many tokens it cost, and what that cost was
+      (exact or <code>UNKNOWN</code>, never guessed) — and it can send a request to a cheaper
+      model when a configured rule says that is safe.
+    </p>
+    <div class="banner">Alpha · metering proven; savings estimated, not yet measured.</div>
+    <div class="cta">
+      <a class="btn btn-primary" href="#install">Install from source</a>
+      <a class="btn btn-ghost" href="https://github.com/kr1shnac/tamias" target="_blank" rel="noopener noreferrer">View source</a>
+      <a class="btn btn-ghost" href="https://github.com/kr1shnac/tamias/blob/main/TAMIAS-SSOT.md" target="_blank" rel="noopener noreferrer">Read the SSOT</a>
+    </div>
+    <div class="oneliner"><span class="p">$</span> pip install git+https://github.com/kr1shnac/tamias</div>
+  </div>
+
+  <section id="what">
+    <div class="wrap">
+      <h2>What it is</h2>
+      <p class="note">A transparent, OpenAI-compatible request-rewriting proxy. No service or database to install — the log is a local SQLite file.</p>
+      <p>
+        Point your agent at Tamias instead of at the provider. Requests pass through
+        unchanged by default; the router records a <code>STAY</code> or <code>SWITCH</code>
+        decision, the reply comes back to the agent untouched, and one row lands in
+        the local log. Requires Python 3.11 or newer.
+      </p>
+      <div class="tscroll">
+      <table>
+        <thead>
+          <tr><th>Endpoint</th><th>Metered</th><th>Model rewriting</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>POST /v1/chat/completions</code> — OpenAI Chat</td><td class="yes">yes</td><td>yes, in active mode</td></tr>
+          <tr><td><code>POST /v1/messages</code> — Anthropic Messages</td><td class="yes">yes</td><td>yes, in active mode</td></tr>
+          <tr><td><code>POST /v1/responses</code> — OpenAI Responses</td><td class="yes">yes</td><td class="no">never — meter-only</td></tr>
+          <tr><td>anything else</td><td class="no">counted only, never priced</td><td class="no">never</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <h2>Install</h2>
+      <p class="note">Not yet published on PyPI — install the reviewed source. The one-liner above and the steps below are equivalent.</p>
+      <pre class="term">git clone https://github.com/kr1shnac/tamias
+cd tamias
+python -m venv .venv
+source .venv/bin/activate   <span class="c"># Windows: .venv\Scripts\activate</span>
+pip install .
+tamias --version            <span class="c"># tamias 0.1.0a7</span></pre>
+    </div>
+  </section>
+
+  <section id="quickstart">
+    <div class="wrap">
+      <h2>Quickstart</h2>
+      <p class="note">Fetch a price sheet, check the local setup, then start the proxy.</p>
+      <pre class="term">tamias prices fetch --out prices.toml
+tamias doctor --prices prices.toml
+tamias serve --upstream https://openrouter.ai/api --prices prices.toml --db requests.db</pre>
+      <p style="margin-top:14px">
+        Point your agent's base URL at <code>http://127.0.0.1:8000</code> instead of the
+        provider, and its traffic flows through the proxy. When you are done:
+      </p>
+      <pre class="term">tamias dashboard --db requests.db --prices prices.toml</pre>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <h2>How it works</h2>
+      <p class="note">One request, end to end.</p>
+      <div class="diagram">
+        <div class="flow">
+          <div class="node">Your coding agent<span>OpenCode · Codex · Claude Code</span></div>
+          <div class="link">→</div>
+          <div class="node hi">Tamias proxy<span>parse → router → forward · 127.0.0.1:8000</span></div>
+          <div class="link">→</div>
+          <div class="node">Provider API<span>OpenRouter · OpenAI · Ollama</span></div>
+        </div>
+        <div class="strip">↩ the provider's reply returns to the agent <b>unchanged</b></div>
+        <div class="strip">one row per request — <b>model · tokens · cost</b> → SQLite log <code>requests.db</code> → <code>tamias report</code> / <code>tamias dashboard</code></div>
+        <p class="caption">
+          Routing is rule-based, not model-scored. The default mode is <b>shadow</b>:
+          Tamias records the decision it <i>would</i> make and forwards the request
+          unchanged, so the default install cannot alter your traffic.
+          <b>Active</b> mode (<code>--router-mode active</code>) rewrites the model only when a
+          configured rule fires, and refuses to start unless the target is named in
+          <code>--registry</code>, tool-capable, and priced.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section id="status">
+    <div class="wrap">
+      <h2>Status</h2>
+      <p class="note">What is proven, and what is not. The full ledger lives in <a href="https://github.com/kr1shnac/tamias/blob/main/TAMIAS-SSOT.md">TAMIAS-SSOT.md</a> and <a href="https://github.com/kr1shnac/tamias/blob/main/docs/audit/claims.md">docs/audit/claims.md</a>.</p>
+      <div class="cards">
+        <div class="card">
+          <h3>Proven</h3>
+          <p><b>Metering.</b> Tokens and cost are recorded per request; cost is exact or <b>UNKNOWN</b>, never guessed. Prompt and response text are never stored.</p>
+        </div>
+        <div class="card">
+          <h3>Proven</h3>
+          <p><b>Rule-based routing.</b> Shadow mode records decisions without rewriting; active rewriting is opt-in and fail-closed behind startup gates.</p>
+        </div>
+        <div class="card warn">
+          <h3>Unverified</h3>
+          <p><b>Live behaviour.</b> Tested on fixtures only: live provider behaviour and real Codex and Claude Code traffic are unverified.</p>
+        </div>
+        <div class="card warn">
+          <h3>Not measured</h3>
+          <p><b>Savings.</b> Estimated, not yet measured — no measured savings exist, and every figure in this project is hypothetical. Treat any percentage as an illustration, not a measurement.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="privacy">
+    <div class="wrap">
+      <h2>Local by default</h2>
+      <ul class="plain">
+        <li>Binds <b>loopback only</b> (<code>127.0.0.1</code>). Exposing it off your machine is a <b>two-key act</b>: <code>--auth-token</code> (or <code>$TAMIAS_AUTH_TOKEN</code>) <i>and</i> <code>--allow-non-loopback</code> must both agree, or <code>serve</code> refuses to start.</li>
+        <li><b>Nothing sensitive is stored:</b> no prompt or response text, no credentials. The credentials your client already sends are forwarded to the provider, not kept.</li>
+        <li><b>Company keys</b> (opt-in, <code>--keys-db</code>) give per-caller identity and a model allowlist: only the key's SHA-256 hash is stored, and the secret is shown exactly once. Keys are identity, not spend caps — see <a href="https://github.com/kr1shnac/tamias/blob/main/docs/KEYS.md">docs/KEYS.md</a>.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="not">
+    <div class="wrap">
+      <h2>What Tamias does not do</h2>
+      <ul class="plain">
+        <li>It does not proxy arbitrary web traffic — only the three routes above are metered; everything else is passed through counted-only, never priced.</li>
+        <li>It does not store prompt or response text, and it does not log credentials.</li>
+        <li>It does not authenticate with the upstream provider; it forwards the credentials the client already sends.</li>
+        <li>It does not rewrite requests unless active mode is on and every startup gate passes — by default it cannot change which model a provider actually runs.</li>
+        <li>It does not prove that a provider honoured a requested reasoning effort; the log records the request only.</li>
+        <li>It does not measure savings. Metering is proven; savings remain estimated.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="docs">
+    <div class="wrap">
+      <h2>Documentation</h2>
+      <p class="note">Everything below lives in the repository. On what Tamias <i>is</i>, the SSOT outranks every other document; on what the code <i>does</i>, <code>docs/audit/claims.md</code> outranks the SSOT.</p>
+      <div class="docs">
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/TAMIAS-SSOT.md"><code>TAMIAS-SSOT.md</code><span>the single source of truth</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/README.md"><code>README.md</code><span>install, quickstart, matrices</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/CONTRACT.md"><code>CONTRACT.md</code><span>interface contract, in brief</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/ARCHITECTURE.md"><code>docs/ARCHITECTURE.md</code><span>where each topic lives</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/ROUTES.md"><code>docs/ROUTES.md</code><span>every HTTP route served</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/ROUTING.md"><code>docs/ROUTING.md</code><span>matcher, profiles, TOML keys</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/PRICING.md"><code>docs/PRICING.md</code><span>tokens → cost, or UNKNOWN</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/EFFORT.md"><code>docs/EFFORT.md</code><span>reasoning-effort switching</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/DASHBOARD.md"><code>docs/DASHBOARD.md</code><span>the local web dashboard</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/OPENCODE.md"><code>docs/OPENCODE.md</code><span>pointing OpenCode at Tamias</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/OPENROUTER.md"><code>docs/OPENROUTER.md</code><span>routing OpenRouter traffic</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/PLATFORMS.md"><code>docs/PLATFORMS.md</code><span>Python and OS support</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/KEYS.md"><code>docs/KEYS.md</code><span>company keys and allowlists</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/BUDGET.md"><code>docs/BUDGET.md</code><span>per-key budgets (live UNTESTED)</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/MANIFEST.md"><code>docs/MANIFEST.md</code><span>signed policy manifests</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/PROVIDER-COST.md"><code>docs/PROVIDER-COST.md</code><span>provider-reported usage.cost</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/BILLED-COST.md"><code>docs/BILLED-COST.md</code><span>billed-cost lookup</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/RELEASE-STATUS.md"><code>docs/RELEASE-STATUS.md</code><span>built, published, blocked</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/LIVE_CHECK.md"><code>docs/LIVE_CHECK.md</code><span>the live check to run</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/live-evidence.md"><code>docs/live-evidence.md</code><span>captured evidence</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/audit/claims.md"><code>docs/audit/claims.md</code><span>the verified-claims ledger</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/docs/audit/HOW-IT-WORKS.md"><code>docs/audit/HOW-IT-WORKS.md</code><span>one request, end to end</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/DEMO.md"><code>DEMO.md</code><span>the offline demo script</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/DEMO-LIVE.md"><code>DEMO-LIVE.md</code><span>the paid-run procedure</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/demo/RUNBOOK.md"><code>demo/RUNBOOK.md</code><span>how to read the two-arm demo</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/CHANGELOG.md"><code>CHANGELOG.md</code><span>release history</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/CONTRIBUTING.md"><code>CONTRIBUTING.md</code><span>how to gate a change</span></a>
+        <a class="doc" href="https://github.com/kr1shnac/tamias/blob/main/SECURITY.md"><code>SECURITY.md</code><span>vulnerability reporting</span></a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="row">
+      <span>Tamias is MIT-licensed.</span>
+      <a href="https://github.com/kr1shnac/tamias" target="_blank" rel="noopener noreferrer">Source</a>
+      <a href="https://github.com/kr1shnac/tamias/blob/main/TAMIAS-SSOT.md" target="_blank" rel="noopener noreferrer">SSOT</a>
+      <a href="https://github.com/kr1shnac/tamias/blob/main/docs/audit/claims.md" target="_blank" rel="noopener noreferrer">Claims ledger</a>
+      <a href="mailto:krishnacgowda10@gmail.com">Contact</a>
+    </div>
+    <p class="guard">
+      This page is checked by CI: <code>scripts/check-claims.sh</code> fails the build if it
+      contains a claim the SSOT forbids or a version that has drifted from
+      <code>pyproject.toml</code>.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
