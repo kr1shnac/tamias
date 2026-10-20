@@ -47,8 +47,8 @@ def check_version_consistency():
     """The source version must agree across the authority layer.
 
     The version is read dynamically so this check does not need editing at
-    every release; it only asserts that `pyproject.toml`, `src/tamias/__init__.py`
-    and the README footer agree.
+    every release; it only asserts that `pyproject.toml`, `src/tamias/__init__.py`,
+    the README footer and the project website agree.
     """
     errors = []
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -69,6 +69,14 @@ def check_version_consistency():
 
     if f'tamias {version}' not in open(README).read():
         errors.append(f'README does not mention the current version {version!r}')
+
+    # The project website quotes the version too. It drifted silently once
+    # (0.1.0a7 on the page while the source was 0.1.0a8), because only the
+    # shell claims-guard checked it and nothing ran that guard locally.
+    page = os.path.join(root, 'docs', 'index.html')
+    if os.path.exists(page):
+        if f'tamias {version}' not in open(page).read():
+            errors.append(f'docs/index.html does not mention the current version {version!r}')
 
     if errors:
         return 'FAIL: version inconsistency: ' + '; '.join(errors)
