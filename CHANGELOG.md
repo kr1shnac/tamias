@@ -5,6 +5,40 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The benchmark oracle (F-35 / §18 Phase 3).** `docs/benchmark/tasks.md`
+  specifies five benchmark tasks and the exact pass/fail predicate for each;
+  `tests/benchmark/tasks_fixture.py` generates them deterministically;
+  `tests/benchmark/oracle.py` scores them; `tests/benchmark/test_oracles.py`
+  proves each oracle fails the buggy fixture and passes the fixed one. T5
+  carries an anti-gaming clause (F-14): the oracle rejects any edit under the
+  task's `tests/`, because the completion signal must not be authored by the
+  graded agent. This is the apparatus `SSOT:160` calls "the entire gate". It
+  makes the benchmark *runnable*; power, sample size and the arm-C control
+  (F-18) remain open.
+
+### Fixed
+
+- **The publish-state guard skipped `docs/audit/claims.md`
+  (`tests/test_docs_integrity.py`).** The code-truth ledger is the file that
+  *outranks* the SSOT, yet it was absent from the guard's file list, so it kept
+  asserting the package was unpublished for a full release after `0.1.0a8`
+  shipped. The file is now scanned: reintroducing the stale wording fails the
+  gate.
+- **Two stale rows in `docs/audit/claims.md`.** The "nothing is on real PyPI"
+  row is corrected to PyPI `0.1.0a8`; the "type hints everywhere" row moves from
+  `VERIFIED` to `UNVERIFIED`, because no type checker runs in the gate.
+
+### Verified
+
+- **The published `0.1.0a8` artifact matches source.** `pip download
+  tamias==0.1.0a8` (wheel and sdist); `diff -rq` against `src/tamias` is empty
+  but `__pycache__`; the wheel carries `__version__ = "0.1.0a8"`, the F-1
+  `assume_cache_warm` saving, and the F-12 passthrough counter.
+
 ## [0.1.0a8] - 2026-10-20
 
 ### Changed

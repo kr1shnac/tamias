@@ -90,6 +90,12 @@ def check_no_contradictory_publish_state():
     RELEASE-STATUS.md kept saying 'not yet on PyPI' after 0.1.0a7 shipped. The
     published state is asserted from the CHANGELOG: once a version's entry says
     the package is on PyPI, no authority file may claim otherwise.
+
+    ``docs/audit/claims.md`` is included deliberately. It is the code-truth
+    ledger that *outranks* the SSOT (AGENTS.md), so it is the file most able to
+    smuggle a stale publish state past every other reader. It carried the
+    "nothing is on real PyPI" row for a full release after 0.1.0a8 shipped,
+    because this guard's file list omitted it.
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     changelog = open(os.path.join(root, 'CHANGELOG.md')).read()
@@ -99,11 +105,18 @@ def check_no_contradictory_publish_state():
     stale_phrases = (
         'not yet on PyPI',
         'Nothing is on real PyPI',
+        'nothing is on real PyPI',
         'pip install tamias` will fail',
         'pip install tamias will fail',
     )
     errors = []
-    for name in ('README.md', 'AGENTS.md', 'docs/RELEASE-STATUS.md', 'BLOCKED.md'):
+    for name in (
+        'README.md',
+        'AGENTS.md',
+        'docs/RELEASE-STATUS.md',
+        'BLOCKED.md',
+        'docs/audit/claims.md',
+    ):
         path = os.path.join(root, name)
         if not os.path.exists(path):
             continue
