@@ -26,8 +26,7 @@ compile.
 - **Database permissions are not enforced.** Tamias tightens the log database
   to owner-only with `os.chmod(0o600)`, which is a **no-op on Windows**. To keep
   the database private on Windows, place it on a directory whose NTFS ACLs
-  restrict other users, or use an encrypted volume. This is recorded in
-  `docs/SECURITY-AUDIT-2026-10-10.md`.
+  restrict other users, or use an encrypted volume.
 - **Loopback binding requires no administrator rights.** Binding to a
   non-loopback host requires `--auth-token` on every platform.
 - Paths are handled with `pathlib`; no POSIX-only path logic is used.

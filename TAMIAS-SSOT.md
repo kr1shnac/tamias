@@ -221,7 +221,7 @@ Even after these, the file may be called final **for design**; claims of *saving
 | `docs/audit/claims.md` | the verified-claims ledger (VERIFIED/SUPERSEDED/UNVERIFIED rows) | authority on code truth |
 | `docs/EFFORT.md`, `docs/BUDGET.md`, `docs/KEYS.md`, `docs/AGENTS.md` | effort limits; budget/keys semantics; per-agent integration status (all UNVERIFIED) | as stated |
 | `tests/` | 51 files, 988 collected (2026-10-20): fixtures + mock upstreams; `mock_upstream.py`, `mock_anthropic_upstream.py` | `PROVEN` fixture-level |
-| `docs/history/` | dated one-off audit snapshots kept for provenance (`2026-10-05-read-only-audit.md`) | historical |
+| `docs/audit/HOW-IT-WORKS.md` | end-to-end request-lifetime explainer | prose, not authority |
 | `TAMIAS-SSOT.md` (this file, repo root) | the single source of truth | v1.1 |
 
 Outside the repo: a project-brief-class document and the old handoff are archived as `*.legacy.md` on the author's Desktop and in the separate (deferred) `tamias-agent/` repo (see §16); `tamias-agent/` is the old agent harness, **deferred**, used only as a benchmark testbed for §18; and a private `.council/runs/` directory holds the council transcripts (§14). None of these are part of this repository.

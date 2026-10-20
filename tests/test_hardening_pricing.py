@@ -9,9 +9,8 @@ contract does not, and anything it invents *not* to, shows up there.
 
 Alongside it sit the hand-picked edges that random generation reaches rarely or
 never: a model nobody priced, counts that cannot all be true, and a free model.
-Nothing here fixes ``src/``; a test that exposes a real defect is marked
-``xfail(strict=True)`` and carries a BUG id that also appears in
-``docs/audit/hardening-findings.md``.
+Nothing here fixes ``src/``; every defect this suite once recorded has been
+fixed, so nothing is marked ``xfail`` and a failure here is a real regression.
 """
 
 from __future__ import annotations

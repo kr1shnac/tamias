@@ -8,9 +8,9 @@ entry, a blob -- is caught too.
 
 ``--verbose`` is checked as well, because "never stored" is not much of a promise
 if the same text is printed to the terminal: whatever the user can see, someone
-reading the log can keep.  Nothing here fixes ``src/``; a test that exposes a real
-defect is marked ``xfail(strict=True)`` and carries a BUG id that also appears in
-``docs/audit/hardening-findings.md``.
+reading the log can keep.  Every defect this suite once recorded has been fixed
+in ``src/``, so nothing is marked ``xfail`` and a failure here is a real
+regression.
 """
 
 from __future__ import annotations

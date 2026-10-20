@@ -447,7 +447,6 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
         uncached_f=uncached_calc,
         w5m=writes_5m,
         w1h=writes_1h_res,
-        final=True,
     )
     return CostBreakdown(usd=cost, formula=f"{expr} = {_show(cost)}", price_sheet_date=sheet.date)
 
@@ -463,7 +462,6 @@ def _build_expr(
     uncached_f: int | None = None,
     w5m: int | None = None,
     w1h: int | None = None,
-    final: bool = False,
 ) -> str:
     if uncached_f is None and usage.input_tokens is not None:
         c = cached_f if cached_f is not None else usage.cached_input_tokens or 0

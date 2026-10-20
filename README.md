@@ -291,3 +291,20 @@ Three client protocols are priced. Any other path is relayed unpriced, but each 
   output captured on a real run.
 - [`DEMO-LIVE.md`](DEMO-LIVE.md) — the paid-run procedure (the live demo),
   kept separate because it spends real money and needs an owner decision.
+- [`docs/OPENCODE.md`](docs/OPENCODE.md) — pointing OpenCode at Tamias.
+- [`docs/OPENROUTER.md`](docs/OPENROUTER.md) — routing OpenRouter traffic
+  through Tamias.
+- [`docs/DASHBOARD.md`](docs/DASHBOARD.md) — the local web dashboard.
+- [`docs/ROUTES.md`](docs/ROUTES.md) — every HTTP route Tamias serves and
+  whether it rewrites, meters or passes through.
+- [`docs/LIVE_CHECK.md`](docs/LIVE_CHECK.md) — the live check to run before
+  trusting the log.
+- [`docs/BILLED-COST.md`](docs/BILLED-COST.md) — OpenRouter's billed-cost
+  lookup, from the linked provider documentation only.
+- [`docs/audit/HOW-IT-WORKS.md`](docs/audit/HOW-IT-WORKS.md) — the lifetime of
+  one request, end to end.
+- [`docs/audit/claims.md`](docs/audit/claims.md) — the verified-claims ledger:
+  what the code does, tagged VERIFIED/SUPERSEDED/UNVERIFIED. On code truth it
+  outranks the SSOT.
+- [`docs/live-evidence.md`](docs/live-evidence.md) — captured evidence from the
+  live checks (no real key material).

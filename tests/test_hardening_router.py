@@ -10,9 +10,8 @@ text into the log and into every report drawn from it.
 Those invariants are asserted over hundreds of fixed-seed random conversations
 rather than a handful of examples, alongside the hand-picked shapes that random
 generation rarely reaches and the 2,000-message history that bounds its cost.
-Nothing here fixes ``src/``; a test that exposes a real defect is marked
-``xfail(strict=True)`` and carries a BUG id that also appears in
-``docs/audit/hardening-findings.md``.
+Nothing here fixes ``src/``; every defect this suite once recorded has been fixed,
+so nothing is marked ``xfail`` and a failure here is a real regression.
 """
 
 from __future__ import annotations

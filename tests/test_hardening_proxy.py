@@ -5,9 +5,9 @@ Everything runs in-process.  The upstream is an ASGI app reached through
 httpx client, request building, streaming relay and logging all stay on the real
 code path while no socket is ever opened.
 
-These tests only *find* bugs.  Nothing here fixes ``src/``: a test that exposes a
-real defect is marked ``xfail(strict=True)`` and carries a BUG id that also
-appears in ``docs/audit/hardening-findings.md``.
+These tests only *find* bugs.  Every defect this suite once recorded has been
+fixed in ``src/``, so it is a straight regression guard: nothing is marked
+``xfail`` and a failure here is a real regression.
 """
 
 from __future__ import annotations
