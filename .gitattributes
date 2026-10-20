@@ -1,0 +1,25 @@
+# Normalize line endings: text is LF in the repository whatever the platform,
+# so a Windows contributor's checkout does not rewrite every file.
+* text=auto eol=lf
+
+# Shell scripts must keep LF even if someone sets core.autocrlf; a CRLF script
+# fails to exec on Linux and macOS with a confusing "bad interpreter" error.
+*.sh text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+
+# The committed demo evidence is SQLite and JSON. The .db files are binary and
+# must never be text-normalized or shown as a diff.
+*.db binary
+*.db-journal binary
+*.png binary
+*.whl binary
+*.gz binary
+
+# Collapse generated lockfile-ish and vendored trees in diffs and language
+# stats, so a review shows the code that changed.
+demo/runs/*.json linguist-generated=true
+prices.*.toml linguist-language=TOML

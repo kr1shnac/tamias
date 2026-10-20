@@ -22,3 +22,6 @@ Then run the gate:
 Keep changes focused, preserve `UNKNOWN`/`NULL` semantics, and do not add
 credentials or request content to tests, fixtures, logs, or commits. Network
 and live-provider behavior must be tested with injected transports or fixtures.
+
+`.gitattributes` and `.editorconfig` fix line endings and editor defaults so a
+change looks the same on every platform; nothing in them is optional style.
