@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0a8] - 2026-10-20
+
+### Changed
+
+- **The package is published on PyPI.** `pip install tamias` installs
+  `0.1.0a8` from <https://pypi.org/project/tamias/>. The first successful
+  release was `v0.1.0a7`; the earlier alpha tags failed the publish job because
+  the PyPI pending publisher did not yet exist.
+- Maintainer contact address is `maintainers@kr1shnac.tk`, and `LICENSE` names
+  `kr1shnac` as the copyright holder.
+
 ## [0.1.0a7] - 2026-10-20
 
 ### Changed

@@ -5,6 +5,7 @@ Runs as part of the regular gate: .venv/bin/python -m pytest -q.
 Placed under tests/ so it is discovered alongside the other tests.
 """
 
+import os
 import re
 import sys
 
@@ -43,22 +44,35 @@ def check_anchors_resolve():
 
 
 def check_version_consistency():
-    """Version references that appear across the authority layer should be
-    internally consistent — no contradictory a6/a7 mentions outside historical
-    context."""
+    """The source version must agree across the authority layer.
+
+    The version is read dynamically so this check does not need editing at
+    every release; it only asserts that `pyproject.toml`, `src/tamias/__init__.py`
+    and the README footer agree.
+    """
     errors = []
-    release_txt = open(RELEASE).read()
-    # If RELEASE-STATUS.md references a6, it should be in explicit historical
-    # context (section/heading, not as the current source version).
-    if '0.1.0a6' in release_txt and '0.1.0a7' not in release_txt:
-        if not re.search(r'v0\.1\.0a6.*tag|annotated tag', release_txt):
-            errors.append('RELEASE-STATUS.md references a6 without historical context')
-    # If any file mentions both a6 and a7, ensure they are not presented as
-    # current-equal (the source IS a7, and a6 is a historical tag).
-    # No further constraint: each file may legitimately mention different tags.
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pyproject = os.path.join(root, 'pyproject.toml')
+    init = os.path.join(root, 'src', 'tamias', '__init__.py')
+
+    m = re.search(r'^version = "([^"]+)"', open(pyproject).read(), re.M)
+    if not m:
+        return 'FAIL: no version found in pyproject.toml'
+    version = m.group(1)
+
+    init_version = re.search(r'^__version__ = "([^"]+)"', open(init).read(), re.M)
+    if not init_version or init_version.group(1) != version:
+        errors.append(
+            f'__init__.__version__ {init_version.group(1) if init_version else None!r}'
+            f' != pyproject version {version!r}'
+        )
+
+    if f'tamias {version}' not in open(README).read():
+        errors.append(f'README does not mention the current version {version!r}')
+
     if errors:
         return 'FAIL: version inconsistency: ' + '; '.join(errors)
-    return 'PASS: version consistency'
+    return f'PASS: version consistency ({version})'
 
 
 # Pytest will discover and run this function

@@ -37,10 +37,10 @@ No measured savings exist.
 - **Code-truth ledger:** `docs/audit/claims.md`.
 - **Build order / roadmap:** `TAMIAS-SSOT.md` §11 and the council verdicts in
   §14.
-- **Release state:** `docs/RELEASE-STATUS.md`, `BLOCKED.md`. Tamias is **not yet
-  on PyPI**; the source version is `0.1.0a7` (untagged — the tag is pushed at
-  publish time), and the newest published artifact is TestPyPI `0.1.0a3`. The
-  latest pushed tag is `v0.1.0a6`.
+- **Release state:** `docs/RELEASE-STATUS.md`, `BLOCKED.md`. Tamias is **on
+  PyPI** as `tamias`; the source version is `0.1.0a8`, and the newest published
+  artifact is PyPI `0.1.0a8` (`0.1.0a7` was the first successful upload).
+  TestPyPI's newest is `0.1.0a3`.
 - **Legacy, do not treat as authority:** `AGENT-RULES.md` (written for a
   five-parallel-agent phase that forbade merging — obsolete, and it does not
   exist in this checkout).

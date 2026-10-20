@@ -52,12 +52,11 @@ TestPyPI still requires the user's API token (`~/.pypirc` / T-23).
 published: `https://test.pypi.org/pypi/tamias/json` serves `0.1.0a3`, and the
 `v0.1.0a3` and `v0.1.0a4` tags are on GitHub. (A `v0.1.0a5` tag was pushed at the
 time and **deleted on 2026-10-20**: its only content, `tamias-sql-db.html`, was
-removed in `a68f7e9`, so the tag marked no surviving release.) Real PyPI still has
-nothing (`https://pypi.org/pypi/tamias/json` → 404): the tag-triggered publish
-workflow is gated on the `pypi` environment, which the owner has not approved.
-Current state: `master` and the annotated tag `v0.1.0a6` are **pushed** to
-`origin` (0 ahead / 0 behind) and CI is green on both. Publishing `0.1.0a6` is
-now blocked only on the owner adding a PyPI pending publisher
-(`kr1shnac/tamias`, workflow `publish.yml`, environment `pypi`); the publish job
-currently fails with `invalid-publisher`. A TestPyPI rehearsal still needs the
-owner's token.
+removed in `a68f7e9`, so the tag marked no surviving release.) **RESOLVED
+2026-10-20:** `0.1.0a8` is published at
+<https://pypi.org/project/tamias/> (`https://pypi.org/pypi/tamias/json` → 200).
+The owner registered the PyPI pending publisher (`kr1shnac/tamias`, workflow
+`publish.yml`, environment `pypi`), after which the tag-triggered publish job
+uploaded via Trusted Publishing; the first success was `v0.1.0a7`. Earlier
+alpha tags failed with `invalid-publisher` for want of that publisher. A
+TestPyPI rehearsal still needs the owner's token.

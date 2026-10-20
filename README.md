@@ -41,8 +41,16 @@ output is recorded) and what remains unvalidated is
 
 ## Install
 
-Tamias is **not yet on PyPI** as `tamias`, so `pip install tamias` will fail
-with a 404 today. Install the reviewed source from this checkout instead:
+Tamias is on PyPI as `tamias`:
+
+```sh
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install tamias
+tamias --version                 # prints: tamias 0.1.0a8
+```
+
+To install the reviewed source from this checkout instead:
 
 ```sh
 git clone https://github.com/kr1shnac/tamias
@@ -50,13 +58,11 @@ cd tamias
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install .
-tamias --version                 # prints: tamias 0.1.0a7
+tamias --version                 # prints: tamias 0.1.0a8
 ```
 
-> The newest *published* artifact is the TestPyPI pre-release `0.1.0a3`
-> (2026-10-07), which predates the current source and is **not** the reviewed
-> code. The source version in this repository is `0.1.0a7` (2026-10-20). Once
-> `0.1.0a7` is published, `pip install tamias` will be the one-line install.
+> `pip install tamias` installs the current release from
+> <https://pypi.org/project/tamias/>.
 
 Signing company policies needs the optional `manifest` extra (Ed25519 signing
 via `cryptography`):
