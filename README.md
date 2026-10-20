@@ -24,11 +24,11 @@ what Tamias is, what is `PROVEN`, and what remains unvalidated is
 
 ## Install
 
-Tamias is **not yet on PyPI**. The source and the annotated tag in this
-repository are `0.1.0a7` (2026-10-20); the newest *published* artifact is the
-TestPyPI pre-release `0.1.0a3` (2026-10-07), which predates the current source
-and is **not** the reviewed code. Install the current source from this checkout
-— this is what you want to run the reviewed code:
+Tamias is **not yet on PyPI**. The source version in this repository is
+`0.1.0a7` (2026-10-20); the newest *published* artifact is the TestPyPI
+pre-release `0.1.0a3` (2026-10-07), which predates the current source and is
+**not** the reviewed code. Install the current source from this checkout — this
+is what you want to run the reviewed code:
 
 ```sh
 python -m venv .venv
