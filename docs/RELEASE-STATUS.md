@@ -26,7 +26,7 @@ owner adds a PyPI pending publisher. TestPyPI's newest is `0.1.0a3` (2026-10-07)
 | Savings measurement | Not attempted | No paid, non-zero-price run has been authorised. The 2026-10-19 EVIDENCE GATE resolves to **Option 3** — the governance/metering layer is v1 — with the caveat "budgets UNTESTED" and no savings claim (`TAMIAS-SSOT.md` §10) |
 | Live provider behavior | Unverified | CI uses offline/injected transports only |
 | Package build | CI-gated | Build, `twine check`, and fresh-venv wheel smoke run in GitHub Actions |
-| Publish | Blocked on owner | `v0.1.0a6` is pushed and builds clean, but the PyPI publish job returns `invalid-publisher`: the owner must add a PyPI pending publisher (`kr1shnac/tamias`, workflow `publish.yml`, environment `pypi`) before it can run (see RELEASE-CHECKLIST.md) |
+| Publish | Blocked on owner | `v0.1.0a7` is the source version and builds clean, but the PyPI publish job returns `invalid-publisher`: the owner must add a PyPI pending publisher (`kr1shnac/tamias`, workflow `publish.yml`, environment `pypi`) before it can run |
 
 This document describes implemented repository behavior only. It does not claim
 provider compatibility, savings, latency, or live-agent success without a

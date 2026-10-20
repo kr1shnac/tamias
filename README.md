@@ -282,7 +282,12 @@ Three client protocols are priced. Any other path is relayed unpriced, but each 
   policy the gateway verifies and serves at `GET /policy`.
 - [`docs/PLATFORMS.md`](docs/PLATFORMS.md) — supported Python and OS, and the
   Windows database-permission caveat.
+- [`docs/PROVIDER-COST.md`](docs/PROVIDER-COST.md) — how OpenRouter's
+  provider-reported `usage.cost` is captured as `provider_cost_usd` (the
+  `--request-usage-cost` flag), and why NULL means UNKNOWN, never zero.
 - [`demo/RUNBOOK.md`](demo/RUNBOOK.md) — how to produce and read the two-arm
   demo, including its known limits.
 - [`DEMO.md`](DEMO.md) — the demo script: three offline acts, exact commands,
   output captured on a real run.
+- [`DEMO-LIVE.md`](DEMO-LIVE.md) — the paid-run procedure (the live demo),
+  kept separate because it spends real money and needs an owner decision.
