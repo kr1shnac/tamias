@@ -3,8 +3,8 @@
 **SYNTHETIC. NOT A RECORD OF REAL WORK.**
 
 This folder exists only for the demo. Its rewritten rows are fabricated: the
-never-published `v0.1.0a4`/`v0.1.0a5` alpha tags rejected `active` routing, so
-those tags could not produce this log. Current source (`0.1.0a6`) re-adds
+never-published `0.1.0a4`/`0.1.0a5` alpha tags (a5 since deleted) rejected `active`
+routing, so those tags could not produce this log. Current source (`0.1.0a6`) re-adds
 `active` fail-closed, and the published TestPyPI `0.1.0a3` accepts it, but this
 log is still **not** a capture of any real run — it shows what a routed history
 would look like and lets the reporting and dashboard paths be exercised offline.

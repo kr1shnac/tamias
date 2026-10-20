@@ -50,7 +50,9 @@ TestPyPI still requires the user's API token (`~/.pypirc` / T-23).
 
 **STATUS 2026-10-19.** Both halves above are now stale. `v0.1.0a3` **is**
 published: `https://test.pypi.org/pypi/tamias/json` serves `0.1.0a3`, and the
-`v0.1.0a3`, `v0.1.0a4` and `v0.1.0a5` tags are on GitHub. Real PyPI still has
+`v0.1.0a3` and `v0.1.0a4` tags are on GitHub. (A `v0.1.0a5` tag was pushed at the
+time and **deleted on 2026-10-20**: its only content, `tamias-sql-db.html`, was
+removed in `a68f7e9`, so the tag marked no surviving release.) Real PyPI still has
 nothing (`https://pypi.org/pypi/tamias/json` → 404): the tag-triggered publish
 workflow is gated on the `pypi` environment, which the owner has not approved.
 Current state: `master` and the annotated tag `v0.1.0a6` are **pushed** to
