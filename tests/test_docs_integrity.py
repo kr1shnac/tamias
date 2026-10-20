@@ -47,7 +47,6 @@ def check_version_consistency():
     internally consistent — no contradictory a6/a7 mentions outside historical
     context."""
     errors = []
-    readme_txt = open(README).read()
     release_txt = open(RELEASE).read()
     # If RELEASE-STATUS.md references a6, it should be in explicit historical
     # context (section/heading, not as the current source version).
