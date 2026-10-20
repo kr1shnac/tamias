@@ -160,7 +160,11 @@ acknowledge the wider bind. Authentication alone does not lift the refusal.
 The token is checked as a bearer credential in
 constant time,
 and every response carries a `WWW-Authenticate: Bearer` header on a 401. The
-three limits are also settable through the environment — `TAMIAS_AUTH_TOKEN`,
+token comes from `--auth-token`, `$TAMIAS_AUTH_TOKEN`, or a file named by
+`$TAMIAS_AUTH_TOKEN_FILE` (contents trimmed of the trailing newline) — prefer
+the environment or the file: a token on the command line is visible in `ps`,
+shell history and CI logs, and `serve` warns when it sees one passed as a flag.
+The three limits are also settable through the environment — `TAMIAS_AUTH_TOKEN`,
 `TAMIAS_MAX_BODY_BYTES` (default 10 MiB, larger bodies are rejected with 413),
 and `TAMIAS_MAX_CONCURRENCY` (default 64). The log database can be trimmed with
 `tamias prune --db requests.db --keep-days 30` (`--keep-rows` and `--dry-run`

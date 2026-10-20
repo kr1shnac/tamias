@@ -1419,6 +1419,9 @@ def create_dashboard_app(
     db_path: str | Path,
     prices_path: str | Path,
     compare_db: str | Path | None = None,
+    *,
+    trusted_hosts: object = None,
+    enforce_host: bool = False,
 ) -> Any:
     """Build the dashboard ASGI app, without starting a server.
 
@@ -1440,6 +1443,27 @@ def create_dashboard_app(
     has_compare = compare_path is not None
 
     app = FastAPI(title="Tamias live routing", docs_url=None, redoc_url=None)
+
+    # DNS-rebinding / cross-site guard (council run 20261020-1500 item [14]),
+    # identical to the proxy's: a foreign Origin is always refused, and a Host
+    # allowlist is enforced only when the operator asks for it.
+    @app.middleware("http")
+    async def reject_cross_site(request: Any, call_next: Any) -> Any:
+        from fastapi.responses import JSONResponse
+
+        from tamias.security import host_is_allowed, origin_is_allowed
+
+        if not origin_is_allowed(request.headers.get("origin"), trusted_hosts):
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"message": "cross-origin request refused"}},
+            )
+        if enforce_host and not host_is_allowed(request.headers.get("host"), trusted_hosts):
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"message": "Host header not allowed"}},
+            )
+        return await call_next(request)
 
     def check_filter(val: str | None) -> None:
         if (
@@ -1538,6 +1562,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="acknowledge the missing authentication and bind beyond loopback",
     )
+    parser.add_argument(
+        "--trusted-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Host header to allow beyond loopback (repeatable); passing it turns on "
+            "the Host allowlist when bound to a wider host"
+        ),
+    )
     return parser
 
 
@@ -1548,7 +1582,7 @@ def main(argv: list[str] | None = None) -> int:
     # The log holds one session's traffic and the page exposes its cost.  That
     # belongs on loopback; binding it wider is a deliberate act that has to be
     # acknowledged with --allow-non-loopback.
-    from tamias.security import refuse_non_loopback
+    from tamias.security import is_loopback, refuse_non_loopback
 
     refused = refuse_non_loopback("dashboard", args.host, args.allow_non_loopback)
     if refused:
@@ -1556,7 +1590,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         sheet = load_price_sheet(args.prices)
-        app = create_dashboard_app(args.db, args.prices, compare_db=args.compare_db)
+        app = create_dashboard_app(
+            args.db,
+            args.prices,
+            compare_db=args.compare_db,
+            trusted_hosts=args.trusted_host,
+            enforce_host=bool(args.trusted_host) or not is_loopback(args.host),
+        )
     except (OSError, ValueError) as exc:
         print(f"tamias dashboard: {exc}", file=sys.stderr)
         return 1

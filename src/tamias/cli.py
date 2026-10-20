@@ -84,6 +84,7 @@ UPSTREAM_ENV_VAR = "TAMIAS_UPSTREAM"
 # non-loopback bind, the body cap and concurrency limit bound a runaway agent,
 # and doctor's size check nudges toward `tamias prune --keep-days`.
 AUTH_TOKEN_ENV = "TAMIAS_AUTH_TOKEN"
+AUTH_TOKEN_FILE_ENV = "TAMIAS_AUTH_TOKEN_FILE"
 MAX_BODY_BYTES_ENV = "TAMIAS_MAX_BODY_BYTES"
 DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_CONCURRENCY_ENV = "TAMIAS_MAX_CONCURRENCY"
@@ -597,6 +598,8 @@ def build_serve_app(
     request_ceiling_usd: object = None,
     manifest: dict[str, Any] | None = None,
     manifest_key: object = None,
+    trusted_hosts: object = None,
+    enforce_host: bool = False,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
@@ -635,6 +638,8 @@ def build_serve_app(
         request_ceiling_usd=request_ceiling_usd,
         manifest=manifest,
         manifest_key=manifest_key,
+        trusted_hosts=trusted_hosts,
+        enforce_host=enforce_host,
     )
     app.state.store = store
     return app
@@ -655,6 +660,34 @@ def _flag_given(args: argparse.Namespace, flag: str) -> bool:
         if token == flag or token.startswith(flag + "="):
             return True
     return False
+
+
+def resolve_auth_token(args: argparse.Namespace) -> str | None:
+    """The shared bearer token, from ``--auth-token``, env, or a token file.
+
+    Precedence is ``--auth-token`` > ``$TAMIAS_AUTH_TOKEN`` >
+    ``$TAMIAS_AUTH_TOKEN_FILE``.  The file form exists because a token on argv
+    is visible in ``ps``, shell history and CI logs; pointing at a ``chmod 600``
+    file keeps it out of all three.  The file's trailing newline is stripped;
+    an empty or unreadable file is treated as no token so the caller still gets
+    the honest "no authentication" refusal rather than a silent empty secret.
+    """
+    token = args.auth_token or os.environ.get(AUTH_TOKEN_ENV)
+    if token:
+        return token
+    path = os.environ.get(AUTH_TOKEN_FILE_ENV)
+    if not path:
+        return None
+    try:
+        content = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"tamias: could not read ${AUTH_TOKEN_FILE_ENV} ({path}): {exc}",
+            file=sys.stderr,
+        )
+        return None
+    token = content.strip()
+    return token or None
 
 
 def _resolve_upstream(args: argparse.Namespace, cfg: Config) -> str | None:
@@ -925,7 +958,7 @@ def serve(args: argparse.Namespace) -> int:
     # Refuse a wider bind before any server-side work starts.  Authentication
     # is determined first so the refusal message is accurate: naming "no
     # authentication" when a token/keys *were* given would be a false message.
-    auth_token = args.auth_token or os.environ.get(AUTH_TOKEN_ENV)
+    auth_token = resolve_auth_token(args)
     refused = refuse_non_loopback(
         "serve",
         args.host,
@@ -1035,6 +1068,8 @@ def serve(args: argparse.Namespace) -> int:
         request_ceiling_usd=args.request_ceiling_usd,
         manifest=manifest_doc,
         manifest_key=manifest_key,
+        trusted_hosts=args.trusted_host,
+        enforce_host=bool(args.trusted_host) or not is_loopback(args.host),
     )
     print(
         f"tamias serve: {args.router_mode} mode, "
@@ -1053,6 +1088,15 @@ def serve(args: argparse.Namespace) -> int:
             "Authorization: Bearer <token>",
             file=sys.stderr,
         )
+        if args.auth_token:
+            # The token is already visible here; the warning exists so the
+            # operator learns before the shell history does.
+            print(
+                "tamias serve: WARNING — the token was passed on the command line, "
+                f"which lands in shell history, ps and CI logs. Prefer "
+                f"${AUTH_TOKEN_ENV} or a chmod-600 file via ${AUTH_TOKEN_FILE_ENV}.",
+                file=sys.stderr,
+            )
     print(
         f"tamias serve: request body cap {_fmt_bytes(max_body_bytes)}, "
         f"max concurrent requests {max_concurrency}",
@@ -1563,8 +1607,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-non-loopback",
         action="store_true",
         help=(
-            "skip the non-loopback authentication requirement (--auth-token / "
-            "$TAMIAS_AUTH_TOKEN / --keys-db) and bind anyway"
+            "acknowledge a wider bind and bind anyway; a non-loopback bind still "
+            "requires (--auth-token / $TAMIAS_AUTH_TOKEN / --keys-db)"
+        ),
+    )
+    serve_parser.add_argument(
+        "--trusted-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Host header to allow beyond loopback (repeatable); passing it turns on "
+            "the Host allowlist when bound to a wider host"
         ),
     )
     serve_parser.add_argument(
@@ -1641,7 +1695,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"bearer token clients must send as Authorization: Bearer <token> "
         f"(default: ${AUTH_TOKEN_ENV}; a non-loopback --host needs this or "
-        f"--keys-db)",
+        f"--keys-db). Prefer the environment or ${AUTH_TOKEN_FILE_ENV} over argv: "
+        f"a token on the command line is visible in ps and shell history",
     )
     serve_parser.add_argument(
         "--tls-cert",
@@ -1730,9 +1785,16 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument(
         "--allow-non-loopback",
         action="store_true",
+        help="acknowledge the wider bind and bind anyway",
+    )
+    dashboard_parser.add_argument(
+        "--trusted-host",
+        action="append",
+        default=[],
+        metavar="NAME",
         help=(
-            "skip the non-loopback authentication requirement (--auth-token / "
-            "$TAMIAS_AUTH_TOKEN / --keys-db) and bind anyway"
+            "Host header to allow beyond loopback (repeatable); passing it turns on "
+            "the Host allowlist when bound to a wider host"
         ),
     )
     agent_parser = sub.add_parser("agent-config", help="print an agent configuration snippet")
@@ -1933,6 +1995,7 @@ def main(argv: list[str] | None = None) -> int:
             ]
             + (["--compare-db", args.compare_db] if args.compare_db else [])
             + (["--allow-non-loopback"] if args.allow_non_loopback else [])
+            + [item for host in args.trusted_host for item in ("--trusted-host", host)]
         )
     if args.command == "agent-config":
         print(agent_config(args.agent, args.port, args.project))

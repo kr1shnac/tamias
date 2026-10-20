@@ -681,6 +681,8 @@ def create_app(
     request_ceiling_usd: object = None,
     manifest: dict[str, Any] | None = None,
     manifest_key: object = None,
+    trusted_hosts: object = None,
+    enforce_host: bool = False,
 ) -> FastAPI:
     if router_mode not in ("shadow", "off", "active"):
         raise ValueError(
@@ -748,6 +750,40 @@ def create_app(
     app.state.budget_ledger = ledger
     app.state.request_ceiling_usd = ceiling
     app.state.sessions = table
+
+    # DNS-rebinding / cross-site guard (council run 20261020-1500 item [14]).
+    # A malicious page can point a name it controls at 127.0.0.1 and drive the
+    # proxy from the victim's browser.  Browsers mark such requests with a
+    # foreign ``Origin`` (and a foreign ``Host``); both are refused here.  The
+    # Origin check is always on — it never rejects a non-browser client, which
+    # sends no Origin.  The Host allowlist is opt-in (``enforce_host``) because
+    # an in-process test client legitimately uses a synthetic Host.
+    @app.middleware("http")
+    async def reject_cross_site(request: Request, call_next: Any) -> Response:
+        from tamias.security import origin_is_allowed
+
+        origin = request.headers.get("origin")
+        if not origin_is_allowed(origin, trusted_hosts):
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"message": "cross-origin request refused", "type": "forbidden"}},
+            )
+        if enforce_host:
+            from tamias.security import host_is_allowed
+
+            if not host_is_allowed(request.headers.get("host"), trusted_hosts):
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": {
+                            "message": (
+                                "Host header not allowed; bind loopback or pass --trusted-host"
+                            ),
+                            "type": "forbidden",
+                        }
+                    },
+                )
+        return await call_next(request)
 
     if auth_token is not None or key_store is not None:
         @app.middleware("http")

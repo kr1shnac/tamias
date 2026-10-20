@@ -16,5 +16,18 @@ authentication by default. Keep it bound to loopback unless it is placed behind
 a trusted, authenticated network.
 
 Do not commit provider keys, request bodies, prompts, responses, or live logs.
+
+**Delivering the shared token.** `--auth-token VALUE` puts the secret on argv,
+where it is visible in `ps`, the shell history and CI logs. Prefer one of:
+
+- `export TAMIAS_AUTH_TOKEN=...` (environment, not on argv); or
+- write the token to a `chmod 600` file and set
+  `TAMIAS_AUTH_TOKEN_FILE=/path/to/token`; the file's trailing newline is
+  stripped.
+
+`serve` prints a warning when it detects `--auth-token` on a command line.
+`--keys-db` avoids the shared-secret problem entirely by issuing per-caller
+keys (`tamias admin key issue`).
+
 Report security issues privately through the repository security-advisory flow
 or the maintainer contact listed in the repository metadata.
