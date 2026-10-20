@@ -1,0 +1,7 @@
+flowchart LR
+    A["Coding agent<br/>(OpenCode, Codex, Claude Code)"] -->|"OpenAI- or Anthropic-<br/>compatible request"| T["Tamias<br/>127.0.0.1:8000"]
+    T -->|"forwarded request<br/>(or rewritten model)"| P["Model provider API"]
+    P -->|"reply + token usage"| T
+    T -->|"unchanged reply"| A
+    T -->|"one row per request:<br/>model, tokens, cost"| DB[("SQLite log<br/>requests.db")]
+    DB --> R["tamias report /<br/>dashboard"]

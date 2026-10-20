@@ -1,0 +1,11 @@
+flowchart TB
+    subgraph client["Your machine"]
+        AG["Coding agent"] -->|request| PX
+        PX["Tamias proxy<br/>(FastAPI)"] --> RT["Router<br/>STAY or SWITCH"]
+        RT --> UP["Upstream client<br/>forwards to provider"]
+        PX --> ST["SQLite log<br/>one row per request"]
+        ST --> RP["report / dashboard"]
+    end
+    UP -->|"HTTPS + your credentials"| PROV["Model provider<br/>(OpenRouter, OpenAI, Ollama, …)"]
+    PROV -->|reply| UP
+    PX -.->|"adapters: chat / messages<br/>/ responses"| AD["anthropic_adapter,<br/>responses_adapter"]

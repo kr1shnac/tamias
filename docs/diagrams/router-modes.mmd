@@ -1,0 +1,15 @@
+stateDiagram-v2
+    [*] --> off
+    off: off — forward unchanged, record no decision
+    shadow: shadow (default) — record the decision it WOULD make, forward unchanged
+    active: active — rewrite the request to --cheap-model when the rule says SWITCH
+
+    off --> shadow: --router-mode shadow
+    shadow --> active: --router-mode active
+    active --> shadow: --router-mode shadow
+
+    note right of active
+        Fail-closed: refuses to start unless the target is
+        named in --registry, tool-capable, and priced.
+        A switch the caller's key disallows is suppressed.
+    end note
