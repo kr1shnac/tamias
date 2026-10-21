@@ -19,7 +19,7 @@ from tamias.store import Store  # noqa: E402
 from tamias.types import CostBreakdown, Decision, Usage  # noqa: E402
 
 SHEET_DATE = "2026-01-05"
-SIMULATED_SHEET = Path(__file__).resolve().parents[1] / "prices.openrouter-sim.toml"
+SIMULATED_SHEET = Path(__file__).resolve().parent / "data" / "prices.openrouter-sim.toml"
 
 
 def _log(

@@ -15,6 +15,7 @@ labels: enhancement
 
 ## Scope check
 
-<!-- tamias is a local, loopback observability proxy. It does not proxy
-     arbitrary web traffic, provide authentication for the upstream, or store
-     prompt/response text. Does this request fit that scope? -->
+<!-- tamias is a request-rewriting, OpenAI-compatible proxy that shadow-routes
+     by default. It does not proxy arbitrary web traffic, provide authentication
+     for the upstream, or store prompt/response text. Does this request fit that
+     scope? -->

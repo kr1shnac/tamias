@@ -145,3 +145,52 @@ missing file raises `FileNotFoundError`; malformed TOML raises `ValueError`.
 - **Fixtures only.** Every routing test runs against fixed fixture
   conversations (no network, no live agents), and decisions are asserted on
   action, target and reason -- never on prompt text.
+
+## Reasoning-effort switching
+
+The effort axis is optional and independent of model switching. It adds
+`reasoning.effort` (OpenRouter style) or `reasoning_effort` (OpenAI style) to
+chat-completions request bodies, so the router can control how much effort the
+upstream model spends on internal reasoning.
+
+Request fields, per OpenRouter's parameter documentation:
+
+- **Request field**: `"reasoning": {"effort": "low"|"medium"|"high"}`
+  (<https://openrouter.ai/docs/parameters>, under "Reasoning").
+- **OpenAI-style alternative**: `"reasoning_effort"`, enum `(xhigh, high,
+  medium, low, minimal, none)` (same page, under "Reasoning Effort").
+- **Model support**: determined by `supported_parameters` in the model list API.
+  Models that support reasoning carry a `reasoning` config field with
+  `supported_efforts` listing the allowed values (e.g. `["high", "medium",
+  "low", "minimal"]`). See
+  <https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties>.
+
+### CLI flags
+
+- `--effort-mode {off,meter,apply}` (default `off`) — the scope of the effort
+  axis, independent of `--router-mode`. `off` computes nothing; `meter` records
+  the effort the policy would have used (the `decision_target_effort` column)
+  without changing the request; `apply` also sends it. `apply` is gated by
+  `--registry`: an effort is sent only for a model the registry lists as
+  supporting reasoning, and a level the model does not list is downgraded to the
+  nearest one it does.
+- `--registry PATH` (default `$TAMIAS_REGISTRY`, else `~/.tamias/models.toml`) —
+  the capability catalogue `apply` consults. The default path may be absent
+  (empty registry, so nothing is applied); an explicitly named file must exist.
+- `--effort-style {openrouter,openai}` (default `openrouter`) — controls whether
+  the proxy sets `reasoning.effort` (OpenRouter) or `reasoning_effort` (OpenAI)
+  in upstream requests.
+
+Effort switching is off by default, and `apply` stays opt-in until a benchmark
+measures it against a fixed-effort baseline; `meter` is the evidence-gathering
+step on the way there.
+
+### Caveats
+
+- Providers may ignore the `reasoning.effort` or `reasoning_effort` field
+  entirely.
+- Effort changes may invalidate the prompt cache on some providers (not measured
+  here).
+- Effort switching has not been demonstrated end to end.
+- The effort axis rewrites chat-completion request bodies only; it is **not**
+  applied to the Anthropic Messages route or to `/v1/responses`.

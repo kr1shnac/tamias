@@ -117,7 +117,9 @@ def test_openai_style_usage_prices_against_the_example_sheet():
     upstream never itemizes writes, so the shipped example sheet gives those
     models cache_write = 0 and their requests still get a number.
     """
-    sheet = load_price_sheet(Path(__file__).resolve().parents[1] / "prices.example.toml")
+    sheet = load_price_sheet(
+        Path(__file__).resolve().parents[1] / "examples" / "prices.example.toml"
+    )
 
     for model in ("gpt-4o", "oa"):
         assert sheet.get(model).cache_write == 0
@@ -133,7 +135,9 @@ def test_openai_style_usage_prices_against_the_simulated_sheet():
     It gives its models cache_write = 0 for the same reason the example sheet
     does, and simulated = true changes no arithmetic.
     """
-    sheet = load_price_sheet(Path(__file__).resolve().parents[1] / "prices.simulated.toml")
+    sheet = load_price_sheet(
+        Path(__file__).resolve().parents[1] / "examples" / "prices.simulated.toml"
+    )
     assert sheet.simulated is True
 
     openai_shaped = Usage(10_000, 2_000, 4_000, None)
@@ -150,7 +154,7 @@ def test_the_shipped_openrouter_sheet_prices_its_free_models_at_zero():
     OpenRouter is an OpenAI-style upstream that reports no cache-write count.
     """
     root = Path(__file__).resolve().parents[1]
-    sheet = load_price_sheet(root / "prices.openrouter.toml")
+    sheet = load_price_sheet(root / "tests" / "data" / "prices.openrouter.toml")
     assert sheet.simulated is False
     assert set(sheet.models) == {
         "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -178,7 +182,7 @@ def test_the_shipped_openrouter_simulated_sheet_is_simulated_with_invented_price
     report over a real log finds prices instead of UNKNOWN.
     """
     root = Path(__file__).resolve().parents[1]
-    sheet = load_price_sheet(root / "prices.openrouter-sim.toml")
+    sheet = load_price_sheet(root / "tests" / "data" / "prices.openrouter-sim.toml")
     ultra = "nvidia/nemotron-3-ultra-550b-a55b:free"
     lightning = "nvidia/nemotron-3.5-lightning:free"
     assert sheet.simulated is True

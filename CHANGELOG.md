@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Repository cleanup: removed internal design and demo material and repaired
+  references to files that left the public tree.
+
 ### Added
 
 - **The benchmark oracle (F-35 / §18 Phase 3).** `docs/benchmark/tasks.md`

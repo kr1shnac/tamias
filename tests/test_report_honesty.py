@@ -13,7 +13,7 @@ SHEET_DATE = "2026-01-05"
 def _log_simulated(
     db: str,
     cost: float,
-    price_sheet: str = "prices.openrouter-sim.toml",
+    price_sheet: str = "tests/data/prices.openrouter-sim.toml",
     simulated: bool = True,
 ) -> None:
     store = Store(db)
@@ -61,7 +61,7 @@ def _log_legacy(
 def _log_real_priced_with_stored_sheet(
     db: str,
     cost: float,
-    price_sheet: str = "prices.openrouter.toml",
+    price_sheet: str = "tests/data/prices.openrouter.toml",
     simulated: bool = False,
 ) -> None:
     store = Store(db)
@@ -96,7 +96,7 @@ def run(capsys, db: str, prices: str):
 
 def test_simulated_rows_with_real_sheet_has_no_bare_total_cost(tmp_path, capsys):
     db = str(tmp_path / "log.db")
-    _log_simulated(db, 0.01, price_sheet="prices.openrouter-sim.toml", simulated=True)
+    _log_simulated(db, 0.01, price_sheet="tests/data/prices.openrouter-sim.toml", simulated=True)
     real_prices = write_prices(
         tmp_path,
         """
@@ -143,7 +143,7 @@ cached_input = 1.25e-6
 def test_real_priced_row_with_stored_sheet_has_no_bare_total_cost(tmp_path, capsys):
     db = str(tmp_path / "log.db")
     _log_real_priced_with_stored_sheet(
-        db, 0.01, price_sheet="prices.openrouter.toml", simulated=False
+        db, 0.01, price_sheet="tests/data/prices.openrouter.toml", simulated=False
     )
     prices = write_prices(
         tmp_path,
@@ -167,7 +167,7 @@ cached_input = 1.25e-6
 
 def test_mutation_bare_total_cost_would_fail(tmp_path, capsys):
     db = str(tmp_path / "log.db")
-    _log_simulated(db, 0.01, price_sheet="prices.openrouter-sim.toml", simulated=True)
+    _log_simulated(db, 0.01, price_sheet="tests/data/prices.openrouter-sim.toml", simulated=True)
     real_prices = write_prices(
         tmp_path,
         """

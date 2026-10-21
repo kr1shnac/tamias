@@ -1,5 +1,5 @@
-"""Doc-integrity test: mechanically assert that every authoritative claim in
-claims.md resolves and that versions agree across the authority layer.
+"""Doc-integrity test: assert that the version agrees across the authority
+layer and that every relative markdown link in the shipped docs resolves.
 
 Runs as part of the regular gate: .venv/bin/python -m pytest -q.
 Placed under tests/ so it is discovered alongside the other tests.
@@ -9,133 +9,102 @@ import os
 import re
 import sys
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 README = 'README.md'
-CLAIM = 'docs/audit/claims.md'
-RELEASE = 'docs/RELEASE-STATUS.md'
 
 
-def check_no_stale_line_citations():
-    """claims.md should not cite README.md:NN-NN line numbers."""
-    txt = open(CLAIM).read()
-    stale = re.findall(r'README\.md:\d+', txt)
-    if stale:
-        return 'FAIL: Stale line citation in claims.md'
-    return 'PASS: No stale README line citations'
-
-
-def check_anchors_resolve():
-    """Every README anchor cited in claims.md should exist as a heading."""
-    txt = open(CLAIM).read()
-    anchors = re.findall(r'README § [^;|,]+', txt)
-    errors = []
-    known_exceptions = {
-        'intro disclaimer',
-        'Install / § What Tamias does not do',
-        'STATUS.md:3',
-    }
-    for a in anchors:
-        a = a.replace('README § ', '').rstrip(', ;')
-        if not re.search(rf'^## {re.escape(a)}$', open(README).read(), re.M):
-            if a not in known_exceptions:
-                errors.append(f'README anchor not found as heading: {a}')
-    if errors:
-        return 'FAIL: README anchor not resolved: ' + '; '.join(errors)
-    return 'PASS: README anchors resolved'
+def _read(relative: str) -> str:
+    return open(os.path.join(ROOT, relative), encoding="utf-8").read()
 
 
 def check_version_consistency():
     """The source version must agree across the authority layer.
 
     The version is read dynamically so this check does not need editing at
-    every release; it only asserts that `pyproject.toml`, `src/tamias/__init__.py`,
-    the README footer and the project website agree.
+    every release; it only asserts that `pyproject.toml` and
+    `src/tamias/__init__.py` agree, and that the installed distribution (when
+    one is present) carries the same version.
     """
     errors = []
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    pyproject = os.path.join(root, 'pyproject.toml')
-    init = os.path.join(root, 'src', 'tamias', '__init__.py')
+    pyproject = _read('pyproject.toml')
+    init = _read('src/tamias/__init__.py')
 
-    m = re.search(r'^version = "([^"]+)"', open(pyproject).read(), re.M)
+    m = re.search(r'^version = "([^"]+)"', pyproject, re.M)
     if not m:
         return 'FAIL: no version found in pyproject.toml'
     version = m.group(1)
 
-    init_version = re.search(r'^__version__ = "([^"]+)"', open(init).read(), re.M)
+    init_version = re.search(r'^__version__ = "([^"]+)"', init, re.M)
     if not init_version or init_version.group(1) != version:
         errors.append(
             f'__init__.__version__ {init_version.group(1) if init_version else None!r}'
             f' != pyproject version {version!r}'
         )
 
-    if f'tamias {version}' not in open(README).read():
-        errors.append(f'README does not mention the current version {version!r}')
+    # The installed distribution records the version at install time; a bump
+    # that forgets to reinstall leaves it stale, which is worth catching.
+    try:
+        from importlib.metadata import PackageNotFoundError
+        from importlib.metadata import version as dist_version
 
-    # The project website quotes the version too. It drifted silently once
-    # (0.1.0a7 on the page while the source was 0.1.0a8), because only the
-    # shell claims-guard checked it and nothing ran that guard locally.
-    page = os.path.join(root, 'docs', 'index.html')
-    if os.path.exists(page):
-        if f'tamias {version}' not in open(page).read():
-            errors.append(f'docs/index.html does not mention the current version {version!r}')
+        try:
+            installed = dist_version('tamias')
+        except PackageNotFoundError:
+            installed = None
+        if installed is not None and installed != version:
+            errors.append(
+                f'installed metadata version {installed!r} != source version {version!r} '
+                '(rerun: pip install -e ".[dev]")'
+            )
+    except ImportError:  # pragma: no cover - importlib.metadata is stdlib on 3.11+
+        pass
 
     if errors:
         return 'FAIL: version inconsistency: ' + '; '.join(errors)
     return f'PASS: version consistency ({version})'
 
 
-def check_no_contradictory_publish_state():
-    """The docs must not claim the package is unpublished while it is published.
+def _doc_files():
+    """Every markdown file a reader is likely to open from the repository root."""
+    names = [README]
+    docs = os.path.join(ROOT, 'docs')
+    for entry in sorted(os.listdir(docs)):
+        if entry.endswith('.md'):
+            names.append(f'docs/{entry}')
+    return names
 
-    This is the drift that caused a long debugging loop: README, AGENTS.md and
-    RELEASE-STATUS.md kept saying 'not yet on PyPI' after 0.1.0a7 shipped. The
-    published state is asserted from the CHANGELOG: once a version's entry says
-    the package is on PyPI, no authority file may claim otherwise.
 
-    ``docs/audit/claims.md`` is included deliberately. It is the code-truth
-    ledger that *outranks* the SSOT (AGENTS.md), so it is the file most able to
-    smuggle a stale publish state past every other reader. It carried the
-    "nothing is on real PyPI" row for a full release after 0.1.0a8 shipped,
-    because this guard's file list omitted it.
-    """
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    changelog = open(os.path.join(root, 'CHANGELOG.md')).read()
-    if 'pypi.org/project/tamias' not in changelog:
-        return 'PASS: publish-state check skipped (no published release recorded)'
-
-    stale_phrases = (
-        'not yet on PyPI',
-        'Nothing is on real PyPI',
-        'nothing is on real PyPI',
-        'pip install tamias` will fail',
-        'pip install tamias will fail',
-    )
-    errors = []
-    for name in (
-        'README.md',
-        'AGENTS.md',
-        'docs/RELEASE-STATUS.md',
-        'BLOCKED.md',
-        'docs/audit/claims.md',
-    ):
-        path = os.path.join(root, name)
-        if not os.path.exists(path):
+def _relative_links(text: str):
+    for target in re.findall(r'\]\(([^)]+)\)', text):
+        target = target.split('#', 1)[0].strip()
+        if not target:
             continue
-        text = open(path).read()
-        for phrase in stale_phrases:
-            if phrase in text:
-                errors.append(f'{name} still claims unpublished: {phrase!r}')
+        if re.match(r'^[a-z][a-z0-9+.-]*://', target) or target.startswith('mailto:'):
+            continue
+        if target.startswith('/'):
+            continue
+        yield target
+
+
+def check_relative_links_resolve():
+    """Every relative markdown link in README.md and docs/*.md must exist."""
+    errors = []
+    for name in _doc_files():
+        base = os.path.dirname(os.path.join(ROOT, name))
+        for target in _relative_links(_read(name)):
+            path = os.path.normpath(os.path.join(base, target))
+            if not os.path.exists(path):
+                errors.append(f'{name}: link target missing: {target}')
     if errors:
-        return 'FAIL: contradictory publish state: ' + '; '.join(errors)
-    return 'PASS: publish state not contradicted'
+        return 'FAIL: broken relative links: ' + '; '.join(errors)
+    return 'PASS: relative links resolve'
 
 
-# Pytest will discover and run this function
 def test_docs_integrity():
-    results = []
-    results.append(check_no_stale_line_citations())
-    results.append(check_anchors_resolve())
-    results.append(check_version_consistency())
-    results.append(check_no_contradictory_publish_state())
+    results = [
+        check_version_consistency(),
+        check_relative_links_resolve(),
+    ]
     for r in results:
         print(r)
     if any('FAIL' in r for r in results):

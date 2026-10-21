@@ -11,15 +11,10 @@
 *.yaml text eol=lf
 *.md text eol=lf
 
-# The committed demo evidence is SQLite and JSON. The .db files are binary and
-# must never be text-normalized or shown as a diff.
+# The committed SQLite logs are binary and must never be text-normalized or
+# shown as a diff.
 *.db binary
 *.db-journal binary
 *.png binary
 *.whl binary
 *.gz binary
-
-# Collapse generated lockfile-ish and vendored trees in diffs and language
-# stats, so a review shows the code that changed.
-demo/runs/*.json linguist-generated=true
-prices.*.toml linguist-language=TOML

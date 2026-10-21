@@ -1,15 +1,15 @@
 # Agent configuration
 
 The commands below print local proxy snippets. Real agent traffic is not
-confirmed by this repository; each integration is therefore UNVERIFIED.
+confirmed by this repository; each integration is therefore unverified.
 
-## Claude Code — UNVERIFIED
+## Claude Code — unverified
 
 ```sh
 tamias agent-config claude-code --port 8000 --project example
 ```
 
-## Codex — UNVERIFIED
+## Codex — unverified
 
 ```sh
 tamias agent-config codex --port 8000 --project example
@@ -18,7 +18,7 @@ tamias agent-config codex --port 8000 --project example
 The generated snippet uses Tamias as its local model provider and the Responses
 wire API.
 
-## OpenCode — UNVERIFIED
+## OpenCode — unverified
 
 ```sh
 tamias agent-config opencode --port 8000 --project example

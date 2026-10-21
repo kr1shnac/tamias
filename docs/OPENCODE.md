@@ -23,7 +23,7 @@ on **2026-10-04**:
   `{env:VAR}` substitution, `opencode debug config`
 - <https://opencode.ai/docs/zen/> — Zen endpoints per model, model IDs, prices
 
-See [What I could not verify](#what-i-could-not-verify) at the end.
+See [Not verified](#not-verified) at the end.
 
 ## 1. Get a Zen API key
 
@@ -189,12 +189,12 @@ The shadow-mode signal is unaffected: the decision column, the switch count, the
 latency, the status and the token counts are all still logged per request, and
 the decision log lines are unaffected. Only the money arithmetic is unavailable,
 and only until either the upstream reports a cache-write count or the pricing
-formula is changed to treat an unreported cache-write count as zero — which
-[CONTRACT.md](../CONTRACT.md) forbids ("unknown is NEVER treated as 0").
+formula is changed to treat an unreported cache-write count as zero — which the
+pricing contract forbids ("unknown is NEVER treated as 0").
 
-*(The sample above predates the 2026-10-19 cache-aware saving change (F-1): the
-`estimate;` label is now `cache-aware, can be negative`, and the saving prices a
-warm stay against a cold switch.)*
+*(The sample above predates the cache-aware saving change: the `estimate;` label
+is now `cache-aware, can be negative`, and the saving prices a warm stay against
+a cold switch.)*
 
 The number that matters in shadow mode is **requests shadow would have
 switched**. It tells you how much of your traffic the router thinks is
@@ -248,24 +248,24 @@ number appear. `?` in a report means exactly that.
 | `tamias serve` exits 1 at startup | Price sheet missing, unreadable, or missing its top-level `date`. The message names the file. |
 | Nothing priced after a request | The path was neither `/v1/chat/completions`, `/v1/messages`, nor `/v1/responses` — those three are priced. Every other path is relayed by the catch-all without a price, though it still leaves one count-only row (`route="passthrough"`, shown by `tamias report`). |
 
-## What I could not verify
+## Not verified
 
-- **No Zen API key was available**, so I could not make a real request through
-  this chain. The `opencode.json` format, the `@ai-sdk/openai-compatible`
-  package choice, the `{env:VAR}` syntax, the config file locations and the Zen
-  endpoint/model/price tables are all taken from the live docs cited at the top
-  of this file, not from an observed session.
-- **I could not confirm what Zen actually returns in the `usage` object.** The
-  claim that no cache-write count is reported is based on the OpenAI
-  chat-completions schema, not on a Zen response. If Zen does report one,
-  `to_usage` would still discard it — see src/tamias/proxy.py:68 — so the
-  limitation holds either way.
-- **The `@ai-sdk/openai-compatible` package is not pinned anywhere I could
-  read**; it is the value the docs prescribe for `/v1/chat/completions`
-  providers, but I did not inspect the installed AI SDK to confirm it resolves.
+- **No live OpenCode-to-Zen session is confirmed.** The `opencode.json` format,
+  the `@ai-sdk/openai-compatible` package choice, the `{env:VAR}` syntax, the
+  config file locations and the Zen endpoint/model/price tables are all taken
+  from the live docs cited at the top of this file, not from an observed session.
+- **What Zen actually returns in the `usage` object is not confirmed.** The claim
+  that no cache-write count is reported is based on the OpenAI chat-completions
+  schema, not on a Zen response. If Zen does report one, `to_usage` would still
+  discard it (see `src/tamias/proxy.py`), so the limitation holds either way.
+- **The `@ai-sdk/openai-compatible` package is not pinned anywhere this
+  repository can read**; it is the value the docs prescribe for
+  `/v1/chat/completions` providers, but the installed AI SDK was not inspected to
+  confirm it resolves.
 - **Zen's model list changes frequently.** The first-row models above are from
   the docs page; treat `https://opencode.ai/zen/v1/models` as authoritative.
-- **I could not confirm whether OpenCode sends an `x-tamias-session` header.**
-  I found no mention of it in the docs I read, so I assume it does not and that
-  every request lands in the `default` session. If OpenCode does send something
-  usable, `tamias.proxy.SESSION_HEADER` is the only place that needs changing.
+- **Whether OpenCode sends an `x-tamias-session` header is unconfirmed.** No
+  mention of it was found in the docs read, so it is assumed it does not, and
+  that every request lands in the `default` session. If OpenCode does send
+  something usable, `tamias.proxy.SESSION_HEADER` is the only place that needs
+  changing.

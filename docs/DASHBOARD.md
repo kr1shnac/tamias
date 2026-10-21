@@ -15,7 +15,7 @@ proxy is writing, and a reader that could write would race it for the file.
 Live, against a log the proxy is currently writing:
 
 ```bash
-.venv/bin/python -m tamias.dashboard --db requests.db --prices prices.openrouter-sim.toml --port 8010
+.venv/bin/python -m tamias.dashboard --db requests.db --prices examples/prices.simulated.toml --port 8010
 ```
 
 Then open <http://127.0.0.1:8010>. It polls `/api/rows` every second, so rows
@@ -24,7 +24,7 @@ appear as the proxy logs them.
 Replay, over a finished session:
 
 ```bash
-.venv/bin/python -m tamias.dashboard --db session.db --prices prices.openrouter-sim.toml --port 8010
+.venv/bin/python -m tamias.dashboard --db session.db --prices examples/prices.simulated.toml --port 8010
 ```
 
 Switch the page to **Replay** to reveal the rows one at a time. **Play** and
@@ -36,7 +36,7 @@ Comparing against a real baseline run:
 ```bash
 .venv/bin/python -m tamias.dashboard \
   --db routed-session.db \
-  --prices prices.openrouter-sim.toml \
+  --prices examples/prices.simulated.toml \
   --compare-db unrouted-session.db \
   --port 8010
 ```
@@ -90,8 +90,9 @@ a request that could not be priced, because no amount is known to add.
 
 If the price sheet declares `simulated = true`, a red banner reading
 `SIMULATED PRICES - NOT REAL SAVINGS` appears, because the rates are invented
-and the amounts are illustrations rather than money. Use
-`prices.openrouter.toml` for what models actually cost.
+and the amounts are illustrations rather than money. For what models actually
+cost, use a real sheet — the dated OpenRouter snapshot bundled with the package,
+or one you write yourself (see [`PRICING.md`](PRICING.md)).
 
 ## Two lines, and what they assume
 

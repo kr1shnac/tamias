@@ -2,7 +2,7 @@
 """Compare logged OpenRouter costs with its documented generation lookup.
 
 This script only performs ``GET /api/v1/generation?id=<generation-id>`` for
-existing log rows.  It never creates a completion.  ``docs/BILLED-COST.md``
+existing log rows.  It never creates a completion.  ``docs/PRICING.md``
 confirms that lookup's ``data.total_cost`` field; chat-completion placement of
 the stored response ID remains UNVERIFIED, so missing or malformed IDs are
 reported rather than inferred.
