@@ -137,6 +137,29 @@ Tamias is **alpha** software. Treat every figure it prints with care:
 - **Not multi-user or hardened for remote use.** Single user, loopback by
   default; a wider bind is a deliberate two-key act.
 - **Prompt and response text is never stored**, and credentials are never logged.
+- **The budget cap cannot be bypassed — and here is exactly what that means.**
+  Tamias reserves against a key's budget *before* a request is forwarded, and
+  refuses it with `402` when the request would exceed the limit, so the request
+  never reaches the provider. Five qualifications travel with that sentence,
+  and they matter as much as the sentence:
+  1. **One request may overshoot.** The reserve is a flat ceiling, so the
+     request that exhausts a limit can push it past by `settled - ceiling`.
+  2. **A model the price sheet cannot price is refused** under a money limit,
+     because an unknown cost cannot be spent against.
+  3. **The cap holds on every metered route, and on the passthrough route for
+     any body that names a model** — a budgeted key is refused `403` there —
+     and the passthrough stays open only for bodies that name no model.
+  4. **This is a guarantee about the cap, not about the proxy being
+     unbypassable.** Tamias is a local process you own, its bearer token is
+     opt-in, and you can point your agent straight at the provider instead.
+  5. **The cap is enforced against the computed cost, not the bill.** The
+     settled figure is the price-sheet computation; the provider's own reported
+     cost is recorded separately and is never settled against, so a stale or
+     missing rate makes the cap and the bill diverge. `tamias report` shows
+     that divergence as `difference (billed - computed)` whenever both figures
+     exist.
+  See [`docs/BUDGET.md`](https://github.com/kr1shnac/tamias/blob/master/docs/BUDGET.md)
+  for the reserve-then-settle detail.
 - **Effort switching is metering only** unless `--effort-mode apply` is set, and
   the log records what was requested — not proof the provider honoured it.
 

@@ -33,6 +33,7 @@ or an in-process mock. What it pins down:
   row per request (`route="passthrough"`, tokens and cost NULL).
 - **Budgets and keys.** Reserve-then-settle, sub-caps, both rate windows, the
   reservation TTL, and 402/429 refusals on every metered route, against mocks.
+  **UNTESTED live** — the arithmetic and the refusals are exercised against mocks; a live exercise (one capped key, one real request, one refusal) has not been run, so the caveat stands.
 - **The savings arithmetic is falsifiable.** The dashboard `saved` and both
   `report` saving lines price the stay model with a warm cache and the switch
   model on the row's real counts, so a constructed cache-miss replay yields

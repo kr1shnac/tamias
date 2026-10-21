@@ -29,10 +29,17 @@ Money is never spent by a guess:
    reservations plus this ceiling would exceed a limit, the request is refused
    and never reaches the provider. The test is an inequality, not a rounding:
    `spent + reserved + ceiling <= limit`.
-2. **Settle.** The one point where a metered request's real cost is known is its
-   single `log_request` call. There the reservation is released and the *actual*
-   cost is recorded. A budget is therefore spent by what was used, not by what
-   was guessed.
+2. **Settle.** The one point where a metered request's cost is known is its
+   single `log_request` call. There the reservation is released and the cost
+   that was settled is recorded. A budget is therefore spent by what was used,
+   not by what was guessed.
+
+   **That settled figure is the cost computed from the price sheet, not the
+   amount the provider billed.** The provider's own reported cost is stored
+   separately, in `provider_cost_usd`, and is never settled against. So the cap
+   bounds a *local estimate*, and a stale, missing or wrong rate makes the cap
+   and the bill diverge. `tamias report` shows the divergence as
+   `difference (billed - computed)` whenever both figures exist.
 
 Every settled request writes one row to `budget_events` (key, model, timestamp,
 micro-dollars, tokens), so spend, sub-caps and both rate windows are aggregates
@@ -91,8 +98,13 @@ These are the things this design does not promise, stated here rather than
 discovered later:
 
 - **One request may overshoot.** The money reserve is a flat ceiling, so the
-  request that exhausts a limit can push it past by `actual - ceiling`. The
+  request that exhausts a limit can push it past by `settled - ceiling`. The
   operator sets the ceiling to their largest plausible request.
+- **The cap is enforced against the computed cost, not the bill.** The settled
+  figure is the price-sheet computation; the provider's own reported cost is
+  recorded separately and never settled against. A stale or missing rate makes
+  the cap and the bill diverge, and `tamias report` shows the divergence when
+  both figures are available.
 - **A budget smaller than one ceiling admits nothing.** `spent + ceiling > limit`
   is refused, so a `$0.10` budget with a `$0.25` ceiling refuses every request.
   That is the honest reading of "you cannot afford a request this large".
@@ -107,10 +119,9 @@ discovered later:
   a rate will see a budget move faster than their true spend until they quote it.
   That is the conservative direction on purpose.
 - **Revocation does not cancel in flight.** It applies to new requests.
-- **Unverified against a live provider.** The arithmetic and the refusals are
-  tested against mocks; that a provider accepts a rewritten effort, or that a
-  real price sheet's cache rates are complete, has not been measured. Company
-  credits are consumed only through the gateway.
+- **Budgets and keys.** **UNTESTED live** — the arithmetic and the refusals are exercised against mocks; a live exercise (one capped key, one real request, one refusal) has not been run, so the caveat stands. That a provider accepts a rewritten
+  effort, or that a real price sheet's cache rates are complete, has not been
+  measured either. Company credits are consumed only through the gateway.
 
 ## Operating it
 

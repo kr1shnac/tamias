@@ -215,6 +215,17 @@ def _stored_simulated(row: dict[str, Any]) -> bool | None:
     return None
 
 
+def _sheet_identity(source: str | Path) -> str:
+    """The name a price sheet is known by, independent of how it was spelled.
+
+    A sheet's identity is its **name**, not the path that happened to be typed
+    when it was used.  ``./prices.toml``, ``prices.toml`` and an absolute path
+    are the same sheet, and treating them as different ones blanks a saving
+    that is in fact computable.
+    """
+    return Path(str(source)).name
+
+
 def _stored_price_sheet(row: dict[str, Any]) -> str | None:
     raw = _pick(row, PRICE_SHEET_COLUMNS)
     return raw if isinstance(raw, str) and raw else None
@@ -567,10 +578,31 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
         )
     elif stored_sheets:
         print(f"price provenance: {', '.join(stored_sheets)}")
-    if stored_sheets and str(prices_path) not in stored_sheets:
+    requested_name = _sheet_identity(prices_path)
+    stored_names = {_sheet_identity(name) for name in stored_sheets}
+    if stored_sheets and requested_name not in stored_names:
         print(
             f"WARNING: requested price sheet {prices_path} differs from stored price sheet "
             f"{', '.join(stored_sheets)}"
+        )
+    # The name can match while the sheet behind it does not.  Every row
+    # records the date of the sheet that priced it, and that date is already
+    # stored -- so it is compared here rather than only the name.  A sheet
+    # whose date differs from the recorded one is a different price basis, and
+    # the saving it would produce is not this log's saving.
+    recorded_dates = sorted(
+        {
+            str(row.get("price_sheet_date"))
+            for row in priced_rows
+            if row.get("price_sheet_date")
+        }
+    )
+    sheet_date = getattr(sheet, "date", None)
+    if recorded_dates and sheet_date and str(sheet_date) not in recorded_dates:
+        print(
+            f"WARNING: requested price sheet {prices_path} is dated {sheet_date}, but this "
+            f"log was priced with {', '.join(recorded_dates)}; its figures are a "
+            "different price basis"
         )
 
     # A saving is arithmetic over token counts.  If nothing was switched the
@@ -582,7 +614,7 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
     bases_differ = (
         (stored_rows_simulated or unknown_provenance > 0 or is_legacy)
         and stored_sheets
-        and str(prices_path) not in stored_sheets
+        and requested_name not in stored_names
     )
     # Both saving lines print UNKNOWN here rather than an amount, so this is
     # the one place the simulated banner can still be lost.  Put the warning
