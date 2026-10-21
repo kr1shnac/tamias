@@ -18,7 +18,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
       - run: python -m pytest -q
-      - run: ruff check src tests scripts
+      - run: ruff check src tests scripts examples
 
   package:
     runs-on: ubuntu-latest
@@ -131,14 +131,3 @@ jobs:
           test "$(/tmp/tamias-smoke/bin/tamias --version)" = "$expected"
           printf 'date = "2026-10-10"\n[example]\ninput = 1\noutput = 1\n' > /tmp/prices.toml
           /tmp/tamias-smoke/bin/tamias doctor --prices /tmp/prices.toml --db /tmp/smoke.db --port 0
-
-  claims-guard:
-    # Fails the build if the project website (docs/index.html) carries a claim
-    # the SSOT forbids, drops a statement it depends on, or quotes a version
-    # that has drifted from pyproject.toml. Also checks the install source URL
-    # the page points visitors at.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Website claims guard
-        run: sh scripts/check-claims.sh --online

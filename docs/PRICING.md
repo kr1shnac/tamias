@@ -100,6 +100,20 @@ A missing rate with a **zero** count costs nothing and stays known: the rate
 only matters if tokens reached that bucket. An unreported count with a rate of
 `0` is likewise known, because zero dollars times any count is zero dollars.
 
+Two invariants hold for every `CostBreakdown`:
+
+- **`usd` is `None` when the model is missing from the sheet, or when any field
+  the request needs is `None`.** "Needs" follows the rules above: a `None` rate
+  or count only forces UNKNOWN when the matching bucket actually received
+  tokens. Unknown is **never** treated as `0`, and `0` is never substituted for
+  it.
+- **`formula` is always present** — a non-empty string on every breakdown,
+  whether or not the cost is known. When `usd` is known it is the arithmetic
+  that produced the figure; when `usd` is `None` it names the missing input.
+- **`source` marks which observation `usd` is**: `"computed"` for a figure this
+  arithmetic produced, `"unknown"` when `usd` is `None`. It never claims a
+  computed figure the price sheet did not supply.
+
 ## Where cache-write counts come from
 
 The chat route reads write counts from usage when a provider reports them —
