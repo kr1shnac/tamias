@@ -357,6 +357,155 @@ def _row_summary(db: Path) -> tuple[int, int, float | None]:
     return len(rows), rewritten, (total if seen_cost else None)
 
 
+# ------------------------- candidate sweep (pure) -------------------------
+#
+# "Which cheap model saves the most?" is not a question one A/B can answer: the
+# router is binary (strong vs *one* cheap target), so the comparison is across
+# *runs*, one per candidate.  Everything below is arithmetic over observed
+# per-run costs, so it is exercised offline without a key and without money.
+
+
+@dataclass
+class RunResult:
+    """One completed run of the task under one arm."""
+
+    arm: str
+    cost: float | None = None
+    passed: bool | None = None
+    requests_sent: int = 0
+    error: str | None = None
+
+
+@dataclass
+class ArmSummary:
+    """Every run of one arm, summarised."""
+
+    arm: str
+    costs: list[float] = field(default_factory=list)
+    passes: list[bool] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+    @property
+    def median(self) -> float | None:
+        return _median(self.costs)
+
+    @property
+    def low(self) -> float | None:
+        return min(self.costs) if self.costs else None
+
+    @property
+    def high(self) -> float | None:
+        return max(self.costs) if self.costs else None
+
+    @property
+    def all_passed(self) -> bool | None:
+        if not self.passes:
+            return None
+        return all(self.passes)
+
+    @property
+    def n(self) -> int:
+        return len(self.costs)
+
+
+def _median(values: list[float]) -> float | None:
+    """Median of the observed costs, or None when nothing was observed."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def summarise_runs(runs: list[RunResult]) -> list[ArmSummary]:
+    """Group runs by arm, keeping only money the ledger actually yielded."""
+    summaries: dict[str, ArmSummary] = {}
+    for run in runs:
+        summary = summaries.setdefault(run.arm, ArmSummary(arm=run.arm))
+        if run.error:
+            summary.failures.append(f"{run.arm}: {run.error}")
+            continue
+        if run.cost is not None:
+            summary.costs.append(run.cost)
+        if run.passed is not None:
+            summary.passes.append(run.passed)
+    return list(summaries.values())
+
+
+def ranges_overlap(
+    a: ArmSummary, b: ArmSummary, min_detectable: float = DEFAULT_MIN_DETECTABLE
+) -> bool:
+    """Whether two arms' observed cost ranges fail to separate.
+
+    Two arms whose ranges overlap cannot be ranked from the data: the apparent
+    winner may be run-to-run noise.  This is the check that stops a single lucky
+    run from crowning a model.
+    """
+    if a.low is None or a.high is None or b.low is None or b.high is None:
+        return True
+    return not (a.high < b.low - min_detectable or b.high < a.low - min_detectable)
+
+
+def choose_cheapest(
+    summaries: list[ArmSummary],
+    min_runs: int = 1,
+    min_detectable: float = DEFAULT_MIN_DETECTABLE,
+) -> tuple[ArmSummary | None, list[str]]:
+    """The cheapest arm that passed every run, or None plus the reasons why not.
+
+    A cheap model that fails the task is not a saving, so only arms whose runs all
+    passed are eligible.  An arm with too few observations is not eligible either.
+    If the two cheapest eligible arms' ranges overlap, the result is inconclusive
+    rather than a winner.
+    """
+    lines: list[str] = []
+    eligible: list[ArmSummary] = []
+
+    for summary in summaries:
+        if summary.n == 0:
+            lines.append(f"  {summary.arm}: no priced runs, not eligible")
+            continue
+        if summary.n < min_runs:
+            lines.append(
+                f"  {summary.arm}: {summary.n} run(s), fewer than {min_runs}, not eligible"
+            )
+            continue
+        if summary.all_passed is False:
+            lines.append(f"  {summary.arm}: the task did not pass, not a saving")
+            continue
+        eligible.append(summary)
+
+    if not eligible:
+        lines.append("  no eligible arm: nothing to rank")
+        return None, lines
+
+    ranked = sorted(eligible, key=lambda s: s.median if s.median is not None else float("inf"))
+    winner = ranked[0]
+
+    if len(ranked) > 1 and ranges_overlap(winner, ranked[1], min_detectable):
+        lines.append(
+            f"  {winner.arm} and {ranked[1].arm} have overlapping cost ranges "
+            f"({_usd(winner.low)}-{_usd(winner.high)} vs "
+            f"{_usd(ranked[1].low)}-{_usd(ranked[1].high)}): "
+            "inconclusive, increase --repeats"
+        )
+        return None, lines
+
+    lines.append(f"  cheapest arm that passed: {winner.arm} (median {_usd(winner.median)})")
+    return winner, lines
+
+
+def show_sweep(summaries: list[ArmSummary]) -> None:
+    """One table row per arm: median cost, range, pass/fail, n."""
+    say(f"  {'arm':<24} {'runs':>4} {'median':>12} {'range':>26}  task")
+    for summary in summaries:
+        span = "UNKNOWN" if summary.low is None else f"{_usd(summary.low)} - {_usd(summary.high)}"
+        task = {True: "pass", False: "FAIL", None: "not checked"}[summary.all_passed]
+        say(f"  {summary.arm:<24} {summary.n:>4} {_usd(summary.median):>12} {span:>26}  {task}")
+
+
 # --------------------------- dry run (no money) ---------------------------
 
 async def _dry_arm(name: str, mode: str, db: Path, upstream_model: str,
@@ -467,20 +616,65 @@ class Checks:
 
 # ------------------------------ live path ------------------------------
 
+def run_oracle(command: str, cwd: str | None = None, timeout: float = 300.0) -> tuple[bool, str]:
+    """Run the pass/fail command and report whether the task still works.
+
+    A saving is only meaningful when the task still passes, so this is run after
+    each arm.  The exit code decides; the output is truncated into the reason so a
+    failure can be read without the full log.
+    """
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            command, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"oracle timed out after {timeout:.0f}s"
+    except OSError as exc:
+        return False, f"oracle could not run: {exc}"
+    if completed.returncode == 0:
+        return True, ""
+    tail = (completed.stdout + completed.stderr).strip().splitlines()
+    return False, f"oracle exit {completed.returncode}: {tail[-1] if tail else 'no output'}"
+
+
 def print_live_procedure(args: argparse.Namespace) -> None:
-    say("live A/B credit measurement -- not run (no --allow-spend)")
+    candidates = args.candidates.split(",") if args.candidates else []
+    say("live credit measurement -- not run (no --allow-spend)")
     say()
-    say("This sends two identical tasks to paid models and reads the ledger")
-    say("between them.  It costs real money; a small task on a strong model is")
-    say("roughly $0.05-$0.30 for both arms.  The procedure:")
+    say("This sends identical tasks to paid models and reads the ledger between")
+    say("them.  It costs real money; a small task on a strong model is roughly")
+    say("$0.05-$0.30 for both arms of one comparison.")
     say()
-    say("  1. read the ledger:   GET /api/v1/key  (usage before)")
-    say("  2. run the task with --router-mode off     -> X dollars")
-    say("  3. read the ledger again                   (usage between)")
-    say("  4. run the SAME task with --router-mode active -> Y dollars")
-    say("  5. read the ledger once more               (usage after)")
-    say("  6. saving = X - Y  (the provider's own numbers)")
-    say()
+    if candidates:
+        say(f"candidate sweep (cheap models): {', '.join(candidates)}")
+        say(f"repeats per arm:               {args.repeats}")
+        say(f"oracle command:                {args.oracle or '<not set>'}")
+        say()
+        say("For each candidate, and for the 'off' baseline, the loop reads the")
+        say("ledger, runs the task, runs the oracle, and reads the ledger again:")
+        say()
+        say("  1. usage_before = GET /api/v1/key -> data.usage")
+        say("  2. run the task (routing active, --cheap-model <candidate>)")
+        say("  3. run the oracle; a failed task is not a saving")
+        say("  4. usage_after  = GET /api/v1/key -> data.usage")
+        say("  5. cost = usage_after - usage_before")
+        say()
+        say("Arms are alternated run by run so drift hits every arm equally.")
+        say("The winner is the cheapest arm whose runs all passed; if the two")
+        say("cheapest ranges overlap, the result is inconclusive, not a winner.")
+        say()
+    else:
+        say("A/B procedure (no --candidates):")
+        say()
+        say("  1. read the ledger:   GET /api/v1/key  (usage before)")
+        say("  2. run the task with --router-mode off     -> X dollars")
+        say("  3. read the ledger again                   (usage between)")
+        say("  4. run the SAME task with --router-mode active -> Y dollars")
+        say("  5. read the ledger once more               (usage after)")
+        say("  6. saving = X - Y  (the provider's own numbers)")
+        say()
     say(f"  strong model: {args.strong_model or '<not set>'}")
     say(f"  cheap model:  {args.cheap_model or '<not set>'}")
     say(f"  key variable: ${args.api_key_env}")
@@ -488,6 +682,89 @@ def print_live_procedure(args: argparse.Namespace) -> None:
     say("Re-run with --allow-spend once a paid model pair and a ceiling are set.")
     say("A saving below the instrument floor is reported as below the floor,")
     say("never as a measurement.")
+
+
+def run_live_sweep(args: argparse.Namespace, token: str) -> int:
+    """The real, spending sweep: alternating arms, ledger reads, oracle each run.
+
+    Nothing here runs without ``--allow-spend``.  Each run is priced from the
+    *ledger delta* rather than a price sheet, and an arm whose task failed is
+    dropped from the ranking.
+    """
+    candidates = [c.strip() for c in args.candidates.split(",") if c.strip()]
+    if not args.oracle:
+        say("a sweep needs --oracle '<command>': a cheap model that breaks the")
+        say("task is not a saving, and only the oracle can tell.")
+        return 2
+    if not candidates:
+        say("a sweep needs --candidates a,b,c")
+        return 2
+
+    arms = ["off", *candidates]
+    runs: list[RunResult] = []
+    say(f"live sweep: {len(arms)} arms x {args.repeats} repeats = "
+        f"{len(arms) * args.repeats} runs")
+    say("this spends real money; Ctrl-C now to stop")
+    say()
+
+    # Alternate the arm order each round so provider drift does not favour one.
+    for round_index in range(args.repeats):
+        order = arms if round_index % 2 == 0 else list(reversed(arms))
+        for arm in order:
+            before = read_key(token)
+            if not before.readable:
+                say(f"  {arm}: ledger unreadable, stopping ({before.error})")
+                return 1
+            started = before.usage
+            outcome, reason = _live_run_arm(args, arm)
+            after = read_key(token)
+            cost = None if after.usage is None or started is None else after.usage - started
+            passed = None
+            if outcome is None:
+                passed, oracle_reason = run_oracle(args.oracle, cwd=args.oracle_cwd or None)
+                if not passed:
+                    reason = oracle_reason
+            runs.append(RunResult(arm=arm, cost=cost, passed=passed,
+                                  requests_sent=args.probes, error=outcome))
+            say(f"  {arm:<24} cost={_usd(cost):>12} "
+                f"task={'pass' if passed else 'FAIL' if passed is False else '?'}"
+                + (f"  {reason}" if reason else ""))
+
+    say()
+    summaries = summarise_runs(runs)
+    show_sweep(summaries)
+    say()
+    winner, lines = choose_cheapest(summaries, min_runs=args.repeats,
+                                    min_detectable=args.min_detectable)
+    for line in lines:
+        say(line)
+    say()
+    if winner is None:
+        say("RESULT: INCONCLUSIVE (no arm separates from the others)")
+        return 1
+    say(f"RESULT: PASS (use --cheap-model {winner.arm})")
+    return 0
+
+
+def _live_run_arm(args: argparse.Namespace, arm: str) -> tuple[str | None, str]:
+    """Drive the already-running proxy for one arm.  Returns (error, reason)."""
+    import httpx
+
+    headers = {SESSION_HEADER: f"credit-sweep-{arm}", "Authorization": f"Bearer {_SECRET}"}
+    model = args.strong_model
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": args.task or "Reply with the word ok"}],
+        "stream": False,
+    }
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(args.proxy.rstrip("/") + CHAT_PATH, json=body, headers=headers)
+    except httpx.HTTPError as exc:
+        return f"{type(exc).__name__}: {exc}", ""
+    if response.status_code != 200:
+        return f"HTTP {response.status_code}", response.text[:120]
+    return None, ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -517,6 +794,20 @@ def main(argv: list[str] | None = None) -> int:
             say("note: the credits endpoint needs a management key; key usage was read instead")
         say("RESULT: PASS (ledger readable)")
         return 0
+
+    if args.allow_spend:
+        if not _SECRET:
+            say(f"{args.api_key_env} is not set; the live path needs a key.")
+            return 2
+        if args.candidates:
+            say("tamias credit sweep  (live)")
+            say()
+            return run_live_sweep(args, _SECRET)
+        say("tamias credit A/B check  (live)")
+        say()
+        say("a non-sweep live run needs a --candidates list and --oracle;")
+        say("use --candidates a,b,c --oracle '<command>' --allow-spend")
+        return 2
 
     say("tamias credit A/B check")
     say()
@@ -552,6 +843,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-detectable", type=float, default=DEFAULT_MIN_DETECTABLE,
                         help="savings below this are reported as below the floor "
                              f"(default: {DEFAULT_MIN_DETECTABLE})")
+    parser.add_argument("--candidates", default="",
+                        help="comma-separated cheap models to sweep, e.g. a,b,c")
+    parser.add_argument("--repeats", type=int, default=3,
+                        help="runs per arm; arms are alternated (default: %(default)s)")
+    parser.add_argument("--oracle", default="",
+                        help="command whose exit code decides whether the task passed")
+    parser.add_argument("--oracle-cwd", default="",
+                        help="working directory for --oracle")
+    parser.add_argument("--probes", type=int, default=1,
+                        help="requests per run, recorded for the identity check "
+                             "(default: %(default)s)")
+    parser.add_argument("--task", default="",
+                        help="the task prompt sent in each run")
     return parser
 
 

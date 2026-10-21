@@ -206,3 +206,105 @@ def test_read_key_without_a_key_exits_two(monkeypatch) -> None:
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     assert module.main(["--read-key"]) == 2
+
+
+# ------------------------- candidate sweep -------------------------
+
+
+def _runs(arm: str, costs: list[float], passes: list[bool]):
+    module = _module()
+    return [
+        module.RunResult(arm=arm, cost=cost, passed=passed)
+        for cost, passed in zip(costs, passes, strict=True)
+    ]
+
+
+def test_sweep_picks_the_cheapest_passing_arm() -> None:
+    module = _module()
+    summaries = module.summarise_runs(
+        _runs("off", [0.10, 0.11, 0.12], [True] * 3)
+        + _runs("cheapA", [0.02, 0.021, 0.019], [True] * 3)
+        + _runs("cheapB", [0.05, 0.06, 0.055], [True] * 3)
+    )
+
+    winner, lines = module.choose_cheapest(summaries, min_runs=3)
+
+    assert winner is not None
+    assert winner.arm == "cheapA"
+    assert "cheapest arm that passed" in "\n".join(lines)
+
+
+def test_sweep_excludes_a_cheap_model_that_fails_the_task() -> None:
+    module = _module()
+    summaries = module.summarise_runs(
+        _runs("cheapA", [0.005, 0.006, 0.004], [True, False, True])
+        + _runs("cheapB", [0.05, 0.06, 0.055], [True] * 3)
+    )
+
+    winner, lines = module.choose_cheapest(summaries, min_runs=3)
+
+    # the cheapest arm broke the task, so it is not a saving
+    assert winner is not None
+    assert winner.arm == "cheapB"
+    assert "did not pass" in "\n".join(lines)
+
+
+def test_sweep_is_inconclusive_when_ranges_overlap() -> None:
+    module = _module()
+    summaries = module.summarise_runs(
+        _runs("cheapA", [0.05, 0.07, 0.06], [True] * 3)
+        + _runs("cheapB", [0.055, 0.065, 0.058], [True] * 3)
+    )
+
+    winner, lines = module.choose_cheapest(summaries, min_runs=3)
+
+    assert winner is None
+    assert "inconclusive" in "\n".join(lines)
+
+
+def test_sweep_refuses_to_rank_too_few_runs() -> None:
+    module = _module()
+    summaries = module.summarise_runs(_runs("cheapA", [0.01], [True]))
+
+    winner, lines = module.choose_cheapest(summaries, min_runs=3)
+
+    assert winner is None
+    assert "fewer than 3" in "\n".join(lines)
+
+
+def test_sweep_median_is_robust_to_a_single_outlier() -> None:
+    module = _module()
+    summary = module.summarise_runs(_runs("cheapA", [0.10, 0.02, 0.021], [True] * 3))[0]
+
+    assert summary.median == pytest.approx(0.021)
+    assert summary.n == 3
+
+
+def test_oracle_uses_the_exit_code() -> None:
+    module = _module()
+
+    assert module.run_oracle("true") == (True, "")
+    ok, reason = module.run_oracle("echo nope; exit 3")
+    assert ok is False
+    assert "exit 3" in reason
+
+
+def test_oracle_reports_a_timeout_as_a_failure() -> None:
+    module = _module()
+    ok, reason = module.run_oracle("sleep 5", timeout=0.25)
+
+    assert ok is False
+    assert "timed out" in reason
+
+
+def test_sweep_live_refuses_without_an_oracle(monkeypatch) -> None:
+    module = _module()
+    called: list[int] = []
+    monkeypatch.setattr(module, "read_key", lambda *a, **k: called.append(1))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fake-key")
+
+    # --allow-spend with candidates but no --oracle must refuse before spending
+    code = module.main(["--candidates", "a,b", "--allow-spend"])
+
+    assert code == 2
+    assert called == []

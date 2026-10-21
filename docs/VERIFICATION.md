@@ -150,6 +150,11 @@ the provider's own record of what was spent. Routing is the only variable.
 - **How much it costs.** The live A/B sends two identical tasks on paid models:
   roughly **$0.05-$0.30 for both arms** on a strong model, or under 10 cents on a
   cheap *paid* pair.
+- **The candidate sweep is verified offline, including its refusals.** Its
+  arithmetic (median, range overlap, pass/fail gating, winner selection) is pure
+  and covered by tests: a clear winner, the cheapest arm failing the task and so
+  being excluded, overlapping ranges reported as inconclusive, too-few-runs
+  ineligible, and the oracle reading an exit code.
 
 What this does **not** verify: a `:free` model bills `0`, so on free models the
 ledger moves by `$0.00` in both arms and the saving is `$0.00` -- quota is
@@ -272,6 +277,40 @@ prints the procedure and exits. It sends two paid completions and costs roughly
 free models the ledger does not move and no money saving can be read — only the
 free-model request quota. A saving below `--min-detectable` is reported as below
 the instrument floor, never as a measurement.
+
+**Candidate sweep — "which cheap model saves the most?"** The router is binary
+(strong vs *one* cheap target), so comparing several candidates is a comparison
+across *runs*, not within one. `--candidates a,b,c --repeats 3` sweeps each cheap
+model (plus an `off` baseline), reads the ledger around every run, and alternates
+the arm order each round so provider drift hits every arm equally.
+
+```sh
+python scripts/credit_ab_check.py \
+  --candidates model_a,model_b,model_c \
+  --repeats 3 \
+  --oracle 'pytest -q' --oracle-cwd /path/to/fixture \
+  --strong-model <strong> \
+  --allow-spend
+```
+
+- **A saved cent that breaks the task is not a saving.** `--oracle '<command>'` is
+  required for a sweep: its exit code decides pass/fail after each run, and an arm
+  whose runs did not all pass is dropped from the ranking. The sweep refuses to
+  run without an oracle and exits 2.
+- **A winner needs separated ranges.** The verdict is the cheapest *passing* arm;
+  if the two cheapest arms' observed cost ranges overlap, the result is
+  **inconclusive** and the script says to increase `--repeats` rather than crowning
+  a model on noise. Medians are reported with the full range, never as a single
+  number.
+- **The sweep arithmetic is verified offline.** `tests/test_credit_ab_check.py`
+  pins the clear winner, the case where the *cheapest* arm fails the task and is
+  excluded, overlapping ranges reporting inconclusive, too-few-runs being
+  ineligible, the median surviving an outlier, and the oracle reading the exit
+  code (including a timeout).
+- **Cost.** Each run is one request; `(candidates + 1) × repeats` runs. Three
+  candidates at three repeats is 12 runs — cents on a cheap paid pair, more on a
+  strong one.
+
 
 
 ## Release status
