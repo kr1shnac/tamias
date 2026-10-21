@@ -284,7 +284,9 @@ def test_oracle_uses_the_exit_code() -> None:
     module = _module()
 
     assert module.run_oracle("true") == (True, "")
-    ok, reason = module.run_oracle("echo nope; exit 3")
+    # The oracle runs without a shell, so the command is an argv, not a shell
+    # string: the exit code must be produced by the program itself.
+    ok, reason = module.run_oracle("sh -c 'exit 3'")
     assert ok is False
     assert "exit 3" in reason
 

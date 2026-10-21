@@ -55,7 +55,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import os
+import sqlite3
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -623,20 +625,35 @@ def run_oracle(command: str, cwd: str | None = None, timeout: float = 300.0) -> 
     each arm.  The exit code decides; the output is truncated into the reason so a
     failure can be read without the full log.
     """
+    import shlex
     import subprocess
 
+    # ``shell=False`` with an explicit argv: a spec-supplied command must never
+    # be interpreted by a shell.
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        return False, f"could not be parsed: {exc}"
+    if not argv:
+        return False, "no command given"
     try:
         completed = subprocess.run(
-            command, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout
+            argv, shell=False, cwd=cwd, capture_output=True, text=True, timeout=timeout
         )
     except subprocess.TimeoutExpired:
-        return False, f"oracle timed out after {timeout:.0f}s"
+        return False, f"timed out after {timeout:.0f}s"
     except OSError as exc:
-        return False, f"oracle could not run: {exc}"
+        return False, f"could not run: {type(exc).__name__}"
     if completed.returncode == 0:
         return True, ""
-    tail = (completed.stdout + completed.stderr).strip().splitlines()
-    return False, f"oracle exit {completed.returncode}: {tail[-1] if tail else 'no output'}"
+    # The oracle's own output is never stored: it can contain a prompt, a model
+    # response, a filesystem path or a secret.  What is kept is the exit code,
+    # a fixed category, and a digest of the output so two failures can be told
+    # apart without keeping either one.
+    digest = hashlib.sha256(
+        (completed.stdout + completed.stderr).encode("utf-8", "replace")
+    ).hexdigest()[:12]
+    return False, f"non-zero exit {completed.returncode} (output sha256 {digest})"
 
 
 def print_live_procedure(args: argparse.Namespace) -> None:
@@ -684,12 +701,197 @@ def print_live_procedure(args: argparse.Namespace) -> None:
     say("never as a measurement.")
 
 
+@dataclass
+class ArmSpec:
+    """One arm of the sweep, and the proxy configuration it must run under.
+
+    The three arms are not symmetric, and the difference is the whole point:
+    ``off`` and ``active`` traverse Tamias in different router modes, while
+    ``static`` never touches it at all -- it pins the cheap model in the client
+    and goes straight to the provider.  Without that third arm the sweep cannot
+    answer the question it exists to answer, because pinning a cheap model is
+    the trivial alternative every operator already has.
+    """
+
+    name: str
+    mode: str  # "off" | "active" | "bypass"
+    cheap_model: str
+    proxied: bool = True
+
+    def model_sent(self, strong_model: str) -> str:
+        """The model this arm actually asks the provider for."""
+        return self.cheap_model if self.mode == "bypass" else strong_model
+
+
+def build_arms(candidates: list[str]) -> list[ArmSpec]:
+    """The arms of a candidate sweep: one baseline plus a pair per candidate."""
+    arms = [ArmSpec(name="off", mode="off", cheap_model="")]
+    for candidate in candidates:
+        arms.append(ArmSpec(name=f"active:{candidate}", mode="active", cheap_model=candidate))
+        arms.append(ArmSpec(name=f"static:{candidate}", mode="bypass", cheap_model=candidate))
+    return arms
+
+
+@dataclass
+class ArmOutcome:
+    """What one repetition of one arm actually did."""
+
+    requests_sent: int = 0
+    rows: int = 0
+    rewritten: int = 0
+    error: str | None = None
+    identity: str | None = None
+
+
+def _read_rows(db_path: Path) -> list[dict[str, Any]]:
+    """Read a request log read-only.  An absent log is an empty log."""
+    if not db_path.is_file():
+        return []
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute("SELECT * FROM requests")]
+
+
+def run_arm(args: argparse.Namespace, arm: ArmSpec, db_path: Path) -> ArmOutcome:
+    """Run one repetition of one arm.  See :func:`_run_arm` for the work."""
+    return asyncio.run(_run_arm(args, arm, db_path))
+
+
+async def _run_arm(args: argparse.Namespace, arm: ArmSpec, db_path: Path) -> ArmOutcome:
+    """Run one repetition of one arm and prove what it was.
+
+    The proxy is built per arm, in-process, with the mode pinned at
+    construction: the router mode is a closure value, so there is no runtime
+    switch to flip and no port to collide on.  Each repetition gets its **own
+    database**, because the session id is a salted digest of the credential and
+    the prompt -- one shared log would give every arm and every repetition the
+    same session id, and the bypass arm's "no rows attributable to my session"
+    check would then see the other arms' rows.
+    """
+    import httpx
+
+    from tamias.cli import build_serve_app
+    from tamias.registry import load_registry
+
+    headers = {
+        SESSION_HEADER: f"credit-sweep-{arm.name}-{db_path.stem}",
+        "Authorization": f"Bearer {_SECRET}",
+    }
+    model = arm.model_sent(args.strong_model)
+    task = args.task or "Reply with the word ok"
+    # Two turns, the shape a real agent sends: a plain user turn, which the
+    # router always STAYs on, then a trailing easy-tool result, which is what
+    # it SWITCHes on.  A sweep whose only request were a user turn would
+    # measure nothing, because the router would never rewrite it.
+    bodies = [
+        {"model": model, "messages": [{"role": "user", "content": task}],
+         "stream": False},
+        {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": task},
+                {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function",
+                         "function": {"name": "read", "arguments": '{"path": "x.py"}'}}
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "name": "read",
+                 "content": "1\tx = 1"},
+            ],
+            "stream": False,
+        },
+    ]
+
+    if arm.mode == "bypass":
+        # The static arm: the request never traverses Tamias.
+        url = args.upstream.rstrip("/") + CHAT_PATH
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                for body in bodies:
+                    response = client.post(url, json=body, headers=headers)
+                    if response.status_code != 200:
+                        return ArmOutcome(error=f"HTTP {response.status_code}")
+        except httpx.HTTPError as exc:
+            return ArmOutcome(error=f"{type(exc).__name__}: {exc}")
+        rows = _read_rows(db_path)
+        if rows:
+            return ArmOutcome(error="the bypass arm wrote rows to the request log")
+        return ArmOutcome(requests_sent=1, rows=0, identity="bypassed tamias")
+
+    registry = load_registry(args.registry, missing_ok=True) if args.registry else None
+    try:
+        app = build_serve_app(
+            args.upstream,
+            args.prices,
+            str(db_path),
+            arm.mode,
+            cheap_model=arm.cheap_model,
+            strong_model=args.strong_model,
+            min_gap=args.min_gap,
+            registry=registry,
+        )
+    except Exception as exc:  # noqa: BLE001 - the reason is reported, not raised
+        return ArmOutcome(error=f"{type(exc).__name__}: {exc}")
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url="http://arm", timeout=120.0
+        ) as client:
+            for body in bodies:
+                response = await client.post(CHAT_PATH, json=body, headers=headers)
+                if response.status_code != 200:
+                    return ArmOutcome(error=f"HTTP {response.status_code}")
+    except httpx.HTTPError as exc:
+        return ArmOutcome(error=f"{type(exc).__name__}: {exc}")
+
+    rows = _read_rows(db_path)
+    if not rows:
+        return ArmOutcome(error="the arm made no request, so it cannot prove anything")
+    rewritten = [
+        row for row in rows
+        if row.get("model_used") and row.get("model_used") != row.get("model_requested")
+    ]
+    # Identity, checked against the arm's own log before its cost counts.
+    for row in rows:
+        if row.get("router_mode") != arm.mode:
+            return ArmOutcome(
+                requests_sent=len(rows), rows=len(rows),
+                error=f"a row was logged in router_mode {row.get('router_mode')!r}",
+            )
+    if arm.mode == "off":
+        if rewritten:
+            return ArmOutcome(
+                requests_sent=len(rows), rows=len(rows),
+                error="the off arm rewrote a request",
+            )
+        if any(row.get("model_requested") != args.strong_model for row in rows):
+            return ArmOutcome(
+                requests_sent=len(rows), rows=len(rows),
+                error="the off arm asked for a model the spec did not name",
+            )
+    else:
+        for row in rewritten:
+            if row.get("model_used") != arm.cheap_model:
+                return ArmOutcome(
+                    requests_sent=len(rows), rows=len(rows),
+                    error="a rewrite went to a model the spec did not declare",
+                )
+    return ArmOutcome(
+        requests_sent=len(rows), rows=len(rows), rewritten=len(rewritten),
+        identity=f"router_mode={arm.mode}, rewritten={len(rewritten)}",
+    )
+
+
 def run_live_sweep(args: argparse.Namespace, token: str) -> int:
     """The real, spending sweep: alternating arms, ledger reads, oracle each run.
 
     Nothing here runs without ``--allow-spend``.  Each run is priced from the
     *ledger delta* rather than a price sheet, and an arm whose task failed is
-    dropped from the ranking.
+    dropped from the ranking.  An arm whose identity cannot be proven is
+    **invalid**, and is never counted.
     """
     candidates = [c.strip() for c in args.candidates.split(",") if c.strip()]
     if not args.oracle:
@@ -699,34 +901,43 @@ def run_live_sweep(args: argparse.Namespace, token: str) -> int:
     if not candidates:
         say("a sweep needs --candidates a,b,c")
         return 2
+    if not args.upstream or not args.prices:
+        say("a sweep needs --upstream and --prices: the arms run their own")
+        say("proxy, so it needs to know where the provider is and what it costs.")
+        return 2
 
-    arms = ["off", *candidates]
+    arms = build_arms(candidates)
     runs: list[RunResult] = []
     say(f"live sweep: {len(arms)} arms x {args.repeats} repeats = "
         f"{len(arms) * args.repeats} runs")
     say("this spends real money; Ctrl-C now to stop")
     say()
 
+    workdir = Path(tempfile.mkdtemp(prefix="tamias-credit-ab-live-"))
     # Alternate the arm order each round so provider drift does not favour one.
     for round_index in range(args.repeats):
         order = arms if round_index % 2 == 0 else list(reversed(arms))
         for arm in order:
             before = read_key(token)
             if not before.readable:
-                say(f"  {arm}: ledger unreadable, stopping ({before.error})")
+                say(f"  {arm.name}: ledger unreadable, stopping ({before.error})")
                 return 1
             started = before.usage
-            outcome, reason = _live_run_arm(args, arm)
+            db_path = workdir / f"{arm.name.replace(':', '-')}-r{round_index}.db"
+            outcome = run_arm(args, arm, db_path)
             after = read_key(token)
             cost = None if after.usage is None or started is None else after.usage - started
             passed = None
-            if outcome is None:
+            reason = outcome.error or ""
+            if outcome.error is None:
                 passed, oracle_reason = run_oracle(args.oracle, cwd=args.oracle_cwd or None)
                 if not passed:
                     reason = oracle_reason
-            runs.append(RunResult(arm=arm, cost=cost, passed=passed,
-                                  requests_sent=args.probes, error=outcome))
-            say(f"  {arm:<24} cost={_usd(cost):>12} "
+            runs.append(RunResult(
+                arm=arm.name, cost=cost, passed=passed,
+                requests_sent=outcome.requests_sent, error=outcome.error,
+            ))
+            say(f"  {arm.name:<24} cost={_usd(cost):>12} "
                 f"task={'pass' if passed else 'FAIL' if passed is False else '?'}"
                 + (f"  {reason}" if reason else ""))
 
@@ -742,29 +953,13 @@ def run_live_sweep(args: argparse.Namespace, token: str) -> int:
     if winner is None:
         say("RESULT: INCONCLUSIVE (no arm separates from the others)")
         return 1
-    say(f"RESULT: PASS (use --cheap-model {winner.arm})")
+    if winner.arm.startswith("static:"):
+        say(f"RESULT: THE TRIVIAL ALTERNATIVE WON ({winner.arm}).")
+        say("Pinning the cheap model directly beat Tamias's routing, so the")
+        say("routing is not earning its place. This is a publishable result.")
+        return 0
+    say(f"RESULT: PASS (use --cheap-model {winner.arm.split(':', 1)[1]})")
     return 0
-
-
-def _live_run_arm(args: argparse.Namespace, arm: str) -> tuple[str | None, str]:
-    """Drive the already-running proxy for one arm.  Returns (error, reason)."""
-    import httpx
-
-    headers = {SESSION_HEADER: f"credit-sweep-{arm}", "Authorization": f"Bearer {_SECRET}"}
-    model = args.strong_model
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": args.task or "Reply with the word ok"}],
-        "stream": False,
-    }
-    try:
-        with httpx.Client(timeout=120.0) as client:
-            response = client.post(args.proxy.rstrip("/") + CHAT_PATH, json=body, headers=headers)
-    except httpx.HTTPError as exc:
-        return f"{type(exc).__name__}: {exc}", ""
-    if response.status_code != 200:
-        return f"HTTP {response.status_code}", response.text[:120]
-    return None, ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -837,6 +1032,16 @@ def _parser() -> argparse.ArgumentParser:
                         help="environment variable holding the key (default: %(default)s)")
     parser.add_argument("--proxy", default=DEFAULT_PROXY,
                         help=f"proxy base URL (default: {DEFAULT_PROXY})")
+    parser.add_argument("--upstream", default="",
+                        help="the provider's base URL, e.g. https://openrouter.ai/api; "
+                             "the sweep runs its own proxy per arm, so it needs this")
+    parser.add_argument("--prices", default="",
+                        help="path to the price sheet the arms are priced with")
+    parser.add_argument("--registry", default="",
+                        help="path to the model capability registry; active mode "
+                             "refuses to start unless the cheap target is in it")
+    parser.add_argument("--min-gap", type=int, default=3,
+                        help="requests required between two switches (default: %(default)s)")
     parser.add_argument("--db", default=DEFAULT_DB, help=f"request log (default: {DEFAULT_DB})")
     parser.add_argument("--strong-model", default="", help="the requested (strong) model")
     parser.add_argument("--cheap-model", default="", help="the router's cheap target")
