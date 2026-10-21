@@ -32,7 +32,7 @@ FREE = "local/free-model"
 SESSION = "dash-session"
 SHEET_DATE = "2026-10-04"
 
-# The invented rates of prices.openrouter-sim.toml, repeated here so the tests
+# The invented rates of tests/data/prices.openrouter-sim.toml, repeated here so the tests
 # pin their own arithmetic instead of inheriting whatever the checked-in sheet
 # says.  cache_write is 0.0, so a row that never reported cache writes is still
 # priceable.

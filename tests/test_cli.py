@@ -310,7 +310,7 @@ ULTRA = "nvidia/nemotron-3-ultra-550b-a55b:free"
 LIGHTNING = "nvidia/nemotron-3.5-lightning:free"
 
 # The shipped simulated OpenRouter sheet, the one the live evidence runs used.
-SIMULATED_OPENROUTER_SHEET = Path(__file__).resolve().parents[1] / "prices.openrouter-sim.toml"
+SIMULATED_OPENROUTER_SHEET = Path(__file__).resolve().parent / "data" / "prices.openrouter-sim.toml"
 
 # An eight-request session whose rows carry no token counts at all, which is what
 # a log looks like when every request was streamed and nothing ever asked for
@@ -526,7 +526,7 @@ def test_report_uses_row_provenance_not_the_requested_sheet(tmp_path, capsys) ->
         store.close()
 
     code, out = run(
-        capsys, str(db), str(Path(__file__).resolve().parents[1] / "prices.openrouter.toml")
+        capsys, str(db), str(Path(__file__).resolve().parent / "data" / "prices.openrouter.toml")
     )
 
     assert code == 0
@@ -557,7 +557,7 @@ def test_report_keeps_the_simulated_warning_on_both_saving_lines(tmp_path, capsy
         store.close()
 
     code, out = run(
-        capsys, str(db), str(Path(__file__).resolve().parents[1] / "prices.openrouter.toml")
+        capsys, str(db), str(Path(__file__).resolve().parent / "data" / "prices.openrouter.toml")
     )
 
     assert code == 0
@@ -589,7 +589,7 @@ def test_report_keeps_the_provenance_warning_on_both_saving_lines(tmp_path, caps
         store.close()
 
     code, out = run(
-        capsys, str(db), str(Path(__file__).resolve().parents[1] / "prices.openrouter.toml")
+        capsys, str(db), str(Path(__file__).resolve().parent / "data" / "prices.openrouter.toml")
     )
 
     assert code == 0

@@ -154,7 +154,7 @@ def test_the_shipped_openrouter_sheet_prices_its_free_models_at_zero():
     OpenRouter is an OpenAI-style upstream that reports no cache-write count.
     """
     root = Path(__file__).resolve().parents[1]
-    sheet = load_price_sheet(root / "prices.openrouter.toml")
+    sheet = load_price_sheet(root / "tests" / "data" / "prices.openrouter.toml")
     assert sheet.simulated is False
     assert set(sheet.models) == {
         "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -182,7 +182,7 @@ def test_the_shipped_openrouter_simulated_sheet_is_simulated_with_invented_price
     report over a real log finds prices instead of UNKNOWN.
     """
     root = Path(__file__).resolve().parents[1]
-    sheet = load_price_sheet(root / "prices.openrouter-sim.toml")
+    sheet = load_price_sheet(root / "tests" / "data" / "prices.openrouter-sim.toml")
     ultra = "nvidia/nemotron-3-ultra-550b-a55b:free"
     lightning = "nvidia/nemotron-3.5-lightning:free"
     assert sheet.simulated is True
