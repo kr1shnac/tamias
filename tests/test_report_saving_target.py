@@ -71,7 +71,7 @@ def _log(db: str, target: str | None) -> None:
     store.close()
 
 
-def _report(capsys, tmp_path: Path, target: str | None):
+def _report(capsys, tmp_path: Path, target: str | None, rate: float | None = None):
     db = str(tmp_path / "log.db")
     prices = tmp_path / "prices.toml"
     prices.write_text(TABLE)
@@ -79,7 +79,10 @@ def _report(capsys, tmp_path: Path, target: str | None):
 
     from tamias.cli import main
 
-    code = main(["report", "--db", db, "--prices", str(prices)])
+    argv = ["report", "--db", db, "--prices", str(prices)]
+    if rate is not None:
+        argv += ["--inr-rate", str(rate)]
+    code = main(argv)
     return code, capsys.readouterr().out
 
 
@@ -120,3 +123,31 @@ def test_saving_falls_back_to_sheet_cheapest_without_a_logged_target(tmp_path, c
     # fallback rather than pretending the router chose it.
     assert "cheap model assumed: mini-cheap" in out, out
     assert "switch target (from router decisions)" not in out, out
+
+
+def test_inr_rate_shows_a_converted_figure_alongside_the_dollar(tmp_path, capsys):
+    """--inr-rate adds a rupee conversion of each amount, at the fixed rate.
+
+    Saving $0.0007 at 85 rupees/dollar -> 0.0007*85 = 0.0595 -> shown as Rs 0.
+    The dollar figure is still printed and still authoritative.
+    """
+    code, out = _report(capsys, tmp_path, "mid-cheap", rate=85.0)
+
+    assert code == 0
+    # Dollar figure unchanged by the conversion.
+    assert abs(_estimated(out) - 0.0007) < 1e-9, out
+    # A rupee conversion is shown next to it.
+    assert "\u20b9" in out, out
+    # The rate and its non-billed nature are stated, so the figure cannot be
+    # mistaken for money actually charged.
+    assert "not a billed amount" in out, out
+    assert "\u20b985/$" in out, out
+
+
+def test_without_inr_rate_no_rupees_appear(tmp_path, capsys):
+    """The default report stays dollar-only."""
+    code, out = _report(capsys, tmp_path, "mid-cheap")
+
+    assert code == 0
+    assert "\u20b9" not in out, out
+    assert "not a billed amount" not in out, out

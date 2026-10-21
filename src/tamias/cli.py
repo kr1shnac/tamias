@@ -137,6 +137,19 @@ def _money(value: float) -> str:
     return f"{sign}${magnitude:.6f}" if magnitude < 1 else f"{sign}${magnitude:.4f}"
 
 
+def _money_inr(value: float, rate: float) -> str:
+    """The same amount in rupees, at a caller-supplied fixed rate.
+
+    This is a *conversion display*, not a bill: nothing here knows the rate the
+    bank or provider used, so the rupee figure is an illustration of the dollar
+    amount and the dollar amount stays authoritative.  Whole rupees are shown
+    because a converted number has no business implying paise of precision.
+    """
+    rupees = value * rate
+    sign = "-" if rupees < 0 else ""
+    return f"{sign}\u20b9{abs(rupees):,.0f}"
+
+
 def _cost_suffix(simulated: bool) -> str:
     """The simulated-prices banner, on every line that quotes an amount.
 
@@ -329,15 +342,26 @@ def _print_target_line(
         print(f"cheap model assumed: {cheap or 'unknown'}")
 
 
-def report(db_path: str, prices_path: str) -> None:
+def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> None:
     """Print the cost and shadow-routing summary for one database.
 
     Every line that quotes an amount carries a banner when the price sheet
     declares itself simulated, so a made-up rate cannot be read as a real bill.
+
+    When ``inr_rate`` is given (rupees per US dollar) every dollar figure is
+    followed by a rupee conversion in brackets.  The rate is the caller's, not
+    the bank's, so the rupee amount is a display of the dollar amount and the
+    dollar amount remains the one that reconciles against a provider invoice.
     """
     sheet = load_price_sheet(prices_path)
     rows = _read_rows(db_path)
     cheap = _cheap_model(sheet)
+
+    def money(value: float) -> str:
+        text = _money(value)
+        if inr_rate is not None:
+            text += f" (\u2248 {_money_inr(value, inr_rate)})"
+        return text
 
     known_total = 0.0
     unknown_costs = 0
@@ -440,14 +464,14 @@ def report(db_path: str, prices_path: str) -> None:
         if stored_rows_simulated:
             print(
                 f"total cost: UNKNOWN "
-                f"(known part: {_money(known_total)}; "
+                f"(known part: {money(known_total)}; "
                 f"{unknown_costs} of {len(rows)} requests have unknown cost) "
                 f"(computed, not billed; SIMULATED prices)"
             )
         elif is_legacy:
             print(
                 f"total cost: UNKNOWN "
-                f"(known part: {_money(known_total)}; "
+                f"(known part: {money(known_total)}; "
                 f"{unknown_costs} of {len(rows)} requests have unknown cost) "
                 f"(computed, not billed; price provenance unknown)"
             )
@@ -455,23 +479,23 @@ def report(db_path: str, prices_path: str) -> None:
             stored_sheet_str = ", ".join(stored_sheets) if stored_sheets else str(prices_path)
             print(
                 f"total cost: UNKNOWN "
-                f"(known part: {_money(known_total)}; "
+                f"(known part: {money(known_total)}; "
                 f"{unknown_costs} of {len(rows)} requests have unknown cost) "
                 f"(computed, not billed; list prices from {stored_sheet_str})"
             )
     else:
         if stored_rows_simulated:
-            print(f"total cost (computed, not billed; SIMULATED prices): {_money(known_total)}")
+            print(f"total cost (computed, not billed; SIMULATED prices): {money(known_total)}")
         elif is_legacy:
             print(
                 "total cost (computed, not billed; price provenance unknown): "
-                f"{_money(known_total)}"
+                f"{money(known_total)}"
             )
         else:
             stored_sheet_str = ", ".join(stored_sheets) if stored_sheets else str(prices_path)
             print(
                 "total cost (computed, not billed; list prices from "
-                f"{stored_sheet_str}): {_money(known_total)}"
+                f"{stored_sheet_str}): {money(known_total)}"
             )
     if free_count > 0:
         print(
@@ -518,7 +542,7 @@ def report(db_path: str, prices_path: str) -> None:
                 reconciled.append((computed, billed_value))
     if billed_values:
         print(
-            f"spent (billed by OpenRouter): {_money(sum(billed_values))} over "
+            f"spent (billed by OpenRouter): {money(sum(billed_values))} over "
             f"{len(billed_values)} of {len(rows)} requests"
         )
     else:
@@ -528,11 +552,11 @@ def report(db_path: str, prices_path: str) -> None:
         billed_total = sum(billed for _computed, billed in reconciled)
         stored_label = ", ".join(stored_sheets) if stored_sheets else "provenance unknown"
         print(
-            f"computed cost: {_money(computed_total)} (computed from list prices "
+            f"computed cost: {money(computed_total)} (computed from list prices "
             f"({stored_label})) over {len(reconciled)} rows{suffix}"
         )
         print(
-            f"difference (billed - computed): {_money(billed_total - computed_total)} over "
+            f"difference (billed - computed): {money(billed_total - computed_total)} over "
             f"{len(reconciled)} rows{suffix}"
         )
 
@@ -574,7 +598,7 @@ def report(db_path: str, prices_path: str) -> None:
     elif switched and not with_counts:
         print(f"estimated saving: UNKNOWN (0 of {len(rows)} requests have token counts){suffix}")
     else:
-        line = f"estimated saving: {_money(saved)} ({ESTIMATE_LABEL}"
+        line = f"estimated saving: {money(saved)} ({ESTIMATE_LABEL}"
         if with_counts < len(rows):
             line += f"; based on {with_counts} of {len(rows)} requests with token counts"
         if unpriced:
@@ -596,7 +620,7 @@ def report(db_path: str, prices_path: str) -> None:
         if realised_count > 0:
             line1 = (
                 f"realised saving (rows the proxy actually rewrote): "
-                f"{_money(realised_saved)} over {realised_count} rows "
+                f"{money(realised_saved)} over {realised_count} rows "
                 f"({ESTIMATE_LABEL}"
             )
             if realised_unpriced:
@@ -623,6 +647,11 @@ def report(db_path: str, prices_path: str) -> None:
         "sheet passed on the command line (used only for savings estimates): "
         f"{prices_path} ({sheet.date})"
     )
+    if inr_rate is not None:
+        print(
+            f"rupee figures are a display conversion at a fixed "
+            f"\u20b9{inr_rate:g}/$ you gave, not a billed amount"
+        )
 
 
 def build_serve_app(
@@ -1839,6 +1868,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to the TOML price sheet used for pricing; a sheet with "
         "`simulated = true` labels every amount it produces as simulated",
     )
+    report_parser.add_argument(
+        "--inr-rate",
+        type=float,
+        default=None,
+        metavar="RUPEES_PER_USD",
+        help="also show each dollar amount converted to rupees at this fixed "
+        "rate (a display conversion, not a billed amount); e.g. --inr-rate 85",
+    )
     dashboard_parser = sub.add_parser("dashboard", help="serve the local run dashboard")
     dashboard_parser.add_argument("--db", required=True, help="path to the proxy sqlite log")
     dashboard_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
@@ -2029,7 +2066,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "report":
         try:
-            report(args.db, args.prices)
+            report(args.db, args.prices, getattr(args, "inr_rate", None))
         except (OSError, ValueError, sqlite3.DatabaseError) as exc:
             print(f"tamias report: {exc}", file=sys.stderr)
             return 1

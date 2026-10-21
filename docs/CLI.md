@@ -104,6 +104,14 @@ the schema.
 | `--manifest-key KEY` | — | Pin the manifest to this Ed25519 public key. |
 | `--verbose` | off | Log every proxy event. |
 
+## `tamias report` flags
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--db PATH` | — (required) | Path to the sqlite request log. |
+| `--prices PATH` | — (required) | TOML price sheet used to price the log. |
+| `--inr-rate RUPEES_PER_USD` | off | Also show each dollar amount converted to rupees at this fixed rate, e.g. `--inr-rate 85`. This is a **display conversion**, not a billed amount: the dollar figure stays authoritative and is the one that reconciles against a provider invoice. |
+
 ## `tamias doctor`
 
 ```text

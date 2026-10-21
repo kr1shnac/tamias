@@ -192,9 +192,14 @@ and only until either the upstream reports a cache-write count or the pricing
 formula is changed to treat an unreported cache-write count as zero — which the
 pricing contract forbids ("unknown is NEVER treated as 0").
 
-*(The sample above predates the cache-aware saving change: the `estimate;` label
-is now `cache-aware, can be negative`, and the saving prices a warm stay against
-a cold switch.)*
+*(The sample above predates two changes and is kept only to show the shape of
+the output: the `estimate;` label is now `cache-aware, can be negative`, and the
+saving prices a warm stay against a cold switch; and the shadow count line now
+reads `requests shadow mode would have switched`. The line that used to read
+`cheap model assumed: <model>` is now `switch target (from router decisions):
+<model>` — the estimate prices the model the router's own decision named, not a
+guess from the price sheet, and falls back to `cheap model assumed` only for
+older logs.)*
 
 The number that matters in shadow mode is **requests shadow would have
 switched**. It tells you how much of your traffic the router thinks is

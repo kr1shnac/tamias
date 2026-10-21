@@ -72,6 +72,10 @@ tamias report --db requests.db --prices prices.toml
 tamias dashboard --db requests.db --prices prices.toml
 ```
 
+Add `--inr-rate 85` to `report` to also show each amount in rupees at that fixed
+rate — a display conversion, not a billed figure. The dollar amount stays
+authoritative.
+
 `--upstream` defaults to `$TAMIAS_UPSTREAM`, else to the `--provider` preset
 (`openrouter`, `openai`, `ollama`), else to `https://openrouter.ai/api`.
 `--prices` defaults to `./prices.toml`, then `~/.tamias/prices.toml`, then a
