@@ -1016,10 +1016,16 @@ def serve(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        if not args.manifest_key:
+            print(
+                "tamias serve: --manifest needs --manifest-key "
+                "(a pinned public key) to prevent self-signed manifests",
+                file=sys.stderr,
+            )
+            return 2
         try:
             manifest_doc = manifest_mod.load_manifest(args.manifest)
-            if args.manifest_key:
-                manifest_key = manifest_mod.load_public_key(args.manifest_key)
+            manifest_key = manifest_mod.load_public_key(args.manifest_key)
             manifest_mod.verify_manifest(
                 manifest_doc, trusted_public_key=manifest_key
             )
