@@ -38,8 +38,59 @@ or an in-process mock. What it pins down:
   model on the row's real counts, so a constructed cache-miss replay yields
   `saved <= 0` (`tests/test_dashboard.py`, `tests/test_cli.py`).
 
-## Verified by hand against a live provider
+## Verified with authored rates (`scripts/shadow_rate_check.py`)
 
+The savings *arithmetic* is verified without spending money. The pipeline's own
+2026-10-04 run used two `:free` models, so its saving was `$0.00 − $0.00` and
+carried no information. This check separates the two questions that hid behind
+that zero:
+
+- **The pipeline** — does the proxy log token counts, decide SWITCH, and compute
+  a saving from a price sheet? This needs a live model that reports usage; the
+  free tier is one.
+- **The economy** — are the rates real? This needs a provider invoice, which no
+  test can manufacture.
+
+`shadow_rate_check.py` verifies the first, for nothing, by pricing the rows a
+free run logged with rate sheets the caller authors. The token counts are real;
+the rates are declared `simulated`; the arithmetic is the real `compute_cost`.
+It prices one row set under four sheets and checks that the CLI's own printed
+realised-saving line equals an independent derivation of the same rows:
+
+| Case | Cheap rate | What it exercises |
+| --- | --- | --- |
+| `flat-cheap` | 0 | saving is the whole strong cost |
+| `tenth` | 1/10 of strong | the realistic ratio |
+| `near-parity` | ~= strong | saving must collapse toward zero |
+| `cache-hostile` | strong cache-write dear | saving must be allowed **negative** |
+
+What a PASS establishes: the saving the report prints is the saving the rates
+imply, for a real logged row set, including the sign; and as the cheap model gets
+dearer the saving shrinks (a rate-shape-independent ordering check).
+
+What a PASS does **not** establish: that any cheap model is really cheaper per
+task, or that the chosen rates are the provider's. A PASS is "the pipeline
+computes the saving these rates imply", never "tamias saves money".
+
+```sh
+# offline, no key, no socket (uses the tests' mock upstream)
+python scripts/shadow_rate_check.py --mock
+
+# against a proxy already listening on the free tier
+python scripts/shadow_rate_check.py \
+  --proxy http://localhost:8000 \
+  --strong-model nvidia/nemotron-3-ultra-550b-a55b:free \
+  --cheap-model  nvidia/nemotron-3.5-lightning:free \
+  --api-key-env OPENROUTER_API_KEY \
+  --db /tmp/shadow.db
+```
+
+The `--mock` run is self-testing: it drives the real proxy in active mode so the
+router really rewrites a model, and it fails if no row was rewritten (a saving
+cannot exist without one). Exit code is `0` on PASS, `1` on FAIL, `2` for a
+missing key or log. The API key is read from the environment and never printed.
+
+## Verified by hand against a live provider
 Observed **2026-10-04** on Linux (Python 3.14.4, opencode 1.18.34), against
 OpenRouter's live API (`https://openrouter.ai/api`), served by NVIDIA.
 
@@ -73,7 +124,10 @@ OpenRouter's live API (`https://openrouter.ai/api`), served by NVIDIA.
 - **Savings measurement.** No measured savings exist. Every saving figure the
   report or dashboard prints is arithmetic over invented or listed rates applied
   to logged token counts; none has been reconciled against a provider invoice, and
-  no paid, non-zero-price run has been authorised.
+  no paid, non-zero-price run has been authorised. The *arithmetic* is now
+  verified against authored rates (`scripts/shadow_rate_check.py`, above,
+  including the negative case); what remains unverified is that the rates are
+  real and that any cheap model is genuinely cheaper per task.
 - **Paid-model behaviour.** Every live rate used was a real `0`. Real per-token
   arithmetic against a **non-zero** rate has never been checked.
 - **Anthropic, Codex and Claude Code live traffic.** The `/v1/messages` and
@@ -170,7 +224,7 @@ pending publisher existed. TestPyPI's newest is `0.1.0a3`.
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
-| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim |
+| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case); the rates themselves are not |
 | Live provider behavior | Unverified | CI uses offline/injected transports only |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions |
 | Publish | Released | `0.1.0a8` is on PyPI, published from tag `v0.1.0a8` via Trusted Publishing (OIDC) |
