@@ -201,7 +201,7 @@ Even after these, the file may be called final **for design**; claims of *saving
 - **Code-truth authority:** `tamias/docs/audit/claims.md` outranks this file on any code question; this file outranks the older briefs/architecture docs on what Tamias *is*.
 - **Verification practice:** v1.1 claims about the moving codebase were re-checked 2026-10-19 by grep (dashboard baseline, cli ROUTER_MODES, router markers, effort scope, anthropic routing, session derivation, registry fields, budget/keys existence, LICENSE, 932 collected tests across 48 test files). A final consistency pass the same day re-located the unlogged passthrough route (proxy.py:1257-1275; the claims.md-internal citation 799-802 is stale, claim still holds), corrected the bearer-token comparison to proxy.py:740 (the loopback policy is what security.py enforces — it refuses wider binds, stronger than "default"), and removed a duplicated phrase in §4. All 14 council run directories re-listed and complete (framed-question, advisors, reviews, mapping, aggregate, chairman, verification, transcript, report.html).
 
-## 15. Project file map (package `src/tamias/`, 963 tests, MIT)
+## 15. Project file map (package `src/tamias/`, 1011 tests, MIT)
 
 | File | Role | Status |
 |---|---|---|

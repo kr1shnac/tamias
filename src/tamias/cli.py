@@ -339,12 +339,13 @@ def report(db_path: str, prices_path: str) -> None:
                 saved += delta
 
         model_used = _pick(row, MODEL_USED_COLUMNS)
-        if model_used is not None and model_used != row["model_requested"]:
+        model_requested = _pick(row, ("model_requested", "model"))
+        if model_used is not None and model_requested is not None and model_used != model_requested:
             if _would_switch(row):
                 routed += 1
             usage = _usage(row)
             cost_requested = compute_cost(
-                row["model_requested"], assume_cache_warm(usage), sheet
+                model_requested, assume_cache_warm(usage), sheet
             ).usd
             cost_used = compute_cost(model_used, usage, sheet).usd
             if cost_requested is not None and cost_used is not None:
@@ -1462,6 +1463,13 @@ def run(args: argparse.Namespace) -> int:
         print(notice, file=sys.stderr)
     upstream = _resolve_upstream(args, cfg) or DEFAULT_UPSTREAM
     db_override = pick(args.db, cfg.db, None)
+    cheap_model = args.cheap_model if getattr(args, "cheap_model", None) != "" else (
+        cfg.cheap_model or ""
+    )
+    strong_model = args.strong_model if getattr(args, "strong_model", None) != "" else (
+        cfg.strong_model or ""
+    )
+    run_router_mode = args.mode if args.mode is not None else cfg.router_mode
 
     try:
         db = _reserve_run_db(db_override, args.project)
@@ -1486,12 +1494,12 @@ def run(args: argparse.Namespace) -> int:
         "--port",
         str(port),
         "--cheap-model",
-        args.cheap_model,
+        cheap_model,
         "--strong-model",
-        args.strong_model,
+        strong_model,
     ]
-    if args.mode:
-        serve_command.extend(("--router-mode", args.mode))
+    if run_router_mode:
+        serve_command.extend(("--router-mode", run_router_mode))
     if args.router_config:
         serve_command.extend(("--router-config", args.router_config))
     if args.effort_mode:
