@@ -119,6 +119,44 @@ OpenRouter's live API (`https://openrouter.ai/api`), served by NVIDIA.
   is not deterministic. The live check therefore judges probe 2 on delivery, not
   on token counts.
 
+## Verified with the provider ledger (`scripts/credit_ab_check.py`)
+
+A provider-ledger measurement is the one number that does not come from a price
+sheet the caller controls. `credit_ab_check.py` runs the *same* task twice through
+the *same* agent -- once with routing off (X) and once with routing active (Y) --
+and reads `GET /api/v1/key`'s `data.usage` around each arm, so `saving = X - Y` is
+the provider's own record of what was spent. Routing is the only variable.
+
+- **The instrument is confirmed, not assumed.** `GET /api/v1/key` returns
+  `data.usage` (and `usage_daily`, `free_model_daily_requests`) with an ordinary
+  request key; the parser is exercised in `tests/test_credit_ab_check.py` against
+  the documented 200 shape, and a 401 is reported as unreadable rather than
+  fabricated. `GET /api/v1/credits` (`total_credits` / `total_usage`) is
+  account-level and its own docs say a *management* key is required, so it is read
+  only behind `--credits`.
+- **The machinery runs offline and passes.** `--dry-run` drives the real proxy in
+  both modes against the tests' mock upstream: off rewrites 0, active rewrites 1,
+  so the arms differ exactly as the comparison requires, and with no ledger
+  movement the comparison claims **no** money saving.
+- **The arithmetic is covered, including the cases that must refuse.** Unit tests
+  pin a positive saving (`$0.040000`), a **negative** saving (`$-0.010000`, not
+  clamped to zero), a non-moving ledger ("below the instrument floor", never
+  "$0.00 saved"), an unreadable ledger, unequal request counts (which invalidate
+  the comparison -- "the work was not identical"), and the free-model quota being
+  reported as **a count, not money**.
+- **The live path cannot spend by accident.** It is refusal-gated behind
+  `--allow-spend`; without it the script prints the procedure and exits; without a
+  key `--read-key` exits 2.
+- **How much it costs.** The live A/B sends two identical tasks on paid models:
+  roughly **$0.05-$0.30 for both arms** on a strong model, or under 10 cents on a
+  cheap *paid* pair.
+
+What this does **not** verify: a `:free` model bills `0`, so on free models the
+ledger moves by `$0.00` in both arms and the saving is `$0.00` -- quota is
+consumed, not credit. No money measurement is possible without a paid model pair,
+and none has been run. The ledger's cent-scale resolution also means a saving
+smaller than the floor is reported as below the floor, not as a measurement.
+
 ## Not verified
 
 - **Savings measurement.** No measured savings exist. Every saving figure the
@@ -126,8 +164,10 @@ OpenRouter's live API (`https://openrouter.ai/api`), served by NVIDIA.
   to logged token counts; none has been reconciled against a provider invoice, and
   no paid, non-zero-price run has been authorised. The *arithmetic* is now
   verified against authored rates (`scripts/shadow_rate_check.py`, above,
-  including the negative case); what remains unverified is that the rates are
-  real and that any cheap model is genuinely cheaper per task.
+  including the negative case) and the *measurement across two arms* is verified
+  end to end offline (`scripts/credit_ab_check.py`, above); what remains
+  unverified is that the rates are real and that any cheap model is genuinely
+  cheaper per task.
 - **Paid-model behaviour.** Every live rate used was a real `0`. Real per-token
   arithmetic against a **non-zero** rate has never been checked.
 - **Anthropic, Codex and Claude Code live traffic.** The `/v1/messages` and
@@ -200,6 +240,40 @@ creates a completion. Where a stored generation id is missing or malformed, the
 row is reported rather than inferred. Requires `httpx` and an `OPENROUTER_API_KEY`
 (override with `--api-key-env`); a USD tolerance is set with `--tolerance`.
 
+### `scripts/credit_ab_check.py`
+Measures the saving from the provider's own ledger instead of a price sheet. The
+same task runs twice through the same agent — once with routing off (`X`) and once
+with routing active (`Y`) — and `GET /api/v1/key`'s `data.usage` is read around
+each arm, so `saving = X - Y`. Routing is the only variable; the ledger is the
+provider's record, not arithmetic the caller controls.
+
+**Offline first** (no key, no socket, no money):
+
+```sh
+python scripts/credit_ab_check.py --dry-run
+```
+
+`--dry-run` drives the real proxy in both modes against the tests' mock upstream
+and checks that the arms differ (off rewrites 0, active rewrites ≥1) and that no
+money saving is claimed without a ledger movement.
+
+**Prove the instrument** (needs a key; two GETs, no completion):
+
+```sh
+python scripts/credit_ab_check.py --read-key
+```
+
+Prints `usage`, `usage_daily` and the free-model request quota. Add `--credits`
+to also read `GET /api/v1/credits`, which its docs say needs a *management* key.
+
+**The live A/B** is refusal-gated behind `--allow-spend`; without it the script
+prints the procedure and exits. It sends two paid completions and costs roughly
+**$0.05–$0.30 for both arms** on a strong model. A `:free` model bills `0`, so on
+free models the ledger does not move and no money saving can be read — only the
+free-model request quota. A saving below `--min-detectable` is reported as below
+the instrument floor, never as a measurement.
+
+
 ## Release status
 
 Public alpha — **`0.1.0a8` on PyPI** (<https://pypi.org/project/tamias/>),
@@ -224,7 +298,7 @@ pending publisher existed. TestPyPI's newest is `0.1.0a3`.
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
-| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case); the rates themselves are not |
+| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`); no live ledger measurement has been taken |
 | Live provider behavior | Unverified | CI uses offline/injected transports only |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions |
 | Publish | Released | `0.1.0a8` is on PyPI, published from tag `v0.1.0a8` via Trusted Publishing (OIDC) |
