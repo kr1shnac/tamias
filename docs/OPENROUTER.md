@@ -29,7 +29,7 @@ export OPENROUTER_API_KEY=sk-or-...
 
 tamias serve \
   --upstream https://openrouter.ai/api \
-  --prices prices.openrouter.toml \
+  --prices prices.toml \
   --db /tmp/or.db \
   --port 8000
 ```
@@ -110,29 +110,51 @@ LM Studio, Ollama and Helicone examples:
 - `models` maps the id OpenCode puts in the request body to a display name.
   **These ids are what tamias logs as `model_requested`, so they must match your
   price sheet keys character for character**, `:` and `/` included. That is why
-  the keys in `prices.openrouter.toml` are quoted: TOML bare keys cannot contain
+  quoted table names are required in a price sheet: TOML bare keys cannot contain
   `/` or `:`.
 - `model` is `"<provider-id>/<model-id>"`.
 
-## 4. Write the price sheet
+## 4. Get a price sheet
 
-Copy `prices.openrouter.toml`. Its three model tables already carry **every rate
-at 0**, including `cache_write`, because the `:free` models bill at zero and
-because OpenRouter is an OpenAI-style upstream whose `usage` object has no
-cache-write count.
+You do not have to write a price sheet to start. `tamias` resolves one in this
+order: `--prices`, then `./prices.toml`, then `~/.tamias/prices.toml`, then the
+dated OpenRouter snapshot bundled inside the package
+(`src/tamias/data/prices.default.toml`). The bundled snapshot already contains
+both of the `:free` model ids used above, each with **every rate at 0**,
+including `cache_write`. A fresh run therefore prices these models at `$0.00`
+rather than refusing to start or printing UNKNOWN.
 
-That second point is the one to internalise. If `cache_write` were nonzero,
-every request would come out UNKNOWN, because `cache_write_tokens` is always
-UNKNOWN on that path and a nonzero rate is then a rate you needed and did not
-have. A real `0` is a price you stated; a missing rate is one you do not know,
-and tamias keeps those apart. See [When cost is
-UNKNOWN](OPENCODE.md#when-cost-is-unknown).
+That `cache_write = 0` matters more than it looks. OpenRouter is reached through
+an OpenAI-style chat-completions upstream, whose `usage` object carries no
+cache-write count, so `cache_write_tokens` is always UNKNOWN on this path. If
+`cache_write` were nonzero, every request would come out UNKNOWN, because a
+nonzero rate is then a rate you needed and did not have. A real `0` is a price
+you stated; a missing rate is one you do not know, and tamias keeps those apart.
+See [When cost is UNKNOWN](OPENCODE.md#when-cost-is-unknown).
 
-`prices.openrouter-sim.toml` prices those same models at **invented** rates
-(3.00/15.00 for the ultra model, 0.25/1.25 for lightning) under the real model
-ids, quoted, so a rehearsal can price a real log. It carries `simulated = true`,
-which stamps SIMULATED PRICES, NOT REAL SAVINGS on every amount. Its numbers are
-made up and must never be quoted as what these models cost.
+For current rates, run:
+
+```sh
+tamias prices fetch --out prices.toml
+```
+
+That reads <https://openrouter.ai/api/v1/models>, converts each per-token price
+exactly, and writes a sheet with a `[provenance]` block naming the API, the URL
+and the fetch time. Model ids render sorted, so the same catalogue produces the
+same bytes. See [`PRICING.md`](PRICING.md) for the full schema.
+
+To write a sheet by hand instead, copy [`examples/prices.example.toml`](../examples/prices.example.toml)
+and add a table per model id you intend to use. Those model ids are what tamias
+logs as `model_requested`, so a table name must match the id character for
+character, `:` and `/` included. That is why the table names are quoted: TOML
+bare keys cannot contain `/` or `:`. A free model is a table whose every rate is
+a real `0`.
+
+To rehearse a report before you have real numbers, set `simulated = true` — see
+[`examples/prices.simulated.toml`](../examples/prices.simulated.toml). It changes
+no arithmetic; it only stamps `SIMULATED PRICES, NOT REAL SAVINGS` on every
+amount, so an invented number cannot be mistaken for a bill. Its rates are made
+up and must never be quoted as what these models cost.
 
 ## 5. Run the live check
 
@@ -162,7 +184,7 @@ makes. `model_requested` in the log would be the router, not what actually ran;
 `model_used` could not be compared against the sheet; a SWITCH decision would
 have no fixed target; and a saving computed between two requests would be
 dividing by two unrelated models. Pin explicit ids — the `:free` suffix on a
-named model, as in `prices.openrouter.toml`.
+named model, as in the `opencode.json` example above.
 
 ## Streaming and usage: `--inject-usage`
 
@@ -182,7 +204,7 @@ Pass `--inject-usage` to stop guessing:
 ```sh
 tamias serve \
   --upstream https://openrouter.ai/api \
-  --prices prices.openrouter.toml \
+  --prices prices.toml \
   --db /tmp/or.db \
   --port 8000 \
   --inject-usage
@@ -203,8 +225,8 @@ be provably what the client sent.
 Clients that read chunks in order are fine; a client that assumes every chunk has
 a choice is not. OpenCode's `@ai-sdk/openai-compatible` path handles it: two
 `opencode run` sessions with the flag on, in shadow and in active mode, ran to
-completion with all rows HTTP 200 and the task fixed in both — verified live, see
-"Stages 6 and 7" in `docs/live-evidence.md`.
+completion with all rows HTTP 200 and the task fixed in both — observed live;
+see [`VERIFICATION.md`](VERIFICATION.md).
 
 **But coverage still will not be total.** Because the usage chunk is last, a
 client that stops reading once it has what it needs leaves nothing to log. In a
@@ -238,13 +260,13 @@ the report shows the throttling rather than hiding it.
   full routing; `@ai-sdk/openai` (responses) meters only. The catch-all relay
   for *other* paths forwards without a price, but it still writes one count-only
   row per request (`route="passthrough"`).
-- **The endpoint shape here is read off `proxy.py`; the live behaviour is in
-  [live-evidence.md](live-evidence.md).** The config shape is from the OpenCode
+- **The endpoint shape here is read off `proxy.py`; what has actually been run is
+  in [VERIFICATION.md](VERIFICATION.md).** The config shape is from the OpenCode
   docs; the model ids and the `openrouter/free` description are quoted from a
   real `GET https://openrouter.ai/api/v1/models`. What has actually been run
   against the live API — `opencode run` through the proxy in shadow and active
   mode, with real SWITCH decisions and priced rows — is recorded in
-  [live-evidence.md](live-evidence.md).
+  [VERIFICATION.md](VERIFICATION.md).
 - **The model list moves.** `:free` models get added and retired. If a request
   404s or the model stops appearing in `/v1/models`, the fix is a new id, not a
   new price sheet.
