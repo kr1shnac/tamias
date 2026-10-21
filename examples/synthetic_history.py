@@ -722,7 +722,7 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         "> Every task, token count and `result` below is invented, and the rates are",
         "> made up. The dollar figures are arithmetic over invented numbers, **not**",
         "> evidence that Tamias saves money. **No savings have ever been measured in",
-        "> this project** (see [`TAMIAS-SSOT.md`](../../TAMIAS-SSOT.md) §8).",
+        "> this project.**",
         "",
         f"Window **{window['start']} .. {window['end']}** ({window['days']} days), "
         f"seed `{summary['seed']}`, priced with `{summary['price_sheet']['path']}` "

@@ -43,8 +43,8 @@ jobs:
           PY
       - name: Audit sdist contents
         # The sdist is a public download; it must carry only the package and the
-        # files a consumer needs, never the internals (tests, docs, demo,
-        # scripts, the SSOT/BLOCKED/AGENTS notes, or the root price sheets).
+        # files a consumer needs, never the internals (tests, docs, scripts, or
+        # the maintainer notes).
         run: |
           python - <<'PY'
           import tarfile
