@@ -37,7 +37,7 @@ from tamias.store import Store  # noqa: E402
 
 CHAT = "/v1/chat/completions"
 BODY = {"model": "local/free-model", "messages": [{"role": "user", "content": "hi"}]}
-PRICES = Path(__file__).resolve().parents[1] / "prices.simulated.toml"
+PRICES = Path(__file__).resolve().parents[1] / "examples" / "prices.simulated.toml"
 
 
 def _proxy_app(tmp_path: Path, *, enforce_host: bool, trusted=()):

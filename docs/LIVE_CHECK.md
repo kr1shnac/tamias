@@ -100,7 +100,7 @@ export ZEN_API_KEY=sk-...
 tamias forwards `Authorization` untouched, so the key reaches Zen unchanged, and
 the script only ever reads it from the environment.
 
-Write a price sheet. Copy `prices.example.toml` to `prices.toml` and add the
+Write a price sheet. Copy `examples/prices.example.toml` to `prices.toml` and add the
 model you are about to ask for — `big-pickle` is free on Zen, so its rates are
 all `0`:
 

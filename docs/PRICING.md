@@ -127,7 +127,7 @@ cannot price (recording the reason), and writes a sheet in this schema with
 fetch time. Model ids render in sorted order, so the same catalogue produces
 the same bytes.
 
-`prices.example.toml` is not that. It is a hand-written illustration, headed
+`examples/prices.example.toml` is not that. It is a hand-written illustration, headed
 `EXAMPLE - NOT CURRENT`, and its rates have not been re-checked against a
 provider.
 

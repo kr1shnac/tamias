@@ -18,7 +18,7 @@
 # keys allow only letters, digits, `_` and `-` while these ids carry `/` and `:`.
 # Keying by the real ids is what lets a rehearsal price a real run: the ids a
 # live session logs are then the ids this sheet has rates for, so a report over
-# a real log finds prices instead of UNKNOWN.  `prices.simulated.toml` keeps the
+# a real log finds prices instead of UNKNOWN.  `examples/prices.simulated.toml` keeps the
 # abstract `strong`/`cheap` pair, which is what the router logic itself reasons
 # about in tests.
 

@@ -764,7 +764,9 @@ def test_report_rejects_a_non_boolean_simulated_flag(
 
 
 def test_the_shipped_simulated_sheet_loads_and_declares_itself_simulated() -> None:
-    sheet = load_price_sheet(Path(__file__).resolve().parents[1] / "prices.simulated.toml")
+    sheet = load_price_sheet(
+        Path(__file__).resolve().parents[1] / "examples" / "prices.simulated.toml"
+    )
     assert sheet.simulated is True
     assert sheet.get("strong") == ModelPrice(
         input=3.0, output=15.0, cached_input=0.30, cache_write=0.0, cache_write_1h=0.0

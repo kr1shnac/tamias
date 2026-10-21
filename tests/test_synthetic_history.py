@@ -1,4 +1,4 @@
-"""demo/make_history.py, checked from the repo's own suite.
+"""examples/synthetic_history.py, checked from the repo's own suite.
 
 The three-week history is a demo artefact, so the things worth pinning here
 are the ones that would otherwise slip: that the generator is deterministic
@@ -10,7 +10,7 @@ does not carry a token count.
 
 Run this file alone with:
 
-    .venv/bin/pytest -q tests/test_demo_history.py
+    .venv/bin/pytest -q tests/test_synthetic_history.py
 """
 
 from __future__ import annotations
@@ -27,27 +27,27 @@ from typing import Any
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEMO_DIR = REPO_ROOT / "demo"
+EXAMPLES_DIR = REPO_ROOT / "examples"
 
 sys.path.insert(0, str(REPO_ROOT / "src"))  # noqa: E402
 
 from tamias.cli import main as report_main  # noqa: E402
 
-PRICE_SHEET = "prices.simulated.toml"
+PRICE_SHEET = "examples/prices.simulated.toml"
 END = date(2026, 10, 6)
 DAYS = 5
 SEED = 7
 
 
 def _load(name: str) -> ModuleType:
-    """Import a demo/ script by path so demo/ never lands on sys.path.
+    """Import an examples/ script by path so examples/ never lands on sys.path.
 
     The generated name is also registered in ``sys.modules`` -- unlike the
-    reporting scripts, make_history uses dataclasses with ``slots=True``, which
+    reporting scripts, synthetic_history uses dataclasses with ``slots=True``, which
     need the module in ``sys.modules`` for ``__module__`` lookup.
     """
-    key = f"_demo_{name}"
-    spec = importlib.util.spec_from_file_location(key, DEMO_DIR / f"{name}.py")
+    key = f"_example_{name}"
+    spec = importlib.util.spec_from_file_location(key, EXAMPLES_DIR / f"{name}.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[key] = module
@@ -55,13 +55,13 @@ def _load(name: str) -> ModuleType:
     return module
 
 
-make_history = _load("make_history")
+synthetic_history = _load("synthetic_history")
 
 
 def _generate(tmp_path: Path, out: str = "out") -> dict[str, Any]:
     """Run the generator into tmp_path/<out> and return the summary JSON."""
     target = tmp_path / out
-    code = make_history.main(
+    code = synthetic_history.main(
         [
             "--out",
             str(target),
@@ -172,4 +172,4 @@ def test_report_labels_the_history_as_simulated(tmp_path, capsys) -> None:
     assert code == 0
     assert "SIMULATED PRICES, NOT REAL SAVINGS" in out
     assert "realised saving" in out
-    assert "price provenance: prices.simulated.toml" in out
+    assert "price provenance: examples/prices.simulated.toml" in out

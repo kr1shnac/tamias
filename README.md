@@ -401,9 +401,9 @@ tamias/
 ├── tests/             the suite (1013 tests) plus mock upstreams
 ├── docs/              topic guides, audits, and the per-route reference
 ├── demo/              the two-arm demo scripts, runbook, and captured runs/
-├── examples/          example router config (router.example.toml)
+├── examples/          example configs and price sheets
 ├── scripts/           maintenance tools: live check, reconciliation, benchmark
-├── prices.*.toml      price sheets used by tests and docs (see below)
+├── prices.openrouter*.toml  real and simulated OpenRouter snapshots (see below)
 ├── TAMIAS-SSOT.md     the design spec and single source of truth
 ├── AGENTS.md          instructions for coding agents working in this repo
 ├── CONTRACT.md        the proxy's interface contract, in brief
@@ -413,10 +413,11 @@ tamias/
 └── README.md          this file
 ```
 
-The four `prices.*.toml` sheets at the root are deliberately kept there: the
-tests and the demo read them by repo-root path. `prices.example.toml` is the
-starter template; `prices.simulated.toml` and `prices.openrouter-sim.toml` are
-fixtures; `prices.openrouter.toml` is a real snapshot.
+`examples/prices.example.toml` is the
+starter template; `examples/prices.simulated.toml` and `prices.openrouter-sim.toml`
+are fixtures; `prices.openrouter.toml` is a real snapshot. The remaining
+`prices.*.toml` sheets stay at the root because the tests and the demo read them
+by repo-root path.
 
 ## Documentation
 
@@ -477,5 +478,5 @@ disagree, the code-truth ledger wins for behaviour and the SSOT wins for intent.
   live checks (no real key material).
 
 **Contributing and policy:** [`CONTRIBUTING.md`](CONTRIBUTING.md),
-[`SECURITY.md`](SECURITY.md), [`SUPPORT.md`](SUPPORT.md),
+[`SECURITY.md`](SECURITY.md), [`SUPPORT.md`](.github/SUPPORT.md),
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md), [`CHANGELOG.md`](CHANGELOG.md).
