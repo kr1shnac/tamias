@@ -1,5 +1,5 @@
 # Direct development tools, pinned to the versions the 2026-10-20 gate passed
-# with (1011 tests, ruff clean). Runtime dependencies stay bounded in pyproject.
+# with (1013 tests, ruff clean). Runtime dependencies stay bounded in pyproject.
 #
 # Reproduce the gate:
 #   python -m venv .venv && .venv/bin/pip install -e . -r requirements-dev.txt

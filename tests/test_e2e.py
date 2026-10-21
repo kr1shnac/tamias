@@ -303,7 +303,9 @@ def test_report_totals_the_session(
     assert f"requests: {REQUESTS}" in out
     assert "requests shadow mode would have switched" in out
     assert f"requests shadow mode would have switched: {len(EXPECTED_SWITCHES)}" in out
-    assert f"cheap model assumed: {CHEAP}" in out
+    # The estimate prices its switch arm against the target the router's own
+    # decisions named, not a guess from the price sheet.
+    assert f"switch target (from router decisions): {CHEAP}" in out
     assert (
         "sheet passed on the command line (used only for savings estimates): "
         f"{prices_path} ({SHEET_DATE})" in out

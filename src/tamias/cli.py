@@ -106,6 +106,7 @@ COST_COLUMNS = ("computed_list_cost_usd", "cost_usd", "cost", "usd")
 PRICE_SHEET_COLUMNS = ("price_sheet",)
 PRICE_SIMULATED_COLUMNS = ("price_simulated",)
 DECISION_COLUMNS = ("decision_action", "decision")
+DECISION_TARGET_COLUMNS = ("decision_target_model",)
 MODEL_USED_COLUMNS = ("model_used", "model")
 
 
@@ -216,6 +217,18 @@ def _would_switch(row: dict[str, Any]) -> bool:
     return isinstance(action, str) and action.strip().upper() == "SWITCH"
 
 
+def _logged_target(row: dict[str, Any]) -> str | None:
+    """The model the router's own decision named as the switch target.
+
+    The proxy persists ``decision_target_model`` on every SWITCH row, so this is
+    the deployment's *configured* cheap target -- the model the router would
+    actually have picked -- rather than a guess.  It is absent on STAY rows and
+    on logs written before the column existed.
+    """
+    raw = _pick(row, DECISION_TARGET_COLUMNS)
+    return raw if isinstance(raw, str) and raw else None
+
+
 def _count(row: dict[str, Any], name: str) -> int | None:
     raw = row.get(name)
     if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
@@ -264,11 +277,14 @@ def _saving(row: dict[str, Any], sheet: PriceSheet, cheap: str | None) -> float 
     """What this request would have cost less, had the switch been acted on.
 
     The stay arm is the model that answered, priced with a **warm** cache
-    (:func:`assume_cache_warm`); the switch arm is the cheap model on the row's
-    real counts.  Charging the switch the context it would have to re-ingest is
-    what makes the estimate falsifiable: the result can be zero or negative, so
-    the report can show a switch that lost money instead of only ever showing
-    winnings (F-1).  It is still an estimate -- no counterfactual was ever run.
+    (:func:`assume_cache_warm`); the switch arm is the target model on the row's
+    real counts.  The target is the model the router's own decision named
+    (:func:`_logged_target`) when the log recorded one, falling back to the
+    sheet's cheapest only for rows that predate that column.  Charging the
+    switch the context it would have to re-ingest is what makes the estimate
+    falsifiable: the result can be zero or negative, so the report can show a
+    switch that lost money instead of only ever showing winnings (F-1).  It is
+    still an estimate -- no counterfactual was ever run.
     """
     if cheap is None:
         return None
@@ -288,6 +304,31 @@ def _saving(row: dict[str, Any], sheet: PriceSheet, cheap: str | None) -> float 
     return staying - switching
 
 
+def _print_target_line(
+    cheap: str | None, logged: set[str], fallback_rows: int
+) -> None:
+    """Say which model the savings estimate priced its switch arm against.
+
+    The switch target differs by row: rows the router decided on carry the
+    configured target in ``decision_target_model``, while older rows (or logs
+    with no decision) fall back to the cheapest model in the passed price sheet,
+    which need not be the deployment's cheap model.  The line names the logged
+    target when there is one -- the model the router would actually have picked
+    -- and only discloses the sheet-cheapest fallback when rows depended on it.
+    """
+    if logged:
+        names = ", ".join(sorted(logged))
+        line = f"switch target (from router decisions): {names}"
+        if fallback_rows:
+            line += (
+                f"; {fallback_rows} switched row(s) had no logged target and "
+                f"were priced against the sheet-cheapest {cheap or 'unknown'}"
+            )
+        print(line)
+    else:
+        print(f"cheap model assumed: {cheap or 'unknown'}")
+
+
 def report(db_path: str, prices_path: str) -> None:
     """Print the cost and shadow-routing summary for one database.
 
@@ -304,6 +345,8 @@ def report(db_path: str, prices_path: str) -> None:
     saved = 0.0
     unpriced = 0
     with_counts = 0
+    targets_logged: set[str] = set()
+    targets_fallback = 0
 
     free_count = sum(
         1
@@ -332,7 +375,13 @@ def report(db_path: str, prices_path: str) -> None:
             pass
         else:
             switched += 1
-            delta = _saving(row, sheet, cheap)
+            target = _logged_target(row)
+            if target is None:
+                targets_fallback += 1
+                target = cheap
+            else:
+                targets_logged.add(target)
+            delta = _saving(row, sheet, target)
             if delta is None:
                 unpriced += 1
             else:
@@ -569,7 +618,7 @@ def report(db_path: str, prices_path: str) -> None:
         line1 = ""
 
     print(line1)
-    print(f"cheap model assumed: {cheap or 'unknown'}")
+    _print_target_line(cheap, targets_logged, targets_fallback)
     print(
         "sheet passed on the command line (used only for savings estimates): "
         f"{prices_path} ({sheet.date})"

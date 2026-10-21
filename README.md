@@ -398,7 +398,7 @@ Three client protocols are priced. Any other path is relayed unpriced, but each 
 ```text
 tamias/
 ├── src/tamias/        the package: proxy, router, pricing, store, CLI (22 modules)
-├── tests/             the suite (1011 tests) plus mock upstreams
+├── tests/             the suite (1013 tests) plus mock upstreams
 ├── docs/              topic guides, audits, and the per-route reference
 ├── demo/              the two-arm demo scripts, runbook, and captured runs/
 ├── examples/          example router config (router.example.toml)
