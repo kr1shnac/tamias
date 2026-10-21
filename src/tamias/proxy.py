@@ -216,11 +216,17 @@ def to_usage(raw: Any) -> Usage:
 
 
 def forward_headers(request: Request) -> dict[str, str]:
-    return {
+    headers = {
         key: value
         for key, value in request.headers.items()
         if key.lower() not in DROPPED_REQUEST_HEADERS | {PROJECT_HEADER}
     }
+    key = getattr(request.state, "key", None)
+    key_id = getattr(key, "key_id", None) if key is not None else None
+    if isinstance(key_id, str) and key_id.startswith("vk-"):
+        headers.pop("authorization", None)
+        headers.pop("Authorization", None)
+    return headers
 
 
 def forward_response_headers(headers: httpx.Headers) -> dict[str, str]:
@@ -458,6 +464,26 @@ def _body_model(raw: bytes) -> str | None:
     there is a string ``model`` field it must clear the caller's allowlist, and
     when there is not, there is nothing to check.
     """
+
+    def _find_model(obj: object, depth: int = 0) -> str | None:
+        if depth > 6:
+            return None
+        if isinstance(obj, dict):
+            for key in ("model", "model_name", "model_id"):
+                val = obj.get(key)
+                if isinstance(val, str) and val:
+                    return val
+            for val in obj.values():
+                found = _find_model(val, depth + 1)
+                if found is not None:
+                    return found
+        elif isinstance(obj, list):
+            for item in obj:
+                found = _find_model(item, depth + 1)
+                if found is not None:
+                    return found
+        return None
+
     try:
         payload = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
@@ -466,7 +492,7 @@ def _body_model(raw: bytes) -> str | None:
         model = payload.get("model")
         if isinstance(model, str) and model:
             return model
-    return None
+    return _find_model(payload)
 
 
 def _json_object(raw: bytes) -> dict[str, Any]:

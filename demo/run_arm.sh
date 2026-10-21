@@ -296,7 +296,7 @@ else
 		--inject-usage
 	)
 	if [ -n "$EFFORT_POLICY" ]; then
-		SERVE_ARGS+=(--effort-policy "$EFFORT_POLICY")
+		SERVE_ARGS+=(--effort-mode "$EFFORT_POLICY")
 	fi
 fi
 

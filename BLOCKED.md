@@ -38,7 +38,7 @@ one real bug that no in-process test caught — the proxy advertised the
 upstream's `content-encoding: gzip` for a body httpx had already decoded,
 so every non-streaming client call failed with `APIConnectionError`
 ("Connection error."). Fixed in `605dc52` plus a regression test. The
-effort path was then exercised live (`--effort-policy easy-low`): the log
+effort path was then exercised live (`--effort-mode easy-low`): the log
 records `effort_used=high/low` matching `decision_target_effort`.
 
 ## Package and push — 0.1.0a3

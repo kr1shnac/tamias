@@ -389,6 +389,14 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
             missing.append("cache_write_tokens")
     # cache_write_1h_tokens is an optional subset of cache_write_tokens, so it is
     # never "missing": an absent count means zero 1h writes, not an unknown cost.
+    if usage.input_tokens is None and input_p is not None:
+        # Even if input price is 0, we still need to know how many tokens to
+        # subtract when cache/write buckets are priced or when the formula needs
+        # to balance the input total. Without it, arithmetic would crash or
+        # invent numbers.
+        if cached_tokens is None or is_nonzero(cached_p) or is_nonzero(cw_p) or is_nonzero(cw1h_p):
+            if "input_tokens" not in missing:
+                missing.append("input_tokens")
 
     if missing:
         expr = _build_expr(
@@ -426,6 +434,23 @@ def compute_cost(model: str, usage: Usage, sheet: PriceSheet) -> CostBreakdown:
     writes_1h_res = cw1h
 
     # recompute uncached
+    if usage.input_tokens is None:
+        expr = _build_expr(
+            usage,
+            input_p,
+            output_p,
+            cached_p,
+            cw_p,
+            cw1h_p,
+            cached_f=cached_calc,
+            uncached_f=None,
+        )
+        return CostBreakdown(
+            usd=None,
+            formula=f"{expr}; unknown: input_tokens",
+            price_sheet_date=sheet.date,
+            source="unknown",
+        )
     uncached_calc = usage.input_tokens - cached_calc - cw_total  # type: ignore
 
     cost = (

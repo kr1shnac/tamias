@@ -418,63 +418,72 @@ class BudgetLedger:
         )
         ceiling = to_micros(ceiling_usd)
         with self._lock:
-            # A hold left behind by a request that never settled would otherwise
-            # accumulate for the key's lifetime.  Dropping this key's own stale
-            # rows here keeps the table bounded and self-healing, without a
-            # background task or a sweep of rows belonging to other keys.
-            self._conn.execute(
-                f"DELETE FROM {RESERVATION_TABLE} WHERE key_id = ? AND created_at < ?",
-                (key_id, held),
-            )
-            if limits.rpm is not None:
-                used = self.requests_in_window(key_id, window)
-                if used >= limits.rpm:
-                    return Reserve(
-                        allowed=False, reason="rpm", model=model, used=used, limit=limits.rpm
-                    )
-            if limits.tpm is not None:
-                used_tokens = self.tokens_in_window(key_id, window)
-                if used_tokens + token_estimate > limits.tpm:
-                    return Reserve(
-                        allowed=False,
-                        reason="tpm",
-                        model=model,
-                        used=used_tokens,
-                        limit=limits.tpm,
-                    )
-            cap = limits.model_cap(model)
-            if cap is not None:
-                spent = self.spend_micros(key_id, since, model)
-                reserved = self.reserved_micros(key_id, held, model)
-                if spent + reserved + ceiling > to_micros(cap):
-                    return Reserve(
-                        allowed=False,
-                        reason="model_cap",
-                        model=model,
-                        spent_usd=from_micros(spent),
-                        reserved_usd=from_micros(reserved),
-                        cap_usd=cap,
-                    )
-            if limits.budget_usd is not None:
-                spent = self.spend_micros(key_id, since)
-                reserved = self.reserved_micros(key_id, held)
-                if spent + reserved + ceiling > to_micros(limits.budget_usd):
-                    return Reserve(
-                        allowed=False,
-                        reason="budget",
-                        model=model,
-                        spent_usd=from_micros(spent),
-                        reserved_usd=from_micros(reserved),
-                        cap_usd=limits.budget_usd,
-                    )
-            self._conn.execute(
-                f"INSERT INTO {RESERVATION_TABLE} "
-                "(key_id, model, ceiling_micros, token_estimate, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (key_id, model, ceiling, token_estimate, now_stamp(moment)),
-            )
-            self._conn.commit()
-            return Reserve(allowed=True, model=model)
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                # A hold left behind by a request that never settled would otherwise
+                # accumulate for the key's lifetime.  Dropping this key's own stale
+                # rows here keeps the table bounded and self-healing, without a
+                # background task or a sweep of rows belonging to other keys.
+                self._conn.execute(
+                    f"DELETE FROM {RESERVATION_TABLE} WHERE key_id = ? AND created_at < ?",
+                    (key_id, held),
+                )
+                if limits.rpm is not None:
+                    used = self.requests_in_window(key_id, window)
+                    if used >= limits.rpm:
+                        self._conn.commit()
+                        return Reserve(
+                            allowed=False, reason="rpm", model=model, used=used, limit=limits.rpm
+                        )
+                if limits.tpm is not None:
+                    used_tokens = self.tokens_in_window(key_id, window)
+                    if used_tokens + token_estimate > limits.tpm:
+                        self._conn.commit()
+                        return Reserve(
+                            allowed=False,
+                            reason="tpm",
+                            model=model,
+                            used=used_tokens,
+                            limit=limits.tpm,
+                        )
+                cap = limits.model_cap(model)
+                if cap is not None:
+                    spent = self.spend_micros(key_id, since, model)
+                    reserved = self.reserved_micros(key_id, held, model)
+                    if spent + reserved + ceiling > to_micros(cap):
+                        self._conn.commit()
+                        return Reserve(
+                            allowed=False,
+                            reason="model_cap",
+                            model=model,
+                            spent_usd=from_micros(spent),
+                            reserved_usd=from_micros(reserved),
+                            cap_usd=cap,
+                        )
+                if limits.budget_usd is not None:
+                    spent = self.spend_micros(key_id, since)
+                    reserved = self.reserved_micros(key_id, held)
+                    if spent + reserved + ceiling > to_micros(limits.budget_usd):
+                        self._conn.commit()
+                        return Reserve(
+                            allowed=False,
+                            reason="budget",
+                            model=model,
+                            spent_usd=from_micros(spent),
+                            reserved_usd=from_micros(reserved),
+                            cap_usd=limits.budget_usd,
+                        )
+                self._conn.execute(
+                    f"INSERT INTO {RESERVATION_TABLE} "
+                    "(key_id, model, ceiling_micros, token_estimate, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (key_id, model, ceiling, token_estimate, now_stamp(moment)),
+                )
+                self._conn.commit()
+                return Reserve(allowed=True, model=model)
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def settle(
         self,

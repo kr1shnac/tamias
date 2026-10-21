@@ -275,9 +275,9 @@ Read this before quoting any number from this demo.
   rows are `:free` models, so the real billed cost is `$0`, and `tamias report`
   puts `[SIMULATED PRICES, NOT REAL SAVINGS]` beside each of them — copy the
   label along with the number.
-- **`--effort-policy` is wired up on this branch.** `config.env`'s
+- **`--effort-mode` is wired up on this branch.** `config.env`'s
   `EFFORT_POLICY` setting is passed through by the routed arm and
-  `tamias serve --help` lists both `--effort-policy {off,easy-low}` and
+  `tamias serve --help` lists both `--effort-mode {off,easy-low}` and
   `--effort-style {openrouter,openai}`, so leaving it empty is no longer
   required. It stays opt-in: with it empty the proxy forwards the body
   byte-for-byte. **What is verified:** the requested effort is recorded in the
