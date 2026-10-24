@@ -258,7 +258,7 @@ for the two proxied arms, never the only one.
 | Arm | What it does | Identity proof | Invalid when |
 | --- | --- | --- | --- |
 | `off` | The agent requests the strong model; the proxy is in `off` mode and forwards it unchanged. | The proxy ran in `off` mode (the request log's `router_mode` column says so) **and** every row's `model_requested` is the spec's strong model **and** the runner's outbound record shows at least one request. | Any row shows `model_used != model_requested`; **or** the runner's outbound record shows zero requests (a mis-wired agent that never called out — the arm would otherwise pass vacuously); **or** the request count in the log and in the runner's record disagree. |
-| `active` | The agent requests the strong model; the proxy is in `active` mode and may rewrite to the spec's cheap target. | The proxy ran in `active` mode **and** every rewritten row targets the spec's declared target (no other model was used) **and** the runner's outbound record shows at least one request. | A rewrite went to a model other than the declared target; **or** the runner's outbound record shows zero requests (a mis-wired agent that never called out — the arm would otherwise pass vacuously, and a zero-cost arm is exactly the shape that separates in `active`'s favour). |
+| `active` | The agent requests the strong model; the proxy is in `active` mode and may rewrite to the spec's cheap target. | The proxy ran in `active` mode (the request log's `router_mode` column says so) **and** every rewritten row targets the spec's declared target (no other model was used) **and** the runner's outbound record shows at least one request. | A rewrite went to a model other than the declared target; **or** the runner's outbound record shows zero requests (a mis-wired agent that never called out — the arm would otherwise pass vacuously, and a zero-cost arm is exactly the shape that separates in `active`'s favour); **or** the request count in the log and in the runner's record disagree. |
 | `static_cheap` | The agent requests the cheap model directly and **never traverses Tamias**. | (i) the spec's recorded model for this arm is the cheap model; (ii) the runner's outbound record shows the cheap model was the one asked for, with at least one request; (iii) **zero** Tamias request-log rows attributable to the arm's session id; (iv) the ledger moved by a non-zero amount during the repetition's bracket. | Any one of the four missing, including zero requests in the runner's outbound record. |
 
 **The no-request floor applies to all three arms.** An arm whose runner-side
@@ -290,14 +290,15 @@ and records each one's result in the run record.
 1. **Key isolation.** The run uses a provider key used by nothing else. The
    runner records the key's `label` (never the key) so a misconfiguration is
    visible without exposing a credential.
-2. **No concurrent traffic.** The counter is read **twice in quick succession
+2. **No concurrent traffic (pre-arm only).** The counter is read **twice in quick succession
    immediately before** the repetition, and the two readings must be **equal**.
    Any movement between them is another workload using the key, it falls inside
    the measured bracket, and it would be silently attributed to the repetition
-   — so the repetition is **invalid**. The runner also requires the *previous*
+   — so the repetition is **invalid**. The runner requires the *previous*
    repetition's counter to have settled before the next bracket opens, so a
    late-arriving update of the previous repetition's own requests is not
-   mis-diagnosed as concurrent traffic.
+   mis-diagnosed as concurrent traffic. **The pre-arm equal-read rule is the
+   only place that treats inter-read movement as concurrent traffic.**
 3. **Reconciliation against the runner's own record.** The ledger delta for
    the repetition must be attributable to the requests in the runner's outbound
    record for that repetition: the delta must be non-zero whenever the
@@ -307,33 +308,29 @@ and records each one's result in the run record.
    the repetition's own requests invalidates it.
 4. **Settlement is an observation of *movement*, not of stillness — and this
    governs the post-arm read.** The provider's counter may be delayed or
-   batched, and **a batched counter is stationary before the batch lands**, so
-   "re-reads until the counter stops moving across two consecutive reads" is
-   satisfied immediately, before the provider has accounted for the repetition
-   at all. The arm is then under-measured, and the error lands in the
-   flattering direction whenever the arm under test ran last. The rule is
-   therefore: after the last response, **the counter must be observed to
-   increase at least once**, and then remain stable across two consecutive
-   reads, or the preregistered settle window expires. **If the counter never
-   moves within the window, the repetition is `INVALID` with the distinct code
+   batched, and **a batched counter is stationary before the batch lands**. 
+   **Precedence:** condition 4 **governs the post-arm read**. After the last
+   response, the counter enters a **settle loop**: re-read until the counter
+   stops moving across two consecutive reads, or the preregistered settle
+   window expires. A difference between the two post-arm readings is the
+   counter settling, not concurrent traffic, and it is **never by itself**
+   an invalidity. **If the counter is still moving when the settle window
+   expires, the repetition is `INVALID` with the distinct code
    `ledger.unsettled`** — not "settled at zero". The run records **two**
    fields, not one: `counter_moved` (bool) and `settle_seconds`, so a
    never-moved counter is visibly different from a fast one. A fake-clock test
    pins it: the counter increments in two batches, the first landing after the
-   settle window opens. The ledger
-   delta is the settled value minus the pre-arm value. **If the counter is
-   still moving when the settle window expires, the repetition is invalid.**
-   **Precedence: condition 4 governs the post-arm read.** A difference between
-   the two post-arm readings is the counter settling, not concurrent traffic,
-   and it is never by itself an invalidity. Only the *pre-arm* double read
-   (condition 2) treats movement as concurrent traffic. The run records how
+   settle window opens. The ledger delta is the settled value minus the pre-arm
+   value. **The post-arm read has no "must be equal" invalidity rule** — that
+   rule applies only to the pre-arm read under condition 2. The run records how
    long the counter took to settle, so a provider whose counter is slow is
    visible rather than silently mis-priced.
 5. **A negative delta is a refund, not a saving.** If the settled value is
    **below** the pre-arm value, the counter was adjusted (a refund or a
    credit), and the repetition is **invalid** — a negative ledger delta must
    never lower an arm's measured cost, which is the flattering direction for a
-   promotion.
+   promotion. The "never clamp" rule applies to the **comparison between arms**,
+   not to a negative ledger delta itself.
 6. **The passthrough qualification is stated accurately and tested.** The
    passthrough route is never *priced*, and it is **gated**: a key carrying a
    limit is refused **403** when the passthrough body names a model
@@ -386,6 +383,20 @@ different widths, and both are stated so they cannot be confused:
   favour one arm. The order is **preregistered** as part of the assignment
   unit, so it is part of the spec the run is bound to and cannot be changed
   after seeing a result.
+- **Repetition structure and its mapping to measurements.** Each task is run
+  **k times per arm**. For each repetition `(task, arm, repetition)`, the
+  runner creates a **separate execution** with its **own session id** (one
+  database per `(task, arm, repetition)`, each with its own salt; two tests
+  pin that two repetitions yield different session ids and that the bypass
+  arm's session id has zero rows), its **own pre-arm double read**, its **own
+  settle loop**, its **own settled ledger delta**, and its **own runner-side
+  outbound record**. Each (task, arm) cell holds **k observations** — those k
+  settled deltas — and the per-arm range is `[min, max]` of them. The
+  count-agreement check in the attribution contract compares the **runner's
+  per-repetition outbound count** with the **Tamias log's per-repetition count**
+  for that repetition's session (not a cell total). A single bracket covering
+  the whole cell cannot produce k observations; each repetition is measured
+  independently.
 - **Per-task separation.** A task is *separated in favour of `active`* against
   a baseline when the arms' observed ranges do not overlap and the gap
   exceeds the floor: `baseline.max − active.min > MDD`, where **MDD is the
@@ -396,10 +407,12 @@ different widths, and both are stated so they cannot be confused:
   per-task median cost, for each arm. The decision is never made on pooled
   totals, because task-level variance dominates.
 - **Counted task.** A task is *counted* when it is in the preregistered task
-  set and none of its repetitions was `INVALID`. The excluded-fraction
-  threshold is a **run-level** rule, not a per-task removal rule: it decides
-  whether the run is `INDETERMINATE`, and it never removes an individual
-  task.
+  set and none of its arms was `INVALID`. The excluded-fraction threshold is
+  a **run-level** rule: if the fraction of excluded tasks exceeds the
+  preregistered threshold, the **run's verdict is `INDETERMINATE`** — not a
+  per-task removal rule. No individual task is removed "by the
+  invalid-task threshold"; the only per-task exclusion is that a task with
+  any invalid arm is not counted.
 - **Oracle failures block promotion; they do not remove evidence.** A task
   whose oracle failed in any arm **stays in the comparison** and **fails** the
   "oracle passed in every arm of every counted task" condition, so the run
@@ -412,31 +425,37 @@ different widths, and both are stated so they cannot be confused:
 - **The routing-coverage floor.** The floor applies **over the task set**, not
   per task: the aggregate routing coverage across the `active` arm's counted
   repetitions must be at least the preregistered floor for the run's verdict
-  to be `PROMOTE` or `DO NOT PROMOTE`; below the floor the verdict is
-  `INDETERMINATE`, because a run in which the router barely fired cannot
-  support a conclusion about the router either way. Individual tasks with
-  zero rewrites remain **counted and valid** — they are reported as "the router
-  judged no turn safe", which is a finding, and they are not excluded.
+  to be `PROMOTE` or `DO NOT PROMOTE`; **if the aggregate falls below the
+  preregistered floor, the verdict is `INDETERMINATE`**, because a run in
+  which the router barely fired cannot support a conclusion about the router
+  either way. Individual tasks with zero rewrites remain **counted and valid**
+  — they are reported as "the router judged no turn safe", which is a finding,
+  and they are not excluded. A task set below the floor does **not** remove
+  individual tasks by that rule; it makes the **run** `INDETERMINATE` (the
+  run-level threshold).
 - **The verdict**, on the counted task set, with **INDETERMINATE taking
-  precedence** over DO NOT PROMOTE whenever either of its conditions holds:
+  precedence** over `DO NOT PROMOTE` whenever either of its conditions holds:
   - `INDETERMINATE` when **any** repetition in the preregistered task set was
     `INVALID` — a dropped measurement is never reported as evidence that
     adaptive routing does not work — **or** the preregistered sample size is
-    too small to separate the two closest arms at the MDD, **or** the aggregate
-    routing coverage is below the preregistered floor. The run reports its
-    power estimate rather than a verdict it cannot support. The
-    excluded-fraction threshold is a **reporting** rule (how much of the set is
-    missing), not a verdict rule.
+    too small to separate the two closest arms at the MDD, **or** the
+    preregistered fraction of excluded tasks exceeds the threshold, **or** the
+    aggregate routing coverage is below the preregistered floor. The run
+    reports its power estimate rather than a verdict it cannot support. The
+    excluded-fraction threshold is a **run-level** rule that yields
+    `INDETERMINATE` (not a per-task removal rule).
   - `PROMOTE` only if **all** of: the median per-task cost of `active` is
     lower than the median of `static_cheap` **and** lower than the median of
     `off`; at least two thirds of the counted tasks are separated in
     `active`'s favour against **both** baselines; the oracle passed in every
     arm of every counted task; and **no task in the preregistered task set was
-    excluded as `INVALID`**.
-  - `DO NOT PROMOTE` otherwise, provided neither INDETERMINATE condition
+    excluded as `INVALID`** (impossible by the counted-task definition, but
+    stated to make the gate explicit).
+  - `DO NOT PROMOTE` otherwise, provided **neither** `INDETERMINATE` condition
     holds. **The null hypothesis was not rejected. This is a publishable
     result**, not a failure of the run, and the trivial alternative winning is
-    a finding about the category, not about the tool.
+    a finding about the category, not about the tool. The three verdicts are
+    mutually exclusive by this precedence.
 - **Ties and negatives are reported as found.** An arm whose cost is higher
   is reported as higher; the report never clamps **the comparison between
   arms** — a negative saving is a real result. This does not license a
@@ -888,6 +907,12 @@ Two releases. Every item except the last is free and verifiable offline.
    proxy mode, candidate model, and a static-cheap bypass that does not go
    through Tamias at all — and assert the arm's identity by the contract above
    before its cost is counted. Until this lands, the sweep reports no ranking.
+   **Schema change (required):** the request log gains a per-row
+   `router_mode` column (written by the proxy on every metered row). It is the
+   evidence source the `off` and `active` identity proofs rely on; a run record
+   written by the proxy at startup may also be used, but the column is the
+   stated source. The migration follows the append-only rule and a missing
+   column on an old log is handled without breaking reads.
    **The per-arm mechanism is specified, because the obvious one is a
    security regression.** The router mode is fixed at proxy construction
    (`app.state.router_mode` is set once, and the decision path reads the
@@ -1184,9 +1209,11 @@ Two releases. Every item except the last is free and verifiable offline.
    in, and **refuses a spec whose provider set is not the declared isolated
    key** — a spec that mixes BYOK providers with the measured key is rejected,
    because `byok_usage` is a separate figure and the run would not be
-   measuring what it thinks it is. Mocked tests for arm identity, alternating
-   assignment, stop rules, static bypass, ledger-attribution failure,
-   decision-rule outcomes and prompt-free artifacts.
+   measuring what it thinks it is. The spec must declare the isolated provider
+   key and the model pair; the runner refuses a spec whose provider set is not
+   that key. Mocked tests for arm identity, alternating assignment, stop rules,
+   static bypass, ledger-attribution failure, decision-rule outcomes and
+   prompt-free artifacts.
 19. **Preregister the run** before it is authorised: arms, tasks, assignment
     unit and the **alternating/randomised repetition order**, repetition factor
     `k`, task count, **the decision rule and its minimum detectable
@@ -1194,7 +1221,9 @@ Two releases. Every item except the last is free and verifiable offline.
     rule, the cost ceiling, the model pair, the oracle, the routing-coverage
     floor, **the isolated provider key and the declared provider set**, and
     the ledger isolation key — written down where the run cannot silently
-    change it.
+    change it. The spec declares the isolated provider key and the model pair,
+    and the runner **refuses** a spec whose provider set is not that key (BYOK
+    exclusion).
 20. **Release two.** Same gate as release one, plus a mocked end-to-end run of
     all three arms proving the arms differ, the identity contract holds, the
     ledger checks fire on a simulated concurrent write, the spec refusal fires
