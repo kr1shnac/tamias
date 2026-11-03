@@ -1,0 +1,3 @@
+# Test scripts mirror the OpenCode host by installing OpenTUI's Solid
+# transform before importing the plugin. See scripts/preload.ts.
+preload = ["./scripts/preload.ts"]

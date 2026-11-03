@@ -1,0 +1,844 @@
+/**
+ * Verification harness for the tamias TUI plugin.
+ *
+ * Reproduces OpenCode's plugin host behaviour end to end without restarting the
+ * editor:
+ *   1. resolve entrypoints the way `Host.resolve` does (server/tui/rpc)
+ *   2. import the tui entrypoint exactly as the TUI runtime would
+ *   3. run `setup` against a stub context and capture the panel slot + keymaps
+ *   4. render the `session.panel` contribution with OpenTUI's test renderer,
+ *      against a temporary SQLite fixture and a stub `/limits` server
+ *
+ * The checks cover the things that broke before: theme-derived colours, tier
+ * and provider columns, latest/all scoping, panel keys, narrow reflow, and the
+ * log-only degradation when tamias is not running.
+ *
+ * Run with: bun scripts/verify.ts
+ */
+
+import { Database } from "bun:sqlite";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { createSignal } from "solid-js";
+
+const PLUGIN_DIR = path.resolve(import.meta.dir, "..");
+const PLUGIN_NAME = "tamias-opencode-plugin";
+
+const MISSING_CODES = new Set([
+  "ENOENT",
+  "ENOTDIR",
+  "MODULE_NOT_FOUND",
+  "ERR_MODULE_NOT_FOUND",
+  "ERR_PACKAGE_PATH_NOT_EXPORTED",
+  "ERR_UNSUPPORTED_DIR_IMPORT",
+]);
+
+function resolveEntry(subpaths: string[]): string | undefined {
+  for (const subpath of subpaths) {
+    const specifier = subpath ? `${PLUGIN_NAME}/${subpath}` : PLUGIN_NAME;
+    try {
+      return Bun.resolveSync(specifier, PLUGIN_DIR);
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String((error as { code: unknown }).code)
+          : "";
+      if (!MISSING_CODES.has(code)) throw error;
+    }
+  }
+  return undefined;
+}
+
+interface Entrypoints {
+  server?: string;
+  tui?: string;
+  rpc?: string;
+}
+
+function resolveEntrypoints(): Entrypoints {
+  const pkg = JSON.parse(readFileSync(path.join(PLUGIN_DIR, "package.json"), "utf-8")) as {
+    name?: string;
+    exports?: unknown;
+  };
+  const named = typeof pkg.name === "string" && pkg.exports !== undefined;
+
+  const viaPackage = (subpaths: string[]) => resolveEntry(subpaths);
+  const viaFileName = (subpaths: string[]) => {
+    for (const subpath of subpaths) {
+      for (const extension of [".tsx", ".ts", ".js"]) {
+        const candidate = path.join(PLUGIN_DIR, (subpath || "index") + extension);
+        if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+      }
+    }
+    return undefined;
+  };
+
+  const entry = named ? viaPackage : viaFileName;
+  return { server: entry(["server", ""]), tui: entry(["tui"]), rpc: entry(["rpc"]) };
+}
+
+function step(name: string, ok: boolean, detail = "") {
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
+  if (!ok) process.exitCode = 1;
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// --- 1. entrypoint resolution ------------------------------------------------
+
+const entries = resolveEntrypoints();
+
+step("resolves a tui entrypoint at the package root", Boolean(entries.tui), entries.tui ?? "none");
+step("resolves no server entrypoint", !entries.server, entries.server ?? "(correct)");
+step("resolves no rpc entrypoint", !entries.rpc, entries.rpc ?? "(correct)");
+
+const tuiSpecifier = entries.tui;
+if (!tuiSpecifier) {
+  console.error("\nNo tui entrypoint found — nothing to verify.");
+  process.exit(1);
+}
+
+// --- 2. a temporary log, price sheet, and /limits stub ----------------------
+
+const TEMP = mkdtempSync(path.join("/tmp/opencode", "tamias-verify-"));
+const DB_PATH = path.join(TEMP, "requests.db");
+const PRICES_PATH = path.join(TEMP, "prices.toml");
+const NEW = "auto-aaaaaaaaaaaa";
+const OLD = "auto-bbbbbbbbbbbb";
+
+writeFileSync(
+  PRICES_PATH,
+  `date = "2026-11-02"
+simulated = false
+
+["acme/free-one"]
+input = 0.0
+output = 0.0
+cached_input = 0.0
+
+["acme/paid-two"]
+input = 1.0
+output = 2.0
+cached_input = 0.1
+
+["acme/old-three"]
+input = 2.0
+output = 3.0
+cached_input = 0.2
+`,
+  "utf-8",
+);
+
+function makeLog() {
+  const db = new Database(DB_PATH);
+  db.exec(`
+    CREATE TABLE requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      model_requested TEXT,
+      model_used TEXT,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      cached_input_tokens INTEGER,
+      cache_write_tokens INTEGER,
+      cost_usd REAL,
+      price_sheet_date TEXT,
+      latency_ms INTEGER,
+      status TEXT,
+      decision_action TEXT,
+      decision_target_model TEXT,
+      decision_reason TEXT,
+      price_sheet TEXT,
+      price_simulated INTEGER,
+      provider_cost_usd REAL,
+      generation_id TEXT,
+      project TEXT,
+      effort_requested TEXT,
+      effort_used TEXT,
+      decision_target_effort TEXT,
+      computed_list_cost_usd REAL,
+      cost_source TEXT,
+      failure_stage TEXT,
+      failure_type TEXT,
+      router_mode TEXT,
+      route TEXT
+    )
+  `);
+  const insert = db.prepare(`
+    INSERT INTO requests (
+      ts, session_id, model_requested, model_used, input_tokens, output_tokens,
+      cached_input_tokens, cache_write_tokens, cost_usd, latency_ms, status,
+      decision_action, decision_target_model, decision_reason, price_sheet,
+      price_simulated, provider_cost_usd, computed_list_cost_usd, cost_source,
+      router_mode, route
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+  `);
+
+  const rows = [
+    // The newest session: one real switch (paid prompt, free answer).
+    {
+      ts: "2026-11-03T10:03:00+00:00",
+      sid: NEW,
+      req: "acme/paid-two",
+      used: "acme/free-one",
+      input: 1_000_000,
+      output: 1_000_000,
+      cached: 0,
+      ms: 1200,
+      status: "200",
+      action: "SWITCH",
+      target: "acme/free-one",
+      reason: "cheaper capable model",
+      billed: 0,
+      listed: 0,
+      source: "computed",
+      route: "chat",
+    },
+    {
+      ts: "2026-11-03T10:02:00+00:00",
+      sid: NEW,
+      req: "acme/paid-two",
+      used: "acme/paid-two",
+      input: 1000,
+      output: 500,
+      cached: 100,
+      ms: 900,
+      status: "200",
+      action: "STAY",
+      target: null,
+      reason: "requested model is capable",
+      billed: null,
+      listed: 0.001,
+      source: "computed",
+      route: "chat",
+    },
+    {
+      ts: "2026-11-03T10:01:00+00:00",
+      sid: NEW,
+      req: "acme/free-one",
+      used: "acme/free-one",
+      input: 2000,
+      output: 300,
+      cached: 0,
+      ms: 700,
+      status: "200",
+      action: "STAY",
+      target: null,
+      reason: "requested model is capable",
+      billed: 0,
+      listed: 0,
+      source: "computed",
+      route: "chat",
+    },
+    // An older session with a model that must not appear in the latest scope.
+    {
+      ts: "2026-11-03T09:02:00+00:00",
+      sid: OLD,
+      req: "acme/old-three",
+      used: "acme/old-three",
+      input: 3000,
+      output: 700,
+      cached: 0,
+      ms: 1500,
+      status: "200",
+      action: "STAY",
+      target: null,
+      reason: "requested model is capable",
+      billed: null,
+      listed: 0.004,
+      source: "computed",
+      route: "chat",
+    },
+    {
+      ts: "2026-11-03T09:01:00+00:00",
+      sid: OLD,
+      req: "acme/paid-two",
+      used: "acme/old-three",
+      input: 5000,
+      output: 1000,
+      cached: 0,
+      ms: 1100,
+      status: "200",
+      action: "SWITCH",
+      target: "acme/old-three",
+      reason: "cheaper capable model",
+      billed: 0,
+      listed: 0,
+      source: "computed",
+      route: "chat",
+    },
+    {
+      ts: "2026-11-03T09:00:00+00:00",
+      sid: OLD,
+      req: "acme/paid-two",
+      used: "acme/paid-two",
+      input: 100,
+      output: 50,
+      cached: 0,
+      ms: 400,
+      status: "402",
+      action: "STAY",
+      target: null,
+      reason: "credit exhausted",
+      billed: null,
+      listed: null,
+      source: "unknown",
+      route: "chat",
+    },
+    // Passthrough rows are count-only and must be filtered out of the table.
+    {
+      ts: "2026-11-03T08:59:00+00:00",
+      sid: "auto-cccccccccccc",
+      req: "-",
+      used: "-",
+      input: null,
+      output: null,
+      cached: null,
+      ms: 5,
+      status: "404",
+      action: "STAY",
+      target: null,
+      reason: "passthrough",
+      billed: null,
+      listed: null,
+      source: "unknown",
+      route: "passthrough",
+    },
+  ];
+
+  for (const row of rows) {
+    insert.run(
+      row.ts,
+      row.sid,
+      row.req,
+      row.used,
+      row.input,
+      row.output,
+      row.cached,
+      0,
+      row.ms,
+      row.status,
+      row.action,
+      row.target,
+      row.reason,
+      PRICES_PATH,
+      row.billed,
+      row.listed,
+      row.source,
+      "active",
+      row.route,
+    );
+  }
+  db.close();
+}
+
+makeLog();
+
+let authorized = 0;
+let limitsCalls = 0;
+const server = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname !== "/limits") return new Response("not found", { status: 404 });
+    if (request.headers.get("authorization") !== "Bearer verify-token") {
+      return new Response("unauthorized", { status: 401 });
+    }
+    authorized += 1;
+    limitsCalls += 1;
+    const models = Number(url.searchParams.get("models") ?? "0");
+    return Response.json({
+      providers: [
+        {
+          name: "openrouter",
+          base_url: "https://openrouter.ai/api/v1",
+          configured: true,
+          key_source: "environment",
+        },
+        {
+          name: "nvidia",
+          base_url: "https://integrate.api.nvidia.com/v1",
+          configured: false,
+          key_source: "none",
+        },
+      ],
+      unconfigured: ["nvidia"],
+      cooling_down: [
+        {
+          provider: "openrouter",
+          model: "acme/paid-two",
+          status: "429",
+          reason: "rate limit",
+          remaining_seconds: 45,
+          strikes: 1,
+        },
+      ],
+      pool: {
+        considered: 5,
+        candidates: 3,
+        refused: 2,
+        listed: models > 0 ? 3 : 0,
+        truncated: false,
+        gates: { health: 2 },
+      },
+      candidates:
+        models > 0
+          ? [
+              {
+                model: "acme/free-one",
+                provider: "openrouter",
+                quality: 60,
+                cost_per_mtok: 0,
+                context_window: 128000,
+                tools: true,
+                reasoning: false,
+              },
+              {
+                model: "acme/paid-two",
+                provider: "openrouter",
+                quality: 80,
+                cost_per_mtok: 1.4,
+                context_window: 128000,
+                tools: true,
+                reasoning: true,
+              },
+              {
+                model: "acme/old-three",
+                provider: "openrouter",
+                quality: 75,
+                cost_per_mtok: 2.5,
+                context_window: 64000,
+                tools: true,
+                reasoning: false,
+              },
+            ]
+          : [],
+      refused: [],
+    });
+  },
+});
+
+process.env.TAMIAS_DB = DB_PATH;
+process.env.TAMIAS_PRICES = PRICES_PATH;
+process.env.TAMIAS_URL = `http://127.0.0.1:${server.port}`;
+process.env.TAMIAS_TOKEN = "verify-token";
+
+// --- 3. import the entrypoint like the TUI runtime does ----------------------
+
+const module = await import(pathToFileURL(tuiSpecifier).href);
+const definition = module.default;
+
+step("exports a default plugin definition", Boolean(definition), Object.keys(module).join(", ") || "default only");
+step("definition has an id", typeof definition?.id === "string", definition?.id ?? "missing");
+step("definition has a setup function", typeof definition?.setup === "function", typeof definition?.setup);
+
+// --- 4. run setup against a stub context -------------------------------------
+
+interface CapturedSlot {
+  append?: string;
+  render: (input: unknown) => unknown;
+}
+interface CapturedLayer {
+  mode?: string;
+  enabled?: boolean | (() => boolean);
+  commands?: Array<Record<string, unknown>>;
+}
+
+const slots: CapturedSlot[] = [];
+const layers: CapturedLayer[] = [];
+const toasts: Array<{ title?: string; message?: string; variant?: string }> = [];
+
+let liveRenderer:
+  | {
+      readonly width: number;
+      readonly height: number;
+      on(event: "resize", listener: (width: number, height: number) => void): unknown;
+      off(event: "resize", listener: (width: number, height: number) => void): unknown;
+    }
+  | undefined;
+
+const hostRenderer = {
+  get width() {
+    return liveRenderer?.width ?? 120;
+  },
+  get height() {
+    return liveRenderer?.height ?? 44;
+  },
+  on(event: "resize", listener: (width: number, height: number) => void) {
+    return liveRenderer?.on(event, listener);
+  },
+  off(event: "resize", listener: (width: number, height: number) => void) {
+    return liveRenderer?.off(event, listener);
+  },
+};
+
+let panel: { name: string; sessionID: string } | undefined;
+let allowOpen = true;
+const hintStore = { shown: false };
+
+const shortcutMap: Record<string, string> = {
+  "tamias.panel.close": "esc",
+  "tamias.panel.fullscreen": "f",
+  "tamias.panel.scope": "a",
+  "tamias.panel.refresh": "r",
+  "tamias.panel.previous": "k",
+  "tamias.panel.next": "j",
+  "tamias.panel.select": "enter",
+};
+
+const theme = {
+  background: {
+    base: "#000000",
+    raised: { base: "#111111", high: "#222222", max: "#333333" },
+  },
+  border: { base: "#444444" },
+  text: {
+    base: "#eeeeee",
+    muted: "#aaaaaa",
+    faint: "#666666",
+    feedback: {
+      success: { base: "#00ff00" },
+      warning: { base: "#ffaa00" },
+      error: { base: "#ff0000" },
+      info: { base: "#00aaff" },
+    },
+  },
+  hue: {
+    accent: { 500: "#00ffff" },
+    interactive: { 500: "#0000ff" },
+    neutral: { 600: "#555555" },
+  },
+};
+
+const context = {
+  options: {},
+  location: undefined,
+  app: { version: "verify", channel: "test" },
+  renderer: hostRenderer,
+  client: {},
+  data: {},
+  attention: { notify: async () => ({ ok: true, notification: false, sound: false }) },
+  theme,
+  themeMode: "dark" as const,
+  markdown: { registerCodeBlockRenderer: () => () => {} },
+  keymap: {
+    layer: (factory: () => unknown) => {
+      layers.push(factory() as CapturedLayer);
+      return () => {};
+    },
+    dispatch: () => {},
+    shortcuts: (id: string) => (shortcutMap[id] ? [shortcutMap[id]] : []),
+    commands: () => [],
+    pending: () => [],
+    active: () => [],
+    mode: { current: () => "base", push: () => () => {} },
+  },
+  storage: {
+    store: () => [{}, () => {}],
+    memory: () => [hintStore, (mutation: (draft: { shown: boolean }) => void) => mutation(hintStore)],
+  },
+  ui: {
+    dialog: { show: () => {}, set: () => {}, clear: () => {}, alert: async () => {}, confirm: async () => undefined, prompt: async () => undefined, select: async () => undefined },
+    toast: { show: (options: { title?: string; message?: string; variant?: string }) => toasts.push(options) },
+    format: { path: (value: string) => value },
+    router: {
+      register: () => () => {},
+      navigate: () => {},
+      current: () => ({ type: "session", sessionID: "ses_verify" }),
+    },
+    panel: {
+      open: (name: string) => {
+        if (!allowOpen) return false;
+        panel = { name, sessionID: "ses_verify" };
+        return true;
+      },
+      close: () => {
+        panel = undefined;
+      },
+      current: () => panel,
+    },
+    tabs: { enabled: () => false, list: () => [], open: () => false, focus: () => false, move: () => false, close: () => false },
+    model: { current: () => undefined, variant: { list: () => [], set: () => false } },
+    slot: (claim: CapturedSlot) => {
+      slots.push(claim);
+      return () => {};
+    },
+  },
+};
+
+const cleanup = await definition.setup(context as never);
+
+step("setup claims the session.panel slot", slots.length === 1 && slots[0]?.append === "session.panel", `${slots.length} slot(s)`);
+step("setup registers a global keymap layer", layers.length === 1 && layers[0]?.mode === "global", `${layers.length} layer(s)`);
+
+const globalCommands = layers[0]?.commands ?? [];
+const openCommand = globalCommands.find((command) => command.id === "tamias.dashboard.open");
+step(
+  "the global layer declares /tamias",
+  (openCommand?.slash as { name?: string } | undefined)?.name === "tamias" &&
+    openCommand?.palette === true,
+  JSON.stringify(openCommand?.slash ?? null),
+);
+
+const run = (command: Record<string, unknown> | undefined) =>
+  (command?.run as (() => void | false | Promise<void>) | undefined)?.();
+
+step(
+  "the panel slot renders nothing for another panel name",
+  slots[0]?.render({ name: "diff", sessionID: "ses_verify", width: 80, presentation: "panel", focused: true }) === null,
+);
+
+// Outside a session the host refuses to open a panel; the command must say so.
+allowOpen = false;
+await run(openCommand);
+step(
+  "opening outside a session shows a hint instead of failing silently",
+  toasts.at(-1)?.message?.includes("Open a session first") === true,
+  toasts.at(-1)?.message ?? "none",
+);
+
+allowOpen = true;
+await run(openCommand);
+step("the slash command opens the tamias panel", panel?.name === "tamias", JSON.stringify(panel ?? null));
+step(
+  "the first open explains Escape and full screen",
+  toasts.at(-1)?.message?.includes("esc closes") === true,
+  toasts.at(-1)?.message ?? "none",
+);
+const hintCount = toasts.filter((toast) => toast.message?.includes("esc closes")).length;
+
+await run(openCommand);
+step("running /tamias again closes the open panel", panel === undefined, JSON.stringify(panel ?? null));
+
+await run(openCommand);
+step(
+  "the hint is shown once per process, not on every open",
+  toasts.filter((toast) => toast.message?.includes("esc closes")).length === hintCount,
+  `${hintCount} hint(s)`,
+);
+
+// --- 5. render the panel against the fixtures -------------------------------
+
+const { createTestRenderer } = await import("@opentui/core/testing");
+const { render } = await import("@opentui/solid");
+
+function makeInput(initialWidth: number) {
+  const [width, setWidth] = createSignal(initialWidth);
+  const [presentation, setPresentation] = createSignal<"panel" | "fullscreen">("panel");
+  const [focused, setFocused] = createSignal(false);
+  const [closed, setClosed] = createSignal(0);
+  const [toggles, setToggles] = createSignal(0);
+
+  const input = {
+    name: "tamias",
+    sessionID: "ses_verify",
+    get width() {
+      return width();
+    },
+    get presentation() {
+      return presentation();
+    },
+    get focused() {
+      return focused();
+    },
+    focus: () => setFocused(true),
+    close: () => setClosed((value) => value + 1),
+    toggleFullscreen: () => {
+      setToggles((value) => value + 1);
+      setPresentation((value) => (value === "fullscreen" ? "panel" : "fullscreen"));
+    },
+  };
+
+  return { input, setWidth, setFocused, presentation, focused, closed, toggles };
+}
+
+const slot = slots[0]!;
+let mounted: Awaited<ReturnType<typeof createTestRenderer>> | undefined;
+let smallFrame = "";
+try {
+  mounted = await createTestRenderer({ width: 120, height: 44 });
+  liveRenderer = mounted.renderer as never;
+  const handle = makeInput(120);
+
+  await render(() => slot.render(handle.input) as never, mounted!.renderer);
+  await sleep(400);
+  await mounted.flush();
+  let frame = mounted.captureCharFrame();
+
+  step("the panel renders", frame.includes("tamias"), `${frame.split("\n").length} lines`);
+  step("the panel focused itself on open", handle.focused() === true);
+  step("the panel shows the newest session by default", frame.includes("latest ·"), frame.split("\n")[0] ?? "");
+  step("the panel shows the request log table", frame.includes("free-one") && frame.includes("paid-two"));
+  step("the latest scope excludes an older session's model", !frame.includes("old-three"));
+  step("the panel shows configured and unconfigured providers", frame.includes("openrout") && frame.includes("nvidia"));
+  step("the panel marks paid models with a glyph", frame.includes("$"));
+  step("the panel shows savings from the stored baseline", frame.includes("+$2.10"), "+$2.10");
+  step(
+    "a saving measured against a price-sheet baseline is marked as an estimate",
+    frame.includes("~+$2.10"),
+  );
+  step("the panel shows cooling state with a readable duration", frame.includes("back in 45s"));
+  step("the panel shows the eligible pool and refused gates", frame.includes("3/5 capable") && frame.includes("2 health"));
+  step("the panel shows the session sidebar at 120 columns", frame.includes("sessions") && frame.includes("all sessions"));
+  step("the footer makes Escape discoverable", frame.includes("esc close") && frame.includes("f fullscreen"));
+
+  // Panel-local keymap: every documented key must be a real command.
+  const panelLayer = layers.find((layer) =>
+    layer.commands?.some((command) => command.id === "tamias.panel.close"),
+  );
+  const findKey = (id: string) => panelLayer?.commands?.find((command) => command.id === id);
+  step("the panel registers its own keymap layer", Boolean(panelLayer), `layer ${layers.length - 1}`);
+  step(
+    "the panel keys are active only while the panel has focus",
+    typeof panelLayer?.enabled === "function" && panelLayer.enabled() === true,
+    String(typeof panelLayer?.enabled),
+  );
+  handle.setFocused(false);
+  await sleep(20);
+  step(
+    "losing focus disables the panel keys",
+    typeof panelLayer?.enabled === "function" && panelLayer.enabled() === false,
+  );
+  handle.input.focus();
+  await sleep(20);
+  step(
+    "focusing the panel restores its keys",
+    typeof panelLayer?.enabled === "function" && panelLayer.enabled() === true,
+  );
+  step("Escape closes the panel", findKey("tamias.panel.close")?.bind === "escape", String(findKey("tamias.panel.close")?.bind ?? "none"));
+  step("f toggles full screen", findKey("tamias.panel.fullscreen")?.bind === "f", String(findKey("tamias.panel.fullscreen")?.bind ?? "none"));
+  step("a toggles all/latest scope", findKey("tamias.panel.scope")?.bind === "a");
+  step("r refreshes both sources", findKey("tamias.panel.refresh")?.bind === "r");
+  step("j/k move the session cursor", findKey("tamias.panel.next")?.bind === "j,down" && findKey("tamias.panel.previous")?.bind === "k,up");
+  step("enter selects the session under the cursor", findKey("tamias.panel.select")?.bind === "return");
+
+  await run(findKey("tamias.panel.fullscreen"));
+  await sleep(30);
+  await mounted.flush();
+  frame = mounted.captureCharFrame();
+  step("full screen changes the footer back to split", frame.includes("f split") && handle.toggles() === 1);
+
+  await run(findKey("tamias.panel.scope"));
+  await sleep(60);
+  await mounted.flush();
+  frame = mounted.captureCharFrame();
+  step("a shows every recent session", frame.includes("old-three") && frame.includes("all sessions"));
+
+  await run(findKey("tamias.panel.next"));
+  await run(findKey("tamias.panel.select"));
+  await sleep(60);
+  await mounted.flush();
+  frame = mounted.captureCharFrame();
+  step("j + enter pins the selected session", !frame.includes("old-three"));
+
+  await run(findKey("tamias.panel.refresh"));
+  await sleep(150);
+  await mounted.flush();
+
+  await run(findKey("tamias.panel.close"));
+  step("the close command calls the host close", handle.closed() === 1);
+
+  // Reflow: the host emits resize and republishes PanelInput.width; the panel
+  // must drop the sidebar and fit instead of keeping its mount-time width.
+  handle.setWidth(80);
+  mounted.resize(80, 30);
+  await sleep(300);
+  await mounted.flush();
+  smallFrame = mounted.captureCharFrame();
+  const lines = smallFrame.split("\n");
+  step(
+    "the panel reflows at 80 columns",
+    lines.every((line) => line.length <= 80) && smallFrame.includes("tamias"),
+    `widest ${Math.max(...lines.map((line) => line.length))}`,
+  );
+  step("the sidebar is dropped before the table at 80 columns", !smallFrame.includes("sessions"));
+  step("the table keeps the used model at 80 columns", smallFrame.includes("free-one"));
+
+  if (process.env.TAMIAS_VERIFY_DUMP) {
+    console.log("\n--- panel at 120x44 ---");
+    console.log(frame);
+    console.log("--- panel at 80x30 ---");
+    console.log(smallFrame);
+    console.log("--- end ---\n");
+  }
+} catch (error) {
+  step("the panel renders through OpenTUI", false, error instanceof Error ? error.message : String(error));
+}
+
+// --- 6. unit checks that do not need a live host ----------------------------
+
+const { columnsFor } = await import("../src/components/RequestTable");
+const wideKeys = columnsFor(110).map((column) => column.key);
+const narrowKeys = columnsFor(40).map((column) => column.key);
+step(
+  "the table keeps tier, provider, cost and savings when there is room",
+  ["tier", "model", "provider", "cost", "saved"].every((key) => wideKeys.includes(key)),
+  wideKeys.join(","),
+);
+step(
+  "the table drops provider before the model and status",
+  !narrowKeys.includes("provider") && narrowKeys.includes("model") && narrowKeys.includes("status"),
+  narrowKeys.join(","),
+);
+
+const { paletteFor } = await import("../src/utils/palette");
+const mapped = paletteFor(theme, "dark");
+step(
+  "the palette reads background, text and feedback from the host theme",
+  String(mapped.bg) === "#000000" &&
+    String(mapped.text) === "#eeeeee" &&
+    String(mapped.good) === "#00ff00" &&
+    String(mapped.accent) === "#00ffff",
+);
+step(
+  "a host without a theme still gets a complete light/dark fallback",
+  String(paletteFor(undefined, "light").bg) !== String(paletteFor(undefined, "dark").bg),
+);
+
+const { parsePriceSheet, tierFor } = await import("../src/utils/priceSheet");
+const sheet = parsePriceSheet(readFileSync(PRICES_PATH, "utf-8"));
+step("a zero-rated model is free", tierFor("acme/free-one", sheet) === "free");
+step("a positive-rated model is paid", tierFor("acme/paid-two", sheet) === "paid");
+step("an unquoted model is unknown, not free", tierFor("acme/missing", sheet) === "unknown");
+
+// --- 7. the log-only degradation when tamias is not running -----------------
+
+try {
+  server.stop(true);
+  process.env.TAMIAS_URL = "http://127.0.0.1:1";
+  const offline = await createTestRenderer({ width: 100, height: 34 });
+  liveRenderer = offline.renderer as never;
+  const handle = makeInput(100);
+  await render(() => slot.render(handle.input) as never, offline.renderer);
+  await sleep(350);
+  await offline.flush();
+  const frame = offline.captureCharFrame();
+  step(
+    "the panel degrades to the log when /limits is unreachable",
+    frame.includes("log only") && frame.includes("free-one"),
+    frame.split("\n")[0] ?? "",
+  );
+  step("the offline panel does not invent provider data", !frame.includes("openrout"));
+  await offline.dispose();
+} catch (error) {
+  step("the panel degrades to the log when /limits is unreachable", false, error instanceof Error ? error.message : String(error));
+}
+
+step("the plugin authenticated to /limits", authorized > 0, `${authorized} authorized call(s)`);
+step("the plugin polled /limits", limitsCalls > 0, `${limitsCalls} call(s)`);
+
+if (mounted) {
+  await mounted.dispose();
+}
+if (typeof cleanup === "function") cleanup();
+rmSync(TEMP, { recursive: true, force: true });
