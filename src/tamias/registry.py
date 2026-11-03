@@ -20,6 +20,12 @@ The catalogue is TOML so a deployment can pin its own without code changes:
     reasoning      = true
     efforts        = ["low", "medium", "high"]
     modality       = "text"
+    quality        = 72
+
+``quality`` is an optional 0-100 capability score.  Routing ranks models by cost
+and uses this score as the floor that stops a cheap model from taking a step
+that needs a strong one.  When it is absent the score is derived from the
+capability facts above (see :func:`tamias.candidates.quality_of`).
 
 The default path is ``$TAMIAS_REGISTRY`` when set, else
 ``~/.tamias/models.toml``. A missing default file yields an empty registry (not
@@ -60,6 +66,8 @@ class ModelInfo:
     reasoning: bool = False
     efforts: tuple[str, ...] = ()
     modality: str = "text"
+    quality: float | None = None
+    """Declared 0-100 capability score, or ``None`` to derive one."""
 
 
 class Registry:
@@ -142,6 +150,7 @@ _MODEL_KEYS = (
     "reasoning",
     "efforts",
     "modality",
+    "quality",
 )
 
 
@@ -210,6 +219,14 @@ def _parse_model(entry: object, index: int, seen: set[str]) -> ModelInfo:
     if not isinstance(modality, str) or not modality.strip():
         raise RegistryError(f"{where}: 'modality' must be a non-empty string")
 
+    quality = entry.get("quality")
+    if quality is not None:
+        if isinstance(quality, bool) or not isinstance(quality, (int, float)):
+            raise RegistryError(f"{where}: 'quality' must be a number from 0 to 100")
+        if not 0 <= float(quality) <= 100:
+            raise RegistryError(f"{where}: 'quality' must be between 0 and 100")
+        quality = float(quality)
+
     seen.add(model_id)
 
     return ModelInfo(
@@ -220,6 +237,7 @@ def _parse_model(entry: object, index: int, seen: set[str]) -> ModelInfo:
         reasoning=reasoning,
         efforts=tuple(efforts),
         modality=modality.strip(),
+        quality=quality,
     )
 
 

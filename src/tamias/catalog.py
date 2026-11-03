@@ -1,0 +1,177 @@
+"""Turn OpenCode's model catalogue into a capability registry.
+
+OpenCode publishes two things on the public web:
+
+- ``https://opencode.ai/zen/v1/models`` -- the ids that are live right now
+  (ids only, no capabilities, no rates);
+- ``https://models.dev/api.json`` -- capability metadata per model, including
+  ``tool_call`` and the context limit.
+
+Neither is a price source.  This module joins them so active routing can refuse
+a model that cannot carry a tool call using **published** capability data rather
+than a guess.  A model missing from either feed is left out of the registry,
+which keeps the router's fail-closed gate honest.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from tamias.registry import ModelInfo
+
+__all__ = [
+    "MODELS_DEV_URL",
+    "ZEN_PROVIDER",
+    "RegistryBuild",
+    "build_zen_registry",
+    "fetch_catalog",
+    "render_registry",
+]
+
+MODELS_DEV_URL = "https://models.dev/api.json"
+ZEN_PROVIDER = "opencode"
+
+
+@dataclass(frozen=True)
+class RegistryBuild:
+    """The models that passed every check, plus why the rest did not.
+
+    The rejects are names, not errors: a model with no published capability is
+    an expected outcome, and the caller prints the counts so the user can see
+    that nothing was invented.
+    """
+
+    models: tuple[ModelInfo, ...] = ()
+    missing_capability: tuple[str, ...] = ()
+    not_tool_capable: tuple[str, ...] = ()
+
+
+def fetch_catalog(opener: Any, url: str = MODELS_DEV_URL) -> dict[str, Any]:
+    """Fetch the models.dev catalogue through ``opener``.
+
+    The opener is an argument for the same reason as in
+    :mod:`tamias.pricing_fetch`: no test should have to touch the network.
+    """
+    response = opener.open(url)
+    try:
+        raw = response.read()
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("model catalogue is not a JSON object")
+    return payload
+
+
+def _context_window(entry: Mapping[str, Any]) -> int | None:
+    limit = entry.get("limit")
+    if not isinstance(limit, dict):
+        return None
+    context = limit.get("context")
+    if isinstance(context, bool) or not isinstance(context, int) or context < 1:
+        return None
+    return context
+
+
+def build_zen_registry(
+    catalog: Mapping[str, Any],
+    model_ids: Iterable[str],
+    provider: str = ZEN_PROVIDER,
+) -> RegistryBuild:
+    """Join live ids to published capabilities, keeping only tool-capable models.
+
+    A model is included only when models.dev lists it under ``provider``, marks
+    ``tool_call`` true, and publishes a positive context window.  Everything
+    else is reported by name rather than silently dropped.
+    """
+    provider_entry = catalog.get(provider)
+    if not isinstance(provider_entry, dict):
+        raise ValueError(f"catalogue has no {provider!r} provider")
+    entries = provider_entry.get("models")
+    if not isinstance(entries, dict):
+        raise ValueError(f"catalogue {provider!r} has no models table")
+
+    models: list[ModelInfo] = []
+    missing: list[str] = []
+    no_tools: list[str] = []
+    for model_id in sorted(set(model_ids)):
+        entry = entries.get(model_id)
+        if not isinstance(entry, dict):
+            missing.append(model_id)
+            continue
+        if entry.get("tool_call") is not True:
+            no_tools.append(model_id)
+            continue
+        context = _context_window(entry)
+        if context is None:
+            missing.append(model_id)
+            continue
+        models.append(
+            ModelInfo(
+                id=model_id,
+                provider=provider,
+                context_window=context,
+                tools=True,
+                # models.dev does not publish OpenCode's effort vocabulary, so
+                # reasoning is recorded but no effort levels are asserted.
+                reasoning=entry.get("reasoning") is True,
+                efforts=(),
+                modality="text",
+            )
+        )
+    return RegistryBuild(
+        models=tuple(models),
+        missing_capability=tuple(missing),
+        not_tool_capable=tuple(no_tools),
+    )
+
+
+def _string(value: str) -> str:
+    """Quote a string for TOML; JSON's escapes are a subset of TOML's."""
+    return json.dumps(value, ensure_ascii=True)
+
+
+def render_registry(
+    models: Iterable[ModelInfo],
+    fetched_at: str,
+    zen_url: str,
+    catalog_url: str,
+) -> str:
+    """Render a registry TOML the existing loader reads.
+
+    The header names both feeds and the fetch time, so a reader can tell a
+    published capability from an operator override.
+    """
+    if not isinstance(fetched_at, str) or not fetched_at:
+        raise ValueError("fetched_at must be a non-empty timestamp string")
+    lines = [
+        "# Capability registry generated by `tamias registry zen`.",
+        "# tools = true only where models.dev publishes tool_call = true.",
+        "# Regenerate rather than hand-editing when the model list changes.",
+        "",
+        f"# fetched_at = {_string(fetched_at)}",
+        f"# zen_models = {_string(zen_url)}",
+        f"# capability_source = {_string(catalog_url)}",
+    ]
+    for model in sorted(models, key=lambda item: item.id):
+        lines.extend(
+            (
+                "",
+                "[[models]]",
+                f"id = {_string(model.id)}",
+                f"provider = {_string(model.provider)}",
+                f"context_window = {model.context_window}",
+                f"tools = {'true' if model.tools else 'false'}",
+                f"reasoning = {'true' if model.reasoning else 'false'}",
+                f"modality = {_string(model.modality)}",
+            )
+        )
+        if model.efforts:
+            rendered = ", ".join(_string(effort) for effort in model.efforts)
+            lines.append(f"efforts = [{rendered}]")
+    return "\n".join(lines) + "\n"
