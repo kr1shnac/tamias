@@ -46,17 +46,72 @@ Signing company policy manifests needs the optional `manifest` extra:
 pip install 'tamias[manifest]'
 ```
 
-## 60-second quickstart
+## Use it with OpenCode
 
-Start the proxy in front of your provider, in the default **shadow** mode, then
-point your agent's base URL at it.
+OpenCode is the first-class client. It speaks `/v1/chat/completions`, the route
+tamias meters, routes, and rewrites, and Zen publishes a set of free models you
+can route mechanical work to.
 
 ```sh
-tamias prices fetch --out prices.toml
-tamias doctor --prices prices.toml
-tamias serve --upstream https://your-provider.example \
-             --prices prices.toml --db requests.db
+pip install tamias
+tamias prices zen --out prices.toml     # free Zen models priced at exactly $0; paid models stay UNKNOWN
+tamias registry zen --out models.toml   # tools=true only where models.dev publishes tool_call
+tamias serve \
+  --provider opencode \
+  --prices prices.toml \
+  --db requests.db \
+  --registry models.toml \
+  --router-mode active \
+  --min-gap 0 \
+  --cheap-model deepseek-v4.1-flash-free
 ```
+
+`--cheap-model` also takes a comma-separated pool
+(`--cheap-model deepseek-v4.1-flash-free,big-pickle`). Each session stays on one
+member and different sessions spread across the pool; `active` validates every
+member against the registry and price sheet at startup.
+
+Then point OpenCode at `http://127.0.0.1:8000/v1` (the exact `opencode.json`
+block is in [`docs/OPENCODE.md`](docs/OPENCODE.md#4-point-opencode-at-the-proxy)),
+install the slash command, and use OpenCode normally:
+
+```sh
+tamias opencode install --db requests.db --prices prices.toml \
+  --registry models.toml --cheap-model deepseek-v4.1-flash-free
+# restart OpenCode, then type: /tamias
+```
+
+`/tamias` shows requests, tokens, cost (or why it is `UNKNOWN`), how many
+requests were routed, and the saving. The proxy runs in the background; the
+foreground is just OpenCode. On Linux, `tamias service install ... --start`
+writes and starts a systemd user unit, so the proxy comes back after login
+without a terminal; see
+[`docs/OPENCODE.md`](docs/OPENCODE.md#6-run-it-in-the-background).
+
+**What routing can and cannot save.** A switch only saves money when the
+requested model is paid and the target is free or cheaper. If you are already on
+a free model, there is nothing to save — tamias will honestly report `$0.00`
+saved and show you the token counts. The router moves mechanical turns (file
+reads, shell lookups) and leaves planning and error recovery on the model you
+chose.
+
+For the paid models you care about, add their per-million-token rates to
+`prices.toml` from Zen's pricing page; a rate you leave out stays `UNKNOWN`
+rather than becoming a guessed number. `tamias report` always prints exact token
+counts, so you have an accurate parameter even when the dollar figure is
+unknown.
+
+## Try it without credentials
+
+`tamias demo` runs one request through the proxy against a bundled mock
+upstream, writes a local SQLite log, and prints a receipt — zero keys, zero
+network, zero config:
+
+```sh
+tamias demo
+```
+
+Re-run it as often as you like; each run writes `.tamias-demo/demo.db`.
 
 The upstream is a base URL, **without** `/v1/chat/completions`. Then set the
 agent's base URL — the one env var your client already respects:
@@ -69,7 +124,6 @@ Run the agent, then read the log:
 
 ```sh
 tamias report --db requests.db --prices prices.toml
-tamias dashboard --db requests.db --prices prices.toml
 ```
 
 Add `--inr-rate 85` to `report` to also show each amount in rupees at that fixed
@@ -77,7 +131,8 @@ rate — a display conversion, not a billed figure. The dollar amount stays
 authoritative.
 
 `--upstream` defaults to `$TAMIAS_UPSTREAM`, else to the `--provider` preset
-(`openrouter`, `openai`, `ollama`), else to `https://openrouter.ai/api`.
+(`openrouter`, `openai`, `opencode`, `ollama`), else to
+`https://openrouter.ai/api`.
 `--prices` defaults to `./prices.toml`, then `~/.tamias/prices.toml`, then a
 dated OpenRouter snapshot bundled in the package. To run a single command
 through a temporary proxy instead:
@@ -86,29 +141,40 @@ through a temporary proxy instead:
 tamias run --prices prices.toml -- your-agent
 ```
 
+To compare what Tamias computed against what your provider actually billed, run
+`tamias reconcile` (see [`docs/RECONCILE.md`](docs/RECONCILE.md)).
+
 ## How it works
 
 ![Component architecture: proxy, router, upstream client, log, and adapters](https://raw.githubusercontent.com/kr1shnac/tamias/master/docs/diagrams/architecture.svg)
 
-One request, end to end: the proxy parses it, the **router** records a `STAY` or
-`SWITCH` decision, the **upstream client** forwards it (rewriting the model only
-in `active` mode), and one row is written to the **SQLite log**. The provider's
-reply is returned to the agent unchanged. The `.mmd` sources and rendered SVG
-for every diagram live in
+One request, end to end: the proxy parses it, the **routing gates** decide which
+of the configured providers may serve the named model, the **router** records a
+`STAY` or `SWITCH` decision, the **upstream client** forwards it (rewriting the
+model only in `active` mode), and one row is written to the **SQLite log**. The
+provider's reply is returned to the agent unchanged. The `.mmd` sources and
+rendered SVG for every diagram live in
 [`docs/diagrams/`](https://github.com/kr1shnac/tamias/tree/master/docs/diagrams).
+
+Tamias sits **on top of** providers (OpenRouter, NVIDIA, OpenAI, Groq, a local
+Ollama, anything OpenAI-compatible); it is not a provider itself. Adding one is
+a config entry, and credentials stay where they already live — an environment
+variable or a secret-manager command, never inside tamias. See
+[`docs/PROVIDERS.md`](docs/PROVIDERS.md).
 
 ## Modes
 
 | Mode | Behaviour |
 | --- | --- |
 | `off` | Forward unchanged; record no decision. |
-| `shadow` (default) | Record the decision the router *would* make; forward unchanged. |
-| `active` | Rewrite the request to `--cheap-model` when the rule says `SWITCH`. Opt-in. |
+| `shadow` (default) | Record the decision the router *would* make; forward unchanged (a requested model the provider has locked out still switches). |
+| `active` | Rewrite the request to a model that passed the routing gates when the rule says `SWITCH`. Opt-in. |
 
-`off` and `shadow` never change what the provider runs. `active` is **fail-closed**:
-the process refuses to start unless the target model is named, listed as
-tool-capable in `--registry`, and priced by the sheet. A switch the caller's key
-disallows is suppressed rather than refused. See
+`off` and `shadow` never change what the provider runs for cost reasons.
+`active` is **fail-closed**: the process refuses to start unless the gates admit
+at least one target that is listed in `--registry`, marked tool-capable there,
+priced by the sheet, and served by a configured provider. A switch the caller's
+key disallows is suppressed rather than refused. See
 [`docs/ROUTING.md`](https://github.com/kr1shnac/tamias/blob/master/docs/ROUTING.md).
 
 ## Supported agents and routes
@@ -174,11 +240,12 @@ for what has and has not been verified.
 | Full command-line reference | [`docs/CLI.md`](https://github.com/kr1shnac/tamias/blob/master/docs/CLI.md) |
 | Architecture | [`docs/ARCHITECTURE.md`](https://github.com/kr1shnac/tamias/blob/master/docs/ARCHITECTURE.md) |
 | Routing rules and modes | [`docs/ROUTING.md`](https://github.com/kr1shnac/tamias/blob/master/docs/ROUTING.md) |
+| Multiple providers, discovery and limits | [`docs/PROVIDERS.md`](https://github.com/kr1shnac/tamias/blob/master/docs/PROVIDERS.md) |
 | Pricing and `UNKNOWN` costs | [`docs/PRICING.md`](https://github.com/kr1shnac/tamias/blob/master/docs/PRICING.md) |
 | Per-key budgets and rate limits | [`docs/BUDGET.md`](https://github.com/kr1shnac/tamias/blob/master/docs/BUDGET.md) |
+| Reconcile computed vs billed cost | [`docs/RECONCILE.md`](https://github.com/kr1shnac/tamias/blob/master/docs/RECONCILE.md) |
 | Company keys and model allowlists | [`docs/KEYS.md`](https://github.com/kr1shnac/tamias/blob/master/docs/KEYS.md) |
 | Signed policy manifests | [`docs/MANIFEST.md`](https://github.com/kr1shnac/tamias/blob/master/docs/MANIFEST.md) |
-| Local web dashboard | [`docs/DASHBOARD.md`](https://github.com/kr1shnac/tamias/blob/master/docs/DASHBOARD.md) |
 | OpenCode integration | [`docs/OPENCODE.md`](https://github.com/kr1shnac/tamias/blob/master/docs/OPENCODE.md) |
 | OpenRouter integration | [`docs/OPENROUTER.md`](https://github.com/kr1shnac/tamias/blob/master/docs/OPENROUTER.md) |
 | Client libraries | [`docs/CLIENTS.md`](https://github.com/kr1shnac/tamias/blob/master/docs/CLIENTS.md) |

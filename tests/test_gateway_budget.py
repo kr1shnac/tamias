@@ -9,6 +9,7 @@ untouched, and settlement charges what was really spent rather than the ceiling.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from decimal import Decimal
 from typing import Any
@@ -517,5 +518,82 @@ async def test_the_allowlist_still_applies_to_a_limited_key(
         async with as_client(app) as client:
             refused = await post(client, CHAT, token, STRONG)
         assert refused.status_code == 403
+    finally:
+        keys.close()
+
+
+async def test_one_request_may_overshoot_the_limit_by_at_most_one_ceiling(
+    upstream: FastAPI, store: FakeStore
+) -> None:
+    """The documented bound, exercised: `settled - ceiling`.
+
+    The reserve is a flat ceiling, so a request whose real cost exceeds it
+    settles for more than the limit allowed. That overshoot is bounded by that
+    one request and the key stops afterwards. The README states this; this test
+    keeps the statement executable.
+    """
+    expensive = PriceSheet(
+        date="2026-10-15",
+        models={CHEAP: ModelPrice(input=1000.0, output=1000.0)},
+    )
+    keys = KeyStore(":memory:")
+    try:
+        key, token = keys.issue(label="alice", models=[CHEAP], budget_usd="0.0015")
+        app = build_app(upstream, store, expensive, keys, ceiling="0.001")
+        async with as_client(app) as client:
+            allowed = await post(client, CHAT, token, CHEAP)
+            assert allowed.status_code == 200
+            refused = await post(client, CHAT, token, CHEAP)
+            assert refused.status_code == 402
+        settled = app.state.budget_ledger.spend_micros(key.key_id, EPOCH)
+        # 5 prompt tokens at $1000/M + 2 completion tokens at $1000/M = $0.007.
+        assert settled == 7000
+        assert settled - to_micros(Decimal("0.001")) == 6000
+        # The ceiling bounds the overshoot, and the request after it is refused.
+        assert len(store.rows) == 1
+    finally:
+        keys.close()
+
+
+async def test_a_concurrent_burst_cannot_slip_past_the_cap(
+    store: FakeStore, sheet: PriceSheet
+) -> None:
+    """Reservation happens before forwarding, so only one of two overlapping
+    requests fits under a one-ceiling budget. Without reserve-then-settle both
+    would read the same pre-spend balance and both would be forwarded."""
+    slow = FastAPI()
+
+    @slow.post("/v1/chat/completions")
+    async def chat(request: Request) -> Response:
+        await asyncio.sleep(0.05)
+        body = json.loads(await request.body())
+        return JSONResponse(
+            {
+                "id": "chat-slow",
+                "object": "chat.completion",
+                "model": body.get("model"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+            }
+        )
+
+    keys = KeyStore(":memory:")
+    try:
+        _, token = keys.issue(label="alice", models=[CHEAP], budget_usd="0.25")
+        app = build_app(slow, store, sheet, keys)
+        async with as_client(app) as client:
+            first, second = await asyncio.gather(
+                post(client, CHAT, token, CHEAP),
+                post(client, CHAT, token, CHEAP),
+            )
+        statuses = sorted((first.status_code, second.status_code))
+        assert statuses == [200, 402]
+        assert len(store.rows) == 1
     finally:
         keys.close()

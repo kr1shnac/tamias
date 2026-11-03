@@ -243,8 +243,9 @@ def test_report_labels_the_saving_as_an_estimate(
     line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
     assert "estimate; cache-aware, can be negative; not measured" in line
     assert money(out, "estimated saving") == pytest.approx(2 * BIG_SAVING, abs=1e-6)
-    # The assumed cheap model and the sheet date are surfaced, not hidden.
-    assert "cheap model assumed: local-model" in out
+    # Rows without a logged target disclose the sheet-cheapest basis.
+    assert "switch target: unknown for 2 switched row(s)" in out
+    assert "sheet-cheapest local-model" in out
     assert SHEET_DATE in out
 
 
@@ -277,7 +278,7 @@ def test_report_treats_a_zero_rate_as_free_not_unknown(
     db = str(tmp_path / "log.db")
     log(db, BIG, BIG_ON_STRONG, "SWITCH")
     _, out = run(capsys, db, write_prices(tmp_path, FREE_SHEET))
-    assert "cheap model assumed: free-model" in out
+    assert "sheet-cheapest free-model" in out
     assert money(out, "estimated saving") == pytest.approx(BIG_WARM_ON_STRONG, abs=1e-6)
     assert "not priced" not in out
 
@@ -477,7 +478,7 @@ def test_report_shows_a_negative_saving_when_a_switch_would_have_lost(
     code, out = run(capsys, db, str(prices))
 
     assert code == 0
-    assert "cheap model assumed: cold-runner" in out
+    assert "sheet-cheapest cold-runner" in out
     line = next(x for x in out.splitlines() if x.startswith("estimated saving:"))
     # warm stay 0.10 vs the switch's 5.00 to re-ingest the prompt.
     assert "-$4.9000" in line, line
@@ -778,6 +779,40 @@ def test_the_shipped_simulated_sheet_loads_and_declares_itself_simulated() -> No
 
 def test_a_real_sheet_is_not_simulated(tmp_path: Path) -> None:
     assert load_price_sheet(write_prices(tmp_path)).simulated is False
+
+
+def test_report_shows_a_token_ledger_when_dollars_are_unknown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Tokens are exact when prices are not, so they are always shown."""
+    db = str(tmp_path / "log.db")
+    log(db, BIG, None, "STAY")
+    log(db, SMALL, 0.0, "STAY", model_used="free-model")
+    code, out = run(capsys, db, write_prices(tmp_path))
+    assert code == 0
+    assert (
+        "tokens: 12,000 input / 2,500 output / 4,000 cached "
+        "(2 of 2 requests report counts)" in out
+    )
+    assert "tokens on $0-priced models: 2,000 input / 500 output" in out
+    assert (
+        "tokens with UNKNOWN cost: 10,000 input / 2,000 output "
+        "(token counts are exact; no dollar figure was computed)" in out
+    )
+    assert (
+        "tokens routed to a different model: 2,000 input / 500 output "
+        "(1 of 2 requests)" in out
+    )
+
+
+def test_report_omits_the_token_ledger_when_no_row_has_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = str(tmp_path / "log.db")
+    log(db, Usage(None, None, None, None), None, "STAY")
+    code, out = run(capsys, db, write_prices(tmp_path))
+    assert code == 0
+    assert "tokens:" not in out
 
 
 def test_no_subcommand_prints_usage() -> None:

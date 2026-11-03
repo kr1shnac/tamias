@@ -54,6 +54,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
@@ -64,17 +65,20 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import (
     anthropic_adapter,
+    candidates,
     pricing,
     responses_adapter,
     router,
     session,
 )
+from tamias import limits as limits_mod
 from tamias import manifest as manifest_mod
+from tamias import providers as providers_mod
 from tamias import sse as sse_module
 from tamias.budget import (
     CURRENT_KEY_ID,
@@ -252,6 +256,51 @@ def upstream_timeout_seconds() -> float:
     return timeout if timeout > 0 else DEFAULT_UPSTREAM_TIMEOUT_SECONDS
 
 
+#: The longest cooldown a provider hint may impose.  A provider is free to ask
+#: for a day off; it is not free to park a model forever because it sent a
+#: malformed or epoch-valued header.
+MAX_RETRY_AFTER_SECONDS = 86_400
+
+# ``GET /limits`` is polled by the dashboard, so its model lists are capped by
+# default while the counts stay complete.  A discovered catalogue can hold
+# hundreds of models; listing all of them once a second would cost more than
+# the requests the endpoint reports on.
+DEFAULT_LIMITS_MODELS = 25
+MAX_LIMITS_MODELS = 500
+
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
+
+
+def _duration_seconds(text: str) -> float | None:
+    """Seconds from a Go-style duration (``6m0s``) or a bare number."""
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    parts = _DURATION_PART.findall(text)
+    if not parts or "".join(value + unit for value, unit in parts) != text:
+        return None
+    scale = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    return sum(float(value) * scale[unit] for value, unit in parts)
+
+
+def _numeric_retry_after(headers: httpx.Headers) -> float | None:
+    """A cooldown from the rate-limit headers providers send instead of ``Retry-After``.
+
+    Only values that are unambiguously a wait are used.  An epoch-valued
+    ``x-ratelimit-reset`` is not guessed at: turning it into a wait needs the
+    server's clock, and a wrong guess would park a healthy model.
+    """
+    for name in ("x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"):
+        seconds = _duration_seconds(headers.get(name, ""))
+        if seconds is not None and 0 < seconds <= MAX_RETRY_AFTER_SECONDS:
+            return seconds
+    return None
+
+
 def with_usage_included(body: dict[str, Any]) -> bytes:
     """Re-encode a streaming body asking the upstream for a usage chunk."""
     options = body.get("stream_options")
@@ -317,6 +366,29 @@ def _forbidden_model(model: str, allowed: tuple[str, ...]) -> JSONResponse:
             }
         },
         status_code=403,
+    )
+
+
+def _unknown_provider(model: str, providers: tuple[str, ...]) -> JSONResponse:
+    """400 for a model no configured provider serves.
+
+    Refusing is the point: forwarding an unclaimed model to whichever upstream
+    happened to be last would spend another provider's credit under a model id
+    that provider does not offer.
+    """
+    known = ", ".join(providers) or "none"
+    return JSONResponse(
+        {
+            "error": {
+                "message": (
+                    f"no configured provider serves model {model!r} "
+                    f"(providers: {known}). Add the provider to ~/.tamias/providers.toml "
+                    "or the model to ~/.tamias/models.toml."
+                ),
+                "type": "invalid_request_error",
+            }
+        },
+        status_code=400,
     )
 
 
@@ -639,6 +711,54 @@ class SessionTable:
         return session_id in self._records
 
 
+def _verify_active_universe(
+    routing: RouterConfig,
+    capabilities: Registry,
+    sheet: PriceSheet,
+    catalogue: providers_mod.ProviderCatalogue,
+    limits: limits_mod.LimitLedger,
+) -> None:
+    """Refuse to start active routing with nothing it is allowed to switch to.
+
+    A provider catalogue makes the pool dynamic, so there is no fixed target list
+    to check.  The same four conditions are still enforced -- registry membership,
+    tool support, a known price, a reachable provider -- but they are enforced per
+    request by the three routing gates.  This start-up check proves the gates can
+    admit *something* at all, so active mode cannot come up with an empty pool and
+    a promise it can never keep.
+    """
+    pool = candidates.build_pool(
+        registry=capabilities,
+        sheet=sheet,
+        catalogue=catalogue,
+        limits=limits,
+        needs=candidates.Needs(tools=True),
+        require_priced=True,
+    )
+    if not pool:
+        raise ValueError(
+            "active routing has no model that passes the routing gates: "
+            f"{pool.reason()}. Each candidate must be in the registry, support "
+            "tool calls, be priced by the sheet, and belong to a provider with a "
+            "credential."
+        )
+    if routing.pool:
+        allowed = candidates.pool_for_models(
+            routing.pool,
+            registry=capabilities,
+            sheet=sheet,
+            catalogue=catalogue,
+            limits=limits,
+            needs=candidates.Needs(tools=True),
+            require_priced=True,
+        )
+        if not allowed:
+            raise ValueError(
+                f"active routing names a cheap pool ({', '.join(routing.pool)}) where "
+                f"no member passes the routing gates: {allowed.reason()}"
+            )
+
+
 def _verify_active_target(
     routing: RouterConfig, capabilities: Registry, sheet: PriceSheet
 ) -> None:
@@ -659,32 +779,36 @@ def _verify_active_target(
     * **an unpriced target.**  Cost arithmetic that cannot price a request
       settles as UNKNOWN, which would charge a budget the reservation ceiling
       and leave the run's own cost unreportable.
+
+    Every member of the pool is checked, not just the primary: a pool is only a
+    safety feature if every model it can pick is safe.
     """
-    target = routing.cheap_model
-    if not target:
+    targets = routing.pool
+    if not targets:
         raise ValueError(
             "active routing needs a cheap model: pass RouterConfig(cheap_model=...) "
             "or --cheap-model MODEL"
         )
-    info = capabilities.get(target)
-    if info is None:
-        raise ValueError(
-            f"active routing target {target!r} is not in the capability registry: "
-            "add it to the registry file (--registry) so the router cannot pick a "
-            "model the deployment has not vouched for"
-        )
-    if not info.tools:
-        raise ValueError(
-            f"active routing target {target!r} does not support tool calls "
-            "(its registry entry has tools = false); every routed step is a "
-            "tool-loop step, so the target must be able to continue the loop"
-        )
-    if not pricing.can_price(target, sheet):
-        raise ValueError(
-            f"active routing target {target!r} is not priced by the price sheet: "
-            "an unpriced request settles as UNKNOWN, which a budget cannot "
-            "enforce and a report cannot price"
-        )
+    for target in targets:
+        info = capabilities.get(target)
+        if info is None:
+            raise ValueError(
+                f"active routing target {target!r} is not in the capability registry: "
+                "add it to the registry file (--registry) so the router cannot pick a "
+                "model the deployment has not vouched for"
+            )
+        if not info.tools:
+            raise ValueError(
+                f"active routing target {target!r} does not support tool calls "
+                "(its registry entry has tools = false); every routed step is a "
+                "tool-loop step, so the target must be able to continue the loop"
+            )
+        if not pricing.can_price(target, sheet):
+            raise ValueError(
+                f"active routing target {target!r} is not priced by the price sheet: "
+                "an unpriced request settles as UNKNOWN, which a budget cannot "
+                "enforce and a report cannot price"
+            )
 
 
 def create_app(
@@ -709,6 +833,8 @@ def create_app(
     manifest_key: object = None,
     trusted_hosts: object = None,
     enforce_host: bool = False,
+    providers: providers_mod.ProviderCatalogue | None = None,
+    limits: limits_mod.LimitLedger | None = None,
 ) -> FastAPI:
     if router_mode not in ("shadow", "off", "active"):
         raise ValueError(
@@ -721,6 +847,8 @@ def create_app(
     timeout = upstream_timeout_seconds()
     client = httpx.AsyncClient(timeout=timeout, transport=transport)
     routing = router.DEFAULT_CONFIG if config is None else config
+    catalogue = providers if providers is not None else providers_mod.empty_catalogue()
+    limit_ledger = limits if limits is not None else limits_mod.empty_ledger()
     if effort_mode != "off" and not routing.effort_policy:
         # The mode is the operator's switch; the config only shapes the
         # policy.  meter and apply both need the policy on so decide()
@@ -728,9 +856,17 @@ def create_app(
         # record or send.
         routing = replace(routing, effort_policy=True)
     capabilities = registry if registry is not None else empty_registry()
+    if len(catalogue) and len(capabilities):
+        # The registry's ``provider`` column is authoritative for ids whose own
+        # prefix does not name a provider, so the catalogue learns it here rather
+        # than making every caller remember to merge.
+        catalogue = providers_mod.catalogue_from_registry(catalogue, capabilities)
     if router_mode == "active":
         # Everything active mode needs to be sure of, checked once at start.
-        _verify_active_target(routing, capabilities, sheet)
+        if len(catalogue) and len(capabilities):
+            _verify_active_universe(routing, capabilities, sheet, catalogue, limit_ledger)
+        else:
+            _verify_active_target(routing, capabilities, sheet)
     # One ledger per app, sharing the key store's connection.  ``metered`` is the
     # request log every route writes through; it settles the caller's reservation
     # at the one point the response's real cost is known.
@@ -744,7 +880,7 @@ def create_app(
     table = SessionTable()
     session_salt = getattr(store, "session_salt", None)
 
-    if router_mode != "off" and not routing.cheap_model:
+    if router_mode != "off" and not routing.cheap_model and not len(catalogue):
         logger.warning(
             "router is %s but no cheap model is configured: SWITCH decisions will be "
             "recorded with no target model. Pass config=RouterConfig(cheap_model=...) "
@@ -769,6 +905,8 @@ def create_app(
     app.state.effort_mode = effort_mode
     app.state.registry = capabilities
     app.state.key_store = key_store
+    app.state.providers = catalogue
+    app.state.limits = limit_ledger
     # The verified policy manifest this gateway serves at GET /policy (D12),
     # and the optional pinned public key its signature must chain to.
     app.state.manifest = manifest
@@ -881,7 +1019,39 @@ def create_app(
         request.state.project = project
         return await call_next(request)
 
-    def plan(session_id: str, body: dict[str, Any], model: str) -> Decision:
+    def route_context(body: dict[str, Any], model_requested: str) -> dict[str, Any]:
+        """The three routing gates, as keyword arguments for ``decide``.
+
+        Every route asks the same question -- what may this request run on, what
+        is locked out, and what is each model worth -- so the answer is computed
+        once here and shared.  A route that re-derived it would drift: it could
+        forget the requested model's own quality, or move off a locked-out model
+        without telling the router it was limited.
+        """
+        pool = pool_for(body)
+        # No registry means no capability facts, so the static configured pool
+        # stays authoritative rather than being replaced by an empty ranked list.
+        ranked = pool.ids() if len(capabilities) else None
+        qualities = {candidate.model: candidate.quality for candidate in pool.candidates}
+        info = capabilities.get(model_requested)
+        if info is not None:
+            qualities.setdefault(model_requested, candidates.quality_of(info))
+        limited: tuple[str, ...] = ()
+        if model_requested:
+            locked = limit_ledger.get(provider_of(model_requested), model_requested)
+            if locked is not None:
+                limited = (model_requested,)
+        return {"ranked": ranked, "limited": limited, "qualities": qualities}
+
+    def plan(
+        session_id: str,
+        body: dict[str, Any],
+        model: str,
+        *,
+        ranked: tuple[str, ...] | None = None,
+        limited: tuple[str, ...] = (),
+        qualities: dict[str, float] | None = None,
+    ) -> Decision:
         """Ask the router what it would do, and log it.
 
         The decision is always recorded, whatever the mode.  In shadow mode it is
@@ -892,8 +1062,15 @@ def create_app(
         if router_mode == "off":
             decision = Decision(action="STAY", target_model=None, reason="router disabled")
         else:
-            decision = router.decide(body, record.as_session_state(), routing)
-            if router_mode != "active":
+            decision = router.decide(
+                body,
+                record.as_session_state(),
+                routing,
+                ranked=ranked,
+                limited=limited,
+                qualities=qualities,
+            )
+            if router_mode != "active" and not decision.availability:
                 decision = replace(decision, persisted_only=True)
         if router_mode == "active" and decision.action == "SWITCH":
             record.last_switch_index = record.request_index
@@ -1132,12 +1309,184 @@ def create_app(
             return _policy_unavailable(str(exc))
         return JSONResponse(verified)
 
+    @app.get("/limits")
+    async def limits_status(
+        models: int = Query(
+            DEFAULT_LIMITS_MODELS,
+            ge=0,
+            le=MAX_LIMITS_MODELS,
+            description=(
+                "how many candidates and rejections to list; the counts are "
+                "always complete"
+            ),
+        )
+    ) -> Response:
+        """What may run right now, why the rest may not, and what is cooling down.
+
+        Read-only and credential-free: a provider is reported as configured or
+        not, never with the secret or the environment variable that holds it.
+        The dashboard and ``tamias doctor`` both read this.
+
+        The pool can hold hundreds of models once several providers are
+        discovered, so the lists are capped and the ``pool`` block stays
+        truthful about the totals.  A monitoring loop polls this endpoint; an
+        unbounded response would make each poll cost more than the request it
+        is reporting on.
+        """
+        pool = pool_for({})
+        cooling = limit_ledger.active()
+        shown = pool.candidates[:models]
+        rejected = pool.rejected[:models]
+        return JSONResponse(
+            {
+                "providers": [
+                    {
+                        "name": provider.name,
+                        "base_url": provider.base_url,
+                        "configured": provider.configured,
+                        "key_source": (
+                            "none"
+                            if provider.auth == "none"
+                            else "environment"
+                            if provider.key_source.startswith("env:")
+                            else "command"
+                        ),
+                    }
+                    for provider in catalogue.all()
+                ],
+                "unconfigured": list(catalogue.unconfigured()),
+                "cooling_down": [
+                    {
+                        "provider": limit.provider,
+                        "model": limit.model,
+                        "status": limit.status,
+                        "reason": limit.reason,
+                        "remaining_seconds": int(limit.remaining()),
+                        "strikes": limit.strikes,
+                    }
+                    for limit in cooling
+                ],
+                "pool": {
+                    "considered": pool.considered,
+                    "candidates": len(pool),
+                    "refused": len(pool.rejected),
+                    "listed": len(shown),
+                    "truncated": len(shown) < len(pool) or len(rejected) < len(pool.rejected),
+                    "gates": pool.rejection_counts(),
+                },
+                "candidates": [
+                    {
+                        "model": candidate.model,
+                        "provider": candidate.provider,
+                        "quality": candidate.quality,
+                        "cost_per_mtok": candidate.cost,
+                        "context_window": candidate.context_window,
+                        "tools": candidate.tools,
+                        "reasoning": candidate.reasoning,
+                    }
+                    for candidate in shown
+                ],
+                "refused": [
+                    {"model": rejection.model, "gate": rejection.gate, "reason": rejection.reason}
+                    for rejection in rejected
+                ],
+            }
+        )
+
     async def relay(upstream: httpx.Response) -> AsyncIterator[bytes]:
         try:
             async for chunk in upstream.aiter_bytes():
                 yield chunk
         finally:
             await upstream.aclose()
+
+    # -- multi-provider routing ------------------------------------------------
+    # Tamias is a layer above the providers, never one of them: a model id picks
+    # the provider, that provider supplies the URL, and its credential replaces
+    # whatever the client used to reach this proxy.
+
+    def root_for(model: str) -> str:
+        """The provider root that serves ``model``, or the legacy single upstream."""
+        if not len(catalogue):
+            return base
+        provider = catalogue.provider_for(model)
+        return provider.root if provider is not None else ""
+
+    def headers_for(model: str, request: Request) -> dict[str, str]:
+        headers = forward_headers(request)
+        if not len(catalogue):
+            return headers
+        provider = catalogue.provider_for(model)
+        if provider is None:
+            return headers
+        return catalogue.apply_auth(provider.name, headers)
+
+    def remember_transport_failure(model: str) -> None:
+        """Cool a model down after a connection that never answered.
+
+        ``setup``-stage failures only: a stream that dies halfway has already
+        produced tokens, so the model is not unreachable, just unlucky.
+        """
+        provider = provider_of(model)
+        if limit_ledger.record(provider, model, limits_mod.TRANSPORT_FAILURE) is not None:
+            logger.info(
+                "transport failure provider=%s model=%s; cooling down",
+                provider or "-",
+                model,
+            )
+
+    def pool_for(body: dict[str, Any]) -> candidates.CandidatePool:
+        """Run the three routing gates for this request.
+
+        An explicit ``--cheap-model`` list stays an allowlist: a deployment that
+        named its cheap models must not be silently widened to everything the
+        registry knows.  With no list, every discovered model is a candidate.
+        """
+        if not len(capabilities):
+            return candidates.CandidatePool(candidates=())
+        needs = candidates.needs_from_body(body)
+        build = candidates.pool_for_models if routing.pool else candidates.build_pool
+        kwargs: dict[str, Any] = {
+            "registry": capabilities,
+            "sheet": sheet,
+            "catalogue": catalogue if len(catalogue) else None,
+            "limits": limit_ledger,
+            "needs": needs,
+            # Active mode may only rewrite to a model the sheet can price: the
+            # gateway reports the cost of the model that actually ran.
+            "require_priced": router_mode == "active",
+        }
+        if routing.pool:
+            return build(routing.pool, **kwargs)
+        return build(**kwargs)
+
+    def provider_of(model: str) -> str:
+        if not len(catalogue):
+            return ""
+        return catalogue.provider_name_for(model)
+
+    def remember_limit(model: str, response: httpx.Response) -> None:
+        """Record a refusal so the next request routes around it."""
+        provider = provider_of(model)
+        if response.status_code < 400:
+            if provider or model:
+                limit_ledger.clear(provider, model)
+            return
+        retry_after = limits_mod.parse_retry_after(response.headers.get("retry-after"))
+        if retry_after is None:
+            retry_after = _numeric_retry_after(response.headers)
+        limited = limit_ledger.record(
+            provider, model, response.status_code, retry_after=retry_after
+        )
+        if limited is not None:
+            logger.info(
+                "limit provider=%s model=%s status=%s cooldown=%ds strikes=%d",
+                provider or "-",
+                model,
+                limited.status,
+                int(limited.remaining()),
+                limited.strikes,
+            )
 
     @app.post(CHAT_PATH)
     async def chat_completions(request: Request) -> Response:
@@ -1153,15 +1502,18 @@ def create_app(
             dict(request.headers.items()), body, session_salt
         )
         model_requested = _model_name(body.get("model"))
-        # The decision comes before the gate so the gate can price and cap the
-        # model that will actually run.  Planning has no lasting side effect
-        # for a request the gate then refuses: it only logs the decision and
-        # registers the session.
-        decision = plan(session_id, body, model_requested)
+        # The three routing gates run first: capability, supply, health.  What
+        # survives is the ordered candidate list the router may switch within,
+        # a locked-out requested model is named so rule 0 can move off it, and
+        # every candidate carries the quality score ranking needs.  The
+        # decision comes before the budget gate so the gate can price and cap
+        # the model that will actually run; planning has no lasting side effect
+        # for a request the gate then refuses.
+        decision = plan(session_id, body, model_requested, **route_context(body, model_requested))
         routed_model = router.applied_target(
             decision,
             requested=model_requested,
-            enabled=router_mode == "active",
+            enabled=router_mode == "active" or decision.availability,
             allowed=allowed_models_for(request),
         )
         denied = authorize(request, model_requested, raw, effective=routed_model)
@@ -1181,18 +1533,60 @@ def create_app(
         applied_effort = resolve_effort(running_model, decision)
         effort_used = applied_effort if applied_effort is not None else effort_requested
 
-        outgoing = client.build_request(
-            "POST",
-            base + CHAT_PATH,
-            content=outbound(raw, body, routed_model, applied_effort),
-            headers=forward_headers(request),
-        )
+        root = root_for(running_model)
+        if not root:
+            # A catalogue is configured and nothing serves this model.  Sending
+            # it to the last provider that happened to answer would bill the
+            # wrong account and log a model id no provider offers.
+            return _unknown_provider(running_model, catalogue.names())
+
+        def build(target: str | None) -> httpx.Request:
+            model = target or model_requested
+            return client.build_request(
+                "POST",
+                root_for(model) + CHAT_PATH,
+                content=outbound(raw, body, target, resolve_effort(model, decision)),
+                headers=headers_for(model, request),
+            )
+
+        def retry_target(refused: str) -> str:
+            """The next gated model after ``refused`` was turned away, or ``""``.
+
+            The pool is rebuilt rather than filtered: recording the refusal also
+            cooled the model down, so the rebuild is what makes the next request
+            -- and this one -- see the limit.
+
+            Quality is held where it can be.  The retry prefers a model at least
+            as capable as the one that refused; only when no such model is left
+            does it fall back to the strongest survivor.  A cheaper answer beats
+            a failed turn, but a silent downgrade on a hard step is not the
+            default.
+            """
+            pool = pool_for(body)
+            info = capabilities.get(refused)
+            floor = candidates.quality_of(info) if info is not None else 0.0
+            best = pool.best(
+                exclude={refused},
+                min_quality=floor,
+                require_priced=router_mode == "active",
+            )
+            if best is None:
+                remaining = [c for c in pool.candidates if c.model != refused]
+                if router_mode == "active":
+                    remaining = [c for c in remaining if c.priced]
+                best = max(remaining, key=lambda c: c.quality) if remaining else None
+            return best.model if best is not None else ""
+
+        outgoing = build(routed_model)
         started = time.perf_counter()
 
         if not streaming:
             try:
                 upstream = await upstream_send(client, outgoing)
             except UpstreamFailure as exc:
+                # The provider never answered; remember that so the next request
+                # does not pay the same timeout again.
+                remember_transport_failure(running_model)
                 model_used = model_requested
                 record(
                     session_id,
@@ -1210,6 +1604,27 @@ def create_app(
                 )
                 advance(session_id, model_used)
                 return _upstream_failure_response()
+            # A limit learned here is a limit every later request skips.  A 429
+            # means nothing was generated, so one immediate retry on a model
+            # that passed all three gates is safe and saves the turn.
+            remember_limit(running_model, upstream)
+            if upstream.status_code in limits_mod.RETRYABLE_STATUSES:
+                fallback = retry_target(running_model)
+                if fallback:
+                    await upstream.aclose()
+                    decision = replace(
+                        decision,
+                        action="SWITCH",
+                        target_model=fallback,
+                        reason=(
+                            f"upstream {upstream.status_code} on {running_model}: "
+                            f"retried on {fallback}"
+                        ),
+                    )
+                    routed_model = fallback
+                    running_model = fallback
+                    upstream = await upstream_send(client, build(fallback))
+                    remember_limit(running_model, upstream)
             payload: Any = None
             try:
                 payload = upstream.json()
@@ -1240,6 +1655,7 @@ def create_app(
         try:
             upstream = await upstream_send(client, outgoing, stream=True)
         except UpstreamFailure as exc:
+            remember_transport_failure(running_model)
             model_used = model_requested
             record(
                 session_id,
@@ -1257,6 +1673,27 @@ def create_app(
             )
             advance(session_id, model_used)
             return _upstream_failure_response()
+        # The status is known before a byte is relayed, so a refusal can still be
+        # retried on another gated model without the client seeing a truncated
+        # stream.
+        remember_limit(running_model, upstream)
+        if upstream.status_code in limits_mod.RETRYABLE_STATUSES:
+            fallback = retry_target(running_model)
+            if fallback:
+                await upstream.aclose()
+                decision = replace(
+                    decision,
+                    action="SWITCH",
+                    target_model=fallback,
+                    reason=(
+                        f"upstream {upstream.status_code} on {running_model}: "
+                        f"retried on {fallback}"
+                    ),
+                )
+                routed_model = fallback
+                running_model = fallback
+                upstream = await upstream_send(client, build(fallback), stream=True)
+                remember_limit(running_model, upstream)
         return StreamingResponse(
             _stream_chat(
                 upstream,
@@ -1350,11 +1787,12 @@ def create_app(
         # without at least a trace (F-12).  Token counts and cost stay NULL --
         # the route prices nothing -- so the row can never inflate a total.
         started = time.perf_counter()
+        passthrough_root = root_for(model) if model else base
         outgoing = client.build_request(
             request.method,
-            f"{base}/{path}",
+            f"{passthrough_root or base}/{path}",
             content=raw,
-            headers=forward_headers(request),
+            headers=(headers_for(model, request) if model else forward_headers(request)),
             params=request.query_params,
         )
         upstream = await client.send(outgoing, stream=True)
@@ -1393,6 +1831,13 @@ def create_app(
     # POST /v1/messages is logged rather than relayed unlogged.  It reuses the
     # client put on app.state above, so both routes share one connection pool
     # and one lifespan.
+    # Both adapter routes build their own request, so the provider lookup is
+    # published on app.state rather than threaded through each signature.
+    app.state.upstream_root_for = root_for
+    app.state.upstream_headers_for = headers_for
+    app.state.remember_limit = remember_limit
+    app.state.route_context = route_context
+
     anthropic_adapter.register_routes(
         app,
         upstream_url,

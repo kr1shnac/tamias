@@ -100,10 +100,40 @@ def check_relative_links_resolve():
     return 'PASS: relative links resolve'
 
 
+def check_budget_guarantee_phrases():
+    """The cap guarantee must carry all five qualifications, in the README.
+
+    The guarantee is the project's strongest claim; a four-item list is wrong.
+    These fragments are the load-bearing half of each qualification, so a
+    rewrite that drops one fails the gate instead of shipping quietly.
+    """
+    readme = _read(README)
+    budget = _read('docs/BUDGET.md')
+    verified = _read('docs/VERIFICATION.md')
+    required = [
+        ('overshoot bound', 'settled - ceiling'),
+        ('unpriced model refusal', 'cannot price'),
+        ('passthrough 403', '403'),
+        ('cap, not unbypassability', 'not about the proxy being'),
+        ('computed cost, not the bill', 'computed cost, not the bill'),
+    ]
+    errors = [f'README.md: guarantee qualification missing: {label} ({fragment!r})'
+              for label, fragment in required if fragment not in readme]
+    if 'names a model' not in readme:
+        errors.append('README.md: passthrough qualification must name the model case')
+    for name, text in (('docs/BUDGET.md', budget), ('docs/VERIFICATION.md', verified)):
+        if 'UNTESTED live' not in text:
+            errors.append(f'{name}: the live-untested caveat must stay stated')
+    if errors:
+        return 'FAIL: ' + '; '.join(errors)
+    return 'PASS: the cap guarantee carries all five qualifications'
+
+
 def test_docs_integrity():
     results = [
         check_version_consistency(),
         check_relative_links_resolve(),
+        check_budget_guarantee_phrases(),
     ]
     for r in results:
         print(r)

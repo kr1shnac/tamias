@@ -211,3 +211,82 @@ def test_decide_uses_default_config_when_omitted() -> None:
     assert decide(body, state(), RouterConfig(cheap_model="cheap-1", min_gap=1)).action == (
         "SWITCH"
     )
+
+
+# ------------------------------------------------------------- cheap model pool ---
+
+POOL = RouterConfig(
+    easy_tools={"shell", "bash", "read", "grep", "ls", "glob"},
+    cheap_pool=("cheap-a", "cheap-b", "cheap-c"),
+    strong_model="strong-1",
+    min_gap=0,
+)
+
+
+def test_pool_switch_picks_a_member_of_the_pool() -> None:
+    decision = decide(body_with_tool("read", "contents"), state(index=0), POOL)
+    assert decision.action == "SWITCH"
+    assert decision.target_model in POOL.pool
+
+
+def test_pool_target_is_stable_for_a_session_across_request_indexes() -> None:
+    targets = {
+        decide(body_with_tool("read", "contents"), state(index=index), POOL).target_model
+        for index in (0, 1, 5, 50)
+    }
+    assert len(targets) == 1
+
+
+def test_pool_spreads_different_sessions_across_models() -> None:
+    targets = {
+        decide(
+            body_with_tool("read", "contents"), state(index=0, session=f"session-{n}"), POOL
+        ).target_model
+        for n in range(20)
+    }
+    assert len(targets) > 1
+
+
+def test_pool_never_chooses_the_requested_model() -> None:
+    body = body_with_tool("read", "contents")
+    body["model"] = "cheap-a"
+    decision = decide(body, state(index=0), POOL)
+    assert decision.action == "SWITCH"
+    assert decision.target_model in {"cheap-b", "cheap-c"}
+
+
+def test_pool_with_only_the_requested_model_stays() -> None:
+    config = RouterConfig(cheap_pool=("strong-1",), min_gap=0)
+    decision = decide(body_with_tool("read", "contents"), state(index=0), config)
+    assert decision.action == "STAY"
+    assert decision.reason == "no pool target differs from the requested model"
+
+
+def test_pool_hysteresis_treats_any_member_as_already_cheap() -> None:
+    config = RouterConfig(
+        cheap_pool=("cheap-a", "cheap-b"), strong_model="strong-1", min_gap=3
+    )
+    decision = decide(
+        body_with_tool("read", "contents"),
+        state(index=10, model="cheap-b"),
+        config,
+    )
+    assert decision.action == "STAY"
+    assert decision.reason == "hysteresis: 0 of 3 requests since last switch"
+
+
+def test_single_model_configuration_still_targets_cheap_model() -> None:
+    decision = decide(body_with_tool("read", "contents"), state(index=5), CONFIG)
+    assert decision.action == "SWITCH"
+    assert decision.target_model == "cheap-1"
+
+
+def test_pool_primary_defaults_to_first_member() -> None:
+    config = RouterConfig(cheap_pool=("cheap-a", "cheap-b"))
+    assert config.cheap_model == "cheap-a"
+    assert config.pool == ("cheap-a", "cheap-b")
+
+
+def test_empty_pool_falls_back_to_single_cheap_model() -> None:
+    config = RouterConfig(cheap_model="cheap-1")
+    assert config.pool == ("cheap-1",)

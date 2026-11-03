@@ -732,7 +732,7 @@ def test_serve_binds_loopback_by_default() -> None:
 
 @pytest.mark.parametrize(
     "service,host",
-    [("serve", "127.0.0.1"), ("serve", "localhost"), ("serve", "::1"), ("dashboard", "127.0.0.1")],
+    [("serve", "127.0.0.1"), ("serve", "localhost"), ("serve", "::1")],
 )
 def test_loopback_hosts_never_need_the_acknowledgement_flag(service: str, host: str) -> None:
     """Loopback binds proceed without anyone opting out of security."""
@@ -746,9 +746,7 @@ def test_non_loopback_hosts_are_refused_without_acknowledgement() -> None:
     from tamias.security import refuse_non_loopback
 
     refused_serve = refuse_non_loopback("serve", "0.0.0.0", allow_non_loopback=False)
-    refused_dashboard = refuse_non_loopback("dashboard", "0.0.0.0", allow_non_loopback=False)
     assert refused_serve == 1
-    assert refused_dashboard == 1
 
 
 def test_the_acknowledgement_flag_is_what_unlocks_a_wider_bind() -> None:

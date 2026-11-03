@@ -264,8 +264,17 @@ def register_routes(
             denied = authorize(request, body.get("model"), raw)
             if denied is not None:
                 return denied
+        root_for = getattr(app.state, "upstream_root_for", None)
+        headers_for = getattr(app.state, "upstream_headers_for", None)
         outgoing = client.build_request(
-            "POST", base + RESPONSES_PATH, content=raw, headers=forward_headers(request)
+            "POST",
+            (root_for(model_requested) if root_for is not None else base) + RESPONSES_PATH,
+            content=raw,
+            headers=(
+                headers_for(model_requested, request)
+                if headers_for is not None
+                else forward_headers(request)
+            ),
         )
         started = time.perf_counter()
         if not body.get("stream"):

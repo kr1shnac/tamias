@@ -1,9 +1,9 @@
-"""Loopback-only binding policy shared by the proxy and the dashboard.
+"""Loopback-only binding policy for the proxy server.
 
-Both servers hold private data (bearer tokens in memory, per-session metering
+The server holds private data (bearer tokens in memory, per-session metering
 on disk).  Authentication is **opt-in**: the proxy can verify a shared token or
-company keys, the dashboard cannot.  A wider bind therefore always needs an
-explicit acknowledgement flag, and the proxy additionally needs *some*
+company keys.  A wider bind therefore always needs an
+explicit acknowledgement flag and the proxy needs *some*
 authentication configured.  Refusing beats warning: a warning scrolls past
 under an ``--inject-usage`` banner, but a refused bind cannot be missed.
 """
@@ -30,7 +30,7 @@ def refuse_non_loopback(
 ) -> int:
     """Exit code for binding ``host``: 1 when refused, 0 when it may proceed.
 
-    ``service`` names the program for the message ("serve" / "dashboard").
+    ``service`` names the program for the message ("serve").
     A loopback host always proceeds; a wider host proceeds only when
     ``allow_non_loopback`` is true.  The refusal message names only what is
     actually missing: when ``authenticated`` is true the service does have
@@ -92,7 +92,7 @@ def origin_is_allowed(origin: str | None, extra_hosts: object = ()) -> bool:
     """True when a browser ``Origin`` header may reach the server.
 
     Browsers attach ``Origin`` to cross-site requests; a rebound page always
-    does.  A same-origin request from the dashboard page (`Origin` is a loopback
+    does.  A same-origin request from a page on loopback (`Origin` is a loopback
     name) passes, as does a request with no ``Origin`` at all (non-browser
     clients).  Any other origin is a cross-site attempt and is refused.
     """

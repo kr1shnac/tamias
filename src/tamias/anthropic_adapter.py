@@ -384,10 +384,13 @@ def register_routes(
     base = upstream_url.rstrip("/")
     sessions: dict[str, SessionState] = {}
     routing = router.DEFAULT_CONFIG if config is None else config
-    if router_mode == "active" and not routing.cheap_model:
+    catalogue = getattr(app.state, "providers", None)
+    if router_mode == "active" and not routing.cheap_model and not len(catalogue or ()):
         # ``create_app`` checks the rest (registry membership, tool support,
         # priceability) once for the whole app; a target to switch to is the
-        # one thing this route can check for itself and must not skip.
+        # one thing this route can check for itself and must not skip.  A
+        # provider catalogue makes the pool dynamic, so there is no static
+        # target to demand.
         raise ValueError(
             "active routing needs a cheap model: pass RouterConfig(cheap_model=...) "
             "or --cheap-model MODEL"
@@ -420,13 +423,25 @@ def register_routes(
         The decision is always recorded, whatever the mode.  In shadow mode it is
         marked ``persisted_only`` so that nothing downstream can mistake a
         recorded SWITCH for one that was acted on.
+
+        The gate inputs come from ``app.state.route_context``, the same helper
+        the chat route uses: the capability, supply and health gates, the ranked
+        pool, a locked-out requested model, and per-model quality all have to be
+        identical on both routes or ``/v1/messages`` would route differently
+        from ``/v1/chat/completions`` for the same request.
         """
         state = current(session_id, model)
         if router_mode == "off":
             decision = Decision(action="STAY", target_model=None, reason="router disabled")
         else:
-            decision = router.decide(body, state, routing)
-            if router_mode != "active":
+            context = getattr(app.state, "route_context", None)
+            decision = router.decide(
+                body,
+                state,
+                routing,
+                **(context(body, model) if context is not None else {}),
+            )
+            if router_mode != "active" and not decision.availability:
                 decision = replace(decision, persisted_only=True)
         logger.info(
             "session=%s prior_requests=%d model=%s mode=%s decision=%s target=%s reason=%s",
@@ -558,7 +573,7 @@ def register_routes(
         routed_model = router.applied_target(
             decision,
             requested=model_requested,
-            enabled=router_mode == "active",
+            enabled=router_mode == "active" or decision.availability,
             allowed=None if allowed_models is None else allowed_models(request),
         )
         if authorize is not None:
@@ -566,11 +581,19 @@ def register_routes(
             if denied is not None:
                 return denied
 
+        root_for = getattr(app.state, "upstream_root_for", None)
+        headers_for = getattr(app.state, "upstream_headers_for", None)
+
         outgoing = client.build_request(
             "POST",
-            base + MESSAGES_PATH,
+            (root_for(routed_model or model_requested) if root_for is not None else base)
+            + MESSAGES_PATH,
             content=outbound(raw, body, routed_model),
-            headers=forward_headers(request),
+            headers=(
+                headers_for(routed_model or model_requested, request)
+                if headers_for is not None
+                else forward_headers(request)
+            ),
         )
         started = time.perf_counter()
 

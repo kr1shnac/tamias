@@ -36,11 +36,3 @@ def test_module_compiles_without_warnings(path: Path, tmp_path: Path) -> None:
             )
         except py_compile.PyCompileError as exc:  # pragma: no cover - failure path
             raise AssertionError(f"{path.name} does not compile cleanly: {exc}") from exc
-
-
-def test_the_invalid_escape_that_prompted_this_test_is_gone() -> None:
-    """A direct regression guard for the exact defect (dashboard CSV regex)."""
-    source = (SRC / "tamias" / "dashboard.py").read_text(encoding="utf-8")
-    # A non-raw backslash-hyphen is the defect; the fix is a doubled backslash.
-    assert "[=\\-+@" not in source, "invalid escape sequence returned to dashboard.py"
-    assert "[=\\\\-+@" in source, "the formula-injection guard's escaped hyphen is missing"

@@ -41,25 +41,51 @@ tamias forwards `Authorization` untouched, so the key reaches Zen unchanged.
 
 ```sh
 tamias serve \
-  --upstream https://opencode.ai/zen \
-  --prices  prices.toml \
-  --db      requests.db \
-  --port    8000 \
-  --cheap-model deepseek-v4-flash \
-  --strong-model deepseek-v4-pro
+  --provider opencode \
+  --prices   prices.toml \
+  --db       requests.db \
+  --registry models.toml \
+  --router-mode active \
+  --min-gap  0 \
+  --port     8000 \
+  --cheap-model deepseek-v4.1-flash-free
 ```
 
-tamias appends `/v1/chat/completions` to `--upstream`, so the upstream URL it
-calls is `https://opencode.ai/zen/v1/chat/completions`. Do **not** include
-`/v1` in `--upstream`.
+`--provider opencode` is the Zen preset (`https://opencode.ai/zen`); tamias
+appends `/v1/chat/completions`, so the upstream URL it calls is
+`https://opencode.ai/zen/v1/chat/completions`. Do **not** include `/v1` in
+`--upstream`.
 
 - `--router-mode` defaults to `shadow`. `active` applies the switch; `off`
-  disables the router entirely. Start with `shadow`.
-- `--cheap-model` is the model a SWITCH would move mechanical work to. Without
-  it, shadow decisions have no target and no measurable saving, and tamias logs
-  a warning at startup.
+  disables the router entirely. Start with `shadow` for a session if you want
+  to see what it *would* do before letting it rewrite.
+- `--cheap-model` is the model a SWITCH moves mechanical work to, or a
+  comma-separated pool of free models. A free Zen model (`-free` suffix, or
+  `big-pickle`) is the cheapest honest target. With a pool, each session stays
+  on one member while different sessions spread across it; the pool is not a
+  `429` failover. Without any target, shadow decisions have no target and no
+  measurable saving.
+- `--registry` is required by `active`: the target must be listed there with
+  `tools = true`, because a model that cannot carry a tool call would break the
+  turn. `tamias registry zen --out models.toml` builds one from the live Zen
+  list plus models.dev's published `tool_call` capability.
 - `--min-gap` (default 3) is how many requests must pass after the last switch
-  before switching again.
+  before switching again. **For savings, use `0`.** A fresh OpenCode session
+  starts at zero requests, so the default 3 holds back the first three easy
+  turns; `0` lets the first mechanical tool result route. Raise it if you see
+  the cheap model flapping on a long session.
+
+A pool is written as a comma-separated list and keeps each OpenCode session on
+one member, spreading different sessions across the rest:
+
+```sh
+--cheap-model deepseek-v4.1-flash-free,big-pickle
+```
+
+Add a model only after you have seen it complete a tool-calling turn yourself:
+the registry proves models.dev publishes `tool_call = true`, not that the free
+endpoint is available right now. There is no retry-on-`429` yet, so a failed
+member fails that request.
 
 Check it is up:
 
@@ -71,6 +97,16 @@ curl -s localhost:8000/v1/models | head -c 200
 
 Rates are **USD per 1,000,000 tokens**, taken from the Zen pricing table. A rate
 of `0` means the model really is free; a rate you leave out means UNKNOWN.
+
+Zen's models endpoint publishes ids but not rates, so `tamias prices zen` can
+write the free half of the sheet for you:
+
+```sh
+tamias prices zen --out prices.toml
+```
+
+It prices every free model at exactly `$0` and leaves paid models out (UNKNOWN)
+rather than guessing. Add the paid rates you care about by hand:
 
 ```toml
 date = "2026-10-04"   # the date these rates were published
@@ -170,7 +206,73 @@ tamias.proxy session=s1 prior_requests=3 model=deepseek-v4-pro mode=shadow \
 `decision=SWITCH` there means *shadow mode would have switched*. It did not, and
 the request that Zen received still said `deepseek-v4-pro`.
 
-## 5. Read the log
+## 5. Install the `/tamias` slash command
+
+Once the proxy has logged a few requests, install the command OpenCode loads at
+startup:
+
+```sh
+tamias opencode install \
+  --db     requests.db \
+  --prices prices.toml \
+  --port   8000
+```
+
+That writes `~/.config/opencode/commands/tamias.md` (or
+`<project>/.opencode/commands/tamias.md` with `--project .`). It does **not**
+touch `opencode.json`; it prints the provider block to merge instead. Restart
+OpenCode and type `/tamias`:
+
+```
+/tamias
+```
+
+The command runs `tamias report` and hands the real output to the model, so you
+see requests, tokens, cost (or why it is `UNKNOWN`), how many requests were
+routed, and the saving estimate. The model is told never to invent a dollar
+figure when the report says `UNKNOWN`.
+
+## 6. Run it in the background
+
+The foreground should be OpenCode, not a terminal running the proxy. On Linux
+with systemd, tamias can write and optionally start a user unit:
+
+```sh
+tamias service install \
+  --db     ~/.tamias/requests.db \
+  --prices ~/.tamias/prices.toml \
+  --registry ~/.tamias/models.toml \
+  --cheap-model deepseek-v4.1-flash-free,big-pickle \
+  --port 8000 \
+  --start
+```
+
+It writes `~/.config/systemd/user/tamias.service` and runs `systemctl --user
+daemon-reload` plus `enable --now` only when `--start` is passed. Paths are
+resolved to absolute because a user unit does not inherit your working
+directory. Every input file must already exist, and active mode refuses to
+install without a target and a registry, so a unit that would crash-loop is
+rejected before anything is written.
+
+No secret goes in the unit: OpenCode sends the provider key to tamias, and
+tamias forwards it untouched. Use a free target and no paid key is required.
+
+```sh
+systemctl --user status tamias
+journalctl --user -u tamias -f     # logs, if you want them
+```
+
+To see the unit without writing it, pass `--dry-run`. To stop and remove it:
+
+```sh
+tamias service uninstall             # stop, disable, remove tamias's unit
+tamias service uninstall --keep-running   # remove the file, leave the proxy up
+```
+
+`service uninstall` refuses to delete a unit that tamias did not write unless
+you pass `--force`.
+
+## 7. Read the log
 
 ```sh
 tamias report --db requests.db --prices prices.toml
@@ -181,7 +283,7 @@ requests: 412
 total cost: UNKNOWN (known part: $0.00; 412 of 412 requests have unknown cost)
 requests shadow would have switched: 96
 estimated saving: $0.00 (estimate; ignores cache rebuild cost; not measured; 96 of 96 switched requests not priced)
-cheap model assumed: deepseek-v4-flash
+switch target: unknown for 96 switched row(s) with no router decision; savings priced against the sheet-cheapest deepseek-v4-flash
 price sheet: prices.toml (2026-10-04)
 ```
 
@@ -198,8 +300,8 @@ saving prices a warm stay against a cold switch; and the shadow count line now
 reads `requests shadow mode would have switched`. The line that used to read
 `cheap model assumed: <model>` is now `switch target (from router decisions):
 <model>` — the estimate prices the model the router's own decision named, not a
-guess from the price sheet, and falls back to `cheap model assumed` only for
-older logs.)*
+guess from the price sheet. Rows that predate the target column say so and name
+the sheet-cheapest fallback explicitly.)*
 
 The number that matters in shadow mode is **requests shadow would have
 switched**. It tells you how much of your traffic the router thinks is

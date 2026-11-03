@@ -29,7 +29,7 @@ import pytest
 from fastapi import FastAPI
 from mock_upstream import StreamingASGITransport, create_mock_upstream
 
-from tamias import cli, dashboard, pricing, proxy, session
+from tamias import cli, pricing, proxy, session
 from tamias.pricing import load_price_sheet
 from tamias.router import EASY_TOOLS, RouterConfig
 from tamias.store import Store
@@ -192,36 +192,6 @@ def test_session_logs_exactly_ten_rows(run_session: list[dict[str, Any]]) -> Non
         for row_id in session_ids
     )
     assert all(SESSION not in row_id for row_id in session_ids)
-
-
-async def test_dashboard_updates_while_the_proxy_writes_rows(
-    upstream: FastAPI, db_path: Path, prices_path: Path
-) -> None:
-    """A dashboard started before traffic observes the proxy's committed row."""
-    store = Store(db_path)
-    app = proxy.create_app(
-        UPSTREAM_URL,
-        store,
-        load_price_sheet(prices_path),
-        "shadow",
-        config=CONFIG,
-        transport=StreamingASGITransport(upstream),
-    )
-    dashboard_app = dashboard.create_dashboard_app(db_path, prices_path)
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=dashboard_app), base_url="http://dashboard.test"
-    ) as page:
-        assert (await page.get("/api/summary")).json()["n_requests"] == 0
-        async with httpx.AsyncClient(
-            transport=StreamingASGITransport(app), base_url=PROXY_URL, timeout=None
-        ) as client:
-            response = await client.post(CHAT_PATH, content=json.dumps(user_turn(1)).encode())
-        assert response.status_code == 200
-        report = (await page.get("/api/summary")).json()
-        assert report["n_requests"] == 1
-        assert len((await page.get("/api/rows")).json()) == 1
-    store.close()
 
 
 def test_every_row_carries_the_usage_the_upstream_reported(

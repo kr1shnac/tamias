@@ -63,6 +63,11 @@ class Decision:
     persisted_only marks a decision that was recorded but not acted on, i.e. a
     shadow-mode decision: target_model then names the model that WOULD have
     been used, and action says nothing about what actually happened.
+
+    availability marks a switch that exists because the requested model cannot
+    answer right now (a provider limit), not because a cheaper model would do.
+    Shadow mode suppresses *savings* decisions, never this one: sending a
+    request to a model already known to be locked out only wastes the turn.
     """
 
     action: Literal["STAY", "SWITCH"]
@@ -70,6 +75,7 @@ class Decision:
     reason: str
     target_effort: str | None = None
     persisted_only: bool = False
+    availability: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,6 +12,7 @@ into an action, so no handler has to re-derive what a ``SWITCH`` means.
 import re
 from collections.abc import Collection
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from typing import Any
 
 from tamias.types import Decision, SessionState, ToolClass
@@ -114,6 +115,7 @@ class RouterConfig:
     error_markers: tuple[str, ...] | None = None
     big_output_chars: int | None = None
     effort_policy: bool = False
+    cheap_pool: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.profile not in ("generic", "legacy"):
@@ -123,11 +125,27 @@ class RouterConfig:
         object.__setattr__(self, "easy_tools", frozenset(self.easy_tools))
         object.__setattr__(self, "edit_tools", frozenset(self.edit_tools))
         object.__setattr__(self, "shell_tools", frozenset(self.shell_tools))
+        pool = tuple(model for model in self.cheap_pool if model)
+        object.__setattr__(self, "cheap_pool", pool)
+        if not self.cheap_model and pool:
+            object.__setattr__(self, "cheap_model", pool[0])
         if self.error_markers is None:
             default_markers = ERROR_MARKERS if self.profile == "legacy" else GENERIC_ERROR_MARKERS
             object.__setattr__(self, "error_markers", default_markers)
         else:
             object.__setattr__(self, "error_markers", tuple(self.error_markers))
+
+    @property
+    def pool(self) -> tuple[str, ...]:
+        """Every model a SWITCH may pick, primary first.
+
+        An empty ``cheap_pool`` is the single-target configuration, so the
+        primary ``cheap_model`` is the whole pool.  Callers that validate or
+        report on targets use this rather than the two fields separately.
+        """
+        if self.cheap_pool:
+            return self.cheap_pool
+        return (self.cheap_model,) if self.cheap_model else ()
 
 
 DEFAULT_CONFIG = RouterConfig()
@@ -136,6 +154,16 @@ DEFAULT_CONFIG = RouterConfig()
 def _stay(reason: str) -> Decision:
     """Build a STAY decision.  ``target_model`` is None: no rewrite happens."""
     return Decision(action="STAY", target_model=None, reason=reason)
+
+
+def _switch(target: str, reason: str, *, availability: bool = False) -> Decision:
+    """Build a SWITCH decision naming the model that actually passed the gates."""
+    return Decision(
+        action="SWITCH",
+        target_model=target,
+        reason=reason,
+        availability=availability,
+    )
 
 
 def _text_of(content: Any) -> str:
@@ -153,6 +181,86 @@ def _text_of(content: Any) -> str:
                     parts.append(text)
         return "\n".join(parts)
     return ""
+
+
+def _tool_result_view(messages: list[dict[str, Any]], last: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite an Anthropic tool-result turn into the shape the rules read.
+
+    ``/v1/messages`` delivers a tool result as a ``user`` turn whose content
+    blocks are ``{"type": "tool_result", ...}``, with the tool name on the
+    preceding assistant ``tool_use`` block.  The routing rules key off a
+    trailing ``tool`` turn, so without this the Anthropic route would classify
+    every tool step as the user still planning and never switch at all.
+
+    Error markers are preserved: ``is_error`` is the Anthropic way of saying
+    the tool failed, which is exactly the signal that asks for the strong
+    model, so it is carried as a boolean flag rather than faked into the text.
+    """
+    blocks = last.get("content")
+    if not isinstance(blocks, list):
+        return last
+    results = [
+        block
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    if not results:
+        return last
+    parts: list[str] = []
+    name: str | None = None
+    failed = False
+    for result in results:
+        content = result.get("content")
+        if result.get("is_error"):
+            failed = True
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.append(_text_of(content))
+        tool_use_id = result.get("tool_use_id")
+        if name is None and tool_use_id is not None:
+            name = _tool_use_name(messages, tool_use_id)
+    normalized: dict[str, Any] = {"role": "tool", "content": "\n".join(parts)}
+    if failed:
+        normalized["is_error"] = True
+    if name is not None:
+        normalized["name"] = name
+    return normalized
+
+
+def _tool_use_name(messages: list[dict[str, Any]], tool_use_id: str) -> str | None:
+    """The name of the ``tool_use`` block with ``tool_use_id``, if any."""
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        blocks = message.get("content")
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("id") == tool_use_id
+            ):
+                name = block.get("name")
+                return name if isinstance(name, str) else None
+    return None
+
+
+def _routing_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """The message list as the routing rules understand it.
+
+    OpenAI-shaped messages are already in that shape and pass through.  The
+    last Anthropic tool-result turn is normalized, so the same router decision
+    is reached for the same agent step whatever wire format carried it.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return []
+    normalized = [message for message in messages if isinstance(message, dict)]
+    if normalized and normalized[-1].get("role") == "user":
+        normalized[-1] = _tool_result_view(normalized, normalized[-1])
+    return normalized
 
 
 def _tool_name(messages: list[Any], tool_message: dict[str, Any]) -> str | None:
@@ -207,42 +315,137 @@ def _is_easy(tool: str, config: RouterConfig) -> bool:
     return _tool_class(tool, config) in ("read", "shell")
 
 
+def _stable_index(session_id: str, size: int) -> int:
+    """A deterministic index from a session id.
+
+    ``hash()`` is salted per process, so it would give this same session id a
+    different index in another process.  SHA-256 keeps the mapping stable for
+    the id it is given; the id itself is tamias's salted session digest.
+    """
+    digest = sha256(session_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % size
+
+
+def _pool_target(
+    state: SessionState,
+    config: RouterConfig,
+    requested: str,
+    ranked: Collection[str] | None = None,
+) -> str:
+    """The pool member this session should use, or ``""`` when none differs.
+
+    ``ranked`` is an already-ordered candidate list from the three routing gates
+    (cheapest capable first); the first entry the session is not already on wins,
+    so a limited or newly-cheaper model changes the answer without any state.
+    Without ``ranked``, a session keeps one target (stable hash) while different
+    sessions spread across the pool.
+
+    The requested model is skipped either way: switching to the model already
+    running would be a no-op and could not save anything.
+    """
+    pool = tuple(ranked) if ranked is not None else config.pool
+    if not pool:
+        return ""
+    if ranked is not None:
+        for candidate in pool:
+            if candidate != requested:
+                return candidate
+        return ""
+    start = _stable_index(state.session_id, len(pool))
+    for offset in range(len(pool)):
+        candidate = pool[(start + offset) % len(pool)]
+        if candidate != requested:
+            return candidate
+    return ""
+
+
+def _limited_target(
+    ranked: Collection[str],
+    qualities: dict[str, float] | None,
+    requested: str,
+) -> str:
+    """The best replacement for a model the provider has locked out.
+
+    Quality is held where it can be: the replacement must be at least as capable
+    as the model the caller asked for.  Only when no such model passed the gates
+    is the strongest available fallback used, because a slightly weaker answer
+    beats a guaranteed failure.
+    """
+    if not ranked:
+        return ""
+    floor = (qualities or {}).get(requested)
+    options = [model for model in ranked if model != requested]
+    if not options:
+        return ""
+    if floor is not None and qualities:
+        at_least = [model for model in options if qualities.get(model, 0.0) >= floor]
+        if at_least:
+            return at_least[0]
+    return options[0]
+
+
 def decide(
     body: dict[str, Any],
     state: SessionState,
     config: RouterConfig = DEFAULT_CONFIG,
+    *,
+    ranked: Collection[str] | None = None,
+    limited: Collection[str] = (),
+    qualities: dict[str, float] | None = None,
 ) -> Decision:
-    """Decide whether this request should be re-routed to ``config.cheap_model``.
+    """Decide whether this request should be re-routed to a pool member.
 
     Rules, evaluated in order:
 
+    0. the requested model is cooling down after a provider limit -> SWITCH to
+       the most capable model that passed the gates, because running it again
+       can only fail;
     1. a trailing ``user`` message means the agent is planning -> STAY;
     2. a trailing ``tool`` message carrying an error marker -> STAY;
     3. a trailing ``tool`` message whose shell output is over
        ``config.big_output_chars`` -> STAY;
     4. a trailing ``tool`` message from an easy tool -- under ``generic`` that
        is any read- or shell-family name -- with enough requests since the
-       last switch -> SWITCH to ``config.cheap_model``;
+       last switch -> SWITCH to a member of ``config.pool``;
     5. anything else -> STAY.
+
+    ``ranked`` is the ordered output of the three routing gates (cheapest
+    capable first); when given it replaces the static pool order.  ``limited``
+    names models the limit ledger has locked out, and ``qualities`` maps a model
+    id to its capability score so rule 0 can avoid a silent downgrade.
     """
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        messages = []
+    messages = _routing_messages(body)
     last: dict[str, Any] = {}
-    if messages and isinstance(messages[-1], dict):
+    if messages:
         last = messages[-1]
     requested_model = body.get("model")
     role = last.get("role")
+    markers = config.error_markers if config.error_markers is not None else ERROR_MARKERS
+
+    # Rule 0: a model inside its cooldown cannot answer, so the step type stops
+    # mattering.  This is checked before every other rule so a limited model is
+    # never kept just because the last turn looked hard.
+    if isinstance(requested_model, str) and requested_model in limited:
+        target = _limited_target(ranked or (), qualities, requested_model)
+        if target:
+            decision = _switch(
+                target,
+                f"requested model limited: {requested_model}",
+                availability=True,
+            )
+        else:
+            decision = _stay(f"requested model limited and no alternative: {requested_model}")
 
     # Rule 1: the user is talking; nothing about the last turn is routable.
-    if role == "user":
+    elif role == "user":
         decision = _stay("user turn: planning")
 
     elif role == "tool":
         # Rule 2: a failed tool call is exactly what needs the strong model.
+        # ``is_error`` is the structured form of the same signal (Anthropic
+        # tool results carry it), so it is honoured alongside the text markers.
         text = _text_of(last.get("content"))
-        markers = config.error_markers if config.error_markers is not None else ERROR_MARKERS
-        if any(marker in text for marker in markers):
+        if last.get("is_error") is True or any(marker in text for marker in markers):
             decision = _stay("tool error: needs strong model")
         else:
             # Rule 3: cheap mechanical work.
@@ -258,21 +461,42 @@ def decide(
                         f"shell output too large: {len(text)} >= {config.big_output_chars} chars"
                     )
                 elif _is_easy(tool, config):
-                    # Hysteresis: while we are already on the cheap model the gap
-                    # since the last switch is zero, so we stay put until it grows
-                    # again.
-                    gap = 0 if state.current_model == config.cheap_model else state.request_index
-                    if gap >= config.min_gap:
-                        decision = Decision(
-                            action="SWITCH",
-                            target_model=config.cheap_model,
-                            reason=f"easy tool: {tool}",
-                            target_effort="low" if config.effort_policy else None,
-                        )
+                    pool = tuple(ranked) if ranked is not None else config.pool
+                    target = _pool_target(
+                        state,
+                        config,
+                        requested_model if isinstance(requested_model, str) else "",
+                        ranked=ranked,
+                    )
+                    if pool and not target:
+                        decision = _stay("no pool target differs from the requested model")
+                    elif ranked is not None and not ranked:
+                        # Every model failed a gate: the limit ledger locked all
+                        # of them out.  Recording a SWITCH with no target would
+                        # claim a saving that cannot exist.
+                        decision = _stay("no model passed the routing gates")
                     else:
-                        decision = _stay(
-                            f"hysteresis: {gap} of {config.min_gap} requests since last switch"
+                        # Hysteresis: while we are already on a pool model the
+                        # gap is zero, so we stay put until it grows again.  With
+                        # no pool at all, a SWITCH is still recorded with an
+                        # empty target: shadow mode uses that to show the rule
+                        # matched even though nothing can be applied.
+                        gap = (
+                            0
+                            if pool and state.current_model in pool
+                            else state.request_index
                         )
+                        if gap >= config.min_gap:
+                            decision = Decision(
+                                action="SWITCH",
+                                target_model=target,
+                                reason=f"easy tool: {tool}",
+                                target_effort="low" if config.effort_policy else None,
+                            )
+                        else:
+                            decision = _stay(
+                                f"hysteresis: {gap} of {config.min_gap} requests since last switch"
+                            )
                 else:
                     decision = _stay(f"no rule matched: keep {requested_model}")
             else:

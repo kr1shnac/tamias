@@ -3,20 +3,26 @@
 Every command runs as `tamias <command>`. `tamias --help` lists them:
 
 ```text
-{prices,serve,run,report,dashboard,agent-config,doctor,prune,admin,config}
+{prices,serve,run,demo,reconcile,report,agent-config,opencode,service,registry,doctor,prune,admin,config}
 ```
 
 | Command | Purpose |
 | --- | --- |
 | `serve` | Run the proxy in front of an upstream. |
 | `run` | Run one command through a short-lived loopback proxy, then print its report. |
+| `demo` | Run one request through the proxy against a bundled mock upstream, then print a receipt — zero keys, zero network, zero config. |
+| `reconcile` | Reconcile logged rows against the provider's billed cost per request. |
 | `report` | Summarise cost and shadow routing from a log. |
-| `dashboard` | Serve the local run dashboard. |
 | `agent-config` | Print an agent configuration snippet. |
+| `opencode install` | Write the `/tamias` slash command OpenCode loads at startup. |
+| `service install` | Write a systemd user unit that runs `tamias serve` in the background (Linux). |
+| `service uninstall` | Stop and remove the unit tamias wrote. |
 | `doctor` | Check local tamias readiness. |
 | `prune` | Delete old rows from the request log. |
 | `admin` | Manage company keys and signed project manifests. |
 | `prices fetch` | Fetch an OpenRouter model price sheet. |
+| `prices zen` | Fetch OpenCode Zen's model list and write a sheet that prices its free models at $0 (paid models stay UNKNOWN). |
+| `registry zen` | Build a capability registry for Zen's free models from models.dev's published `tool_call` data. |
 | `config` | Show the effective configuration. |
 
 ## Configuration precedence
@@ -86,7 +92,7 @@ the schema.
 | `--router-mode {shadow,off,active}` | `shadow` | `off` disables routing; `shadow` records the decision without changing the request; `active` also rewrites the model to `--cheap-model`, but only a target `--registry` vouches for and `--prices` can price. |
 | `--router-profile {generic,legacy}` | `generic` | Matching strategy for the router. |
 | `--router-config PATH` | — | TOML router configuration path. |
-| `--cheap-model MODEL` | — | Model a SWITCH would move mechanical work to. |
+| `--cheap-model MODEL[,MODEL...]` | — | Model a SWITCH would move mechanical work to, or a comma-separated pool. Each session keeps one member; different sessions spread across the pool. `active` validates every member. |
 | `--strong-model MODEL` | — | Model the agent is expected to start on. |
 | `--min-gap N` | `3` | Requests that must pass after the last switch before switching again. |
 | `--effort-mode {off,meter,apply}` | `off` | Scope of the effort axis: `off` computes nothing, `meter` records the effort the policy would use, `apply` also sends it (only for a model `--registry` vouches for). |
@@ -104,6 +110,29 @@ the schema.
 | `--manifest-key KEY` | — | Pin the manifest to this Ed25519 public key. |
 | `--verbose` | off | Log every proxy event. |
 
+`--cheap-model` accepts a comma-separated pool, for example
+`--cheap-model deepseek-v4.1-flash-free,big-pickle`. With `--router-mode
+active`, a missing, tool-less, or unpriced member refuses startup, so a pool
+can never silently pick a model the deployment did not approve. The pool is
+not a failover: it spreads sessions, and a `429` from the chosen member is not
+retried on another. See [`ROUTING.md`](ROUTING.md#the-cheap-model-pool).
+
+## `tamias run` flags
+
+`tamias run [FLAGS] -- COMMAND` starts a short-lived proxy, runs `COMMAND` with
+`OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` pointed at it, then prints the receipt
+for that run. It takes the **same routing flags as `serve`**, with the same
+meanings and the same precedence (CLI flag > config file > built-in default):
+
+`--router-mode`, `--min-gap`, `--cheap-model`, `--strong-model`, `--registry`,
+`--router-config`, `--effort-mode`, `--keys-db`, `--request-ceiling-usd`,
+`--prices`, `--db`, `--upstream`, `--provider`.
+
+`--mode` is a **deprecated alias** for `--router-mode`, kept so existing
+`tamias run --mode active` invocations keep working. It prints a deprecation
+notice on stderr, and passing both flags with different values is a usage
+error (`2`). `--min-gap` was previously available only on `serve`.
+
 ## `tamias report` flags
 
 | Flag | Default | Meaning |
@@ -111,6 +140,126 @@ the schema.
 | `--db PATH` | — (required) | Path to the sqlite request log. |
 | `--prices PATH` | — (required) | TOML price sheet used to price the log. |
 | `--inr-rate RUPEES_PER_USD` | off | Also show each dollar amount converted to rupees at this fixed rate, e.g. `--inr-rate 85`. This is a **display conversion**, not a billed amount: the dollar figure stays authoritative and is the one that reconciles against a provider invoice. |
+
+## `tamias demo` flags
+
+| Flag | Required | Meaning |
+| --- | --- | --- |
+| `--prices PATH` | no | Price sheet used for savings estimates. Defaults to the bundled OpenRouter snapshot. |
+
+`tamias demo` runs one request against a bundled mock upstream, writes a local
+SQLite log (`.tamias-demo/demo.db`), prints the status, and then runs
+`tamias report` over it. Zero keys, zero network, zero config.
+
+## `tamias prices zen`
+
+```text
+tamias prices zen --out PATH [--url URL] [--force]
+```
+
+Fetches OpenCode Zen's model list (`https://opencode.ai/zen/v1/models`) and
+writes a price sheet in which **every model whose id marks it free** (`-free`
+suffix, plus the documented `big-pickle` exception) is priced at exactly `$0`.
+
+Paid models are deliberately **absent** from the sheet: Zen's models endpoint
+publishes ids but no rates, and an absent rate means `UNKNOWN` — never a guessed
+dollar figure. `tamias report` then prints exact token counts for those rows and
+says the dollars are unknown, instead of inventing a price.
+
+## `tamias opencode install`
+
+```text
+tamias opencode install --db PATH --prices PATH [--port PORT]
+                        [--project DIR] [--registry PATH]
+                        [--cheap-model MODEL[,MODEL...]] [--model ID ...]
+                        [--inr-rate RUPEES_PER_USD] [--force]
+```
+
+Writes the `/tamias` slash command into the directory OpenCode loads at startup:
+
+- global (default): `$XDG_CONFIG_HOME/opencode/commands/tamias.md`, falling back
+  to `~/.config/opencode/commands/tamias.md`
+- project: `<project>/.opencode/commands/tamias.md` when `--project` is given
+
+The command file injects `tamias report` output with OpenCode's shell syntax, so
+typing `/tamias` shows real logged numbers. The installer **never edits
+`opencode.json`**; it prints the provider block for you to merge, because
+rewriting a working config is not a safe default.
+
+`--inr-rate` embeds `report --inr-rate` into the slash command, so `/tamias`
+shows each dollar amount with a rupee conversion. The rate is a display
+conversion you supply, not a billed amount; leave it off rather than guess.
+
+Exit codes: `0` written, `2` the command file already exists and `--force` was
+not passed, `1` the file could not be written.
+
+## `tamias service install`
+
+```text
+tamias service install --db PATH --prices PATH [--registry PATH]
+                       [--cheap-model MODEL[,MODEL...]] [--port PORT]
+                       [--min-gap N] [--provider NAME]
+                       [--router-mode {shadow,off,active}]
+                       [--exec PATH] [--start] [--dry-run] [--force]
+```
+
+Writes `$XDG_CONFIG_HOME/systemd/user/tamias.service` (falling back to
+`~/.config/systemd/user/tamias.service`). `--db`, `--prices`, and `--registry`
+are resolved to absolute paths; the input files must already exist. The unit is
+written but not started unless `--start` is passed, which then runs
+`systemctl --user daemon-reload` and `enable --now tamias.service`.
+
+In `active` mode (the default) a target and a registry are required, mirroring
+`tamias serve`'s fail-closed check. `--dry-run` prints the unit without writing
+it; `--force` replaces an existing file. Exit codes: `0` written, `2` a usage
+error or an existing unit without `--force`, `1` the file could not be written
+or systemctl failed.
+
+```text
+tamias service uninstall [--dry-run] [--keep-running] [--force]
+```
+
+Stops and disables the unit, removes the file, and reloads systemd. It refuses
+to remove a file that lacks tamias's marker unless `--force` is given.
+`--keep-running` removes the file without stopping the proxy.
+
+## `tamias registry zen`
+
+```text
+tamias registry zen --out PATH [--models-url URL] [--catalog-url URL] [--force]
+```
+
+Joins two public feeds:
+
+- `https://opencode.ai/zen/v1/models` — the ids that are live right now;
+- `https://models.dev/api.json` — capability metadata, including `tool_call`
+  and the context limit.
+
+Only models that are **live**, **free** (`-free` suffix or the documented
+`big-pickle` exception), and **published as tool-capable** are written. A model
+missing from either feed, or with `tool_call` not true, is listed as excluded on
+stdout and left out of the registry. That is what lets `--router-mode active`
+start without guessing whether a free model can carry a tool call.
+
+This registry contains **capabilities only**. Prices stay in the price sheet.
+
+## `tamias reconcile` flags
+
+| Flag | Required | Meaning |
+| --- | --- | --- |
+| `--db PATH` | yes | Path to the SQLite request log. |
+| `--prices PATH` | no | TOML price sheet used to price the log. Defaults to the same resolution as `report`. |
+| `--api-key-env NAME` | no | Environment variable holding the provider API key (default `OPENROUTER_API_KEY`). Only the name is read; the secret never enters argv. |
+| `--out PATH` | no | Write a text-free JSON artifact (one row per request) to this path. |
+| `--since YYYY-MM-DD` | no | Lower bound on row timestamp (inclusive). |
+| `--until YYYY-MM-DD` | no | Upper bound on row timestamp (inclusive). |
+| `--tolerance USD` | no | Absolute USD tolerance used when comparing computed vs billed cost. |
+| `--json` | no | Emit a compact JSON summary on stdout instead of the human-readable report. |
+
+**Exit codes:** `0` complete, `1` runtime failure (reason on stderr), `2`
+`ZERO_ROWS` (no rows with a `generation_id` were found). See
+[`docs/RECONCILE.md`](RECONCILE.md) for the full contract, artifact columns, and
+third-party check notes.
 
 ## `tamias doctor`
 

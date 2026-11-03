@@ -121,7 +121,8 @@ def test_saving_falls_back_to_sheet_cheapest_without_a_logged_target(tmp_path, c
     assert abs(_estimated(out) - 0.00188) < 1e-9, out
     # With no router decision to read, the line discloses the sheet-cheapest
     # fallback rather than pretending the router chose it.
-    assert "cheap model assumed: mini-cheap" in out, out
+    assert "switch target: unknown for 1 switched row(s)" in out, out
+    assert "sheet-cheapest mini-cheap" in out, out
     assert "switch target (from router decisions)" not in out, out
 
 

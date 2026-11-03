@@ -17,10 +17,14 @@ import pytest
 from tamias.pricing import ModelPrice, compute_cost, load_price_sheet
 from tamias.pricing_fetch import (
     OPENROUTER_MODELS_URL,
+    ZEN_MODELS_URL,
     ParseResult,
+    fetch_model_ids,
     fetch_models,
     parse_models,
     render_sheet,
+    render_zen_sheet,
+    zen_free_models,
 )
 from tamias.types import Usage
 
@@ -422,3 +426,58 @@ def test_fetch_models_rejects_a_payload_without_a_data_list() -> None:
     opener = FakeOpener(b'{"error": "rate limited"}')
     with pytest.raises(ValueError, match="data"):
         fetch_models(opener)
+
+
+# --- OpenCode Zen: ids only, free models priced at $0 -------------------------
+
+ZEN_CATALOGUE = {
+    "object": "list",
+    "data": [
+        {"id": "deepseek-v4-pro"},
+        {"id": "big-pickle"},
+        {"id": "beam-free"},
+        {"id": "glm-5.3-flash-free"},
+        {"id": "claude-sonnet-5"},
+        {"no_id": True},
+        "not-an-object",
+    ],
+}
+
+
+def test_fetch_model_ids_reads_the_zen_shape() -> None:
+    opener = FakeOpener(json.dumps(ZEN_CATALOGUE).encode("utf-8"))
+    assert fetch_model_ids(opener) == [
+        "deepseek-v4-pro",
+        "big-pickle",
+        "beam-free",
+        "glm-5.3-flash-free",
+        "claude-sonnet-5",
+    ]
+    assert opener.requested == [ZEN_MODELS_URL]
+
+
+def test_zen_free_models_uses_the_suffix_and_the_documented_exception() -> None:
+    ids = ["deepseek-v4-pro", "big-pickle", "beam-free", "glm-5.3-flash-free"]
+    assert zen_free_models(ids) == ["beam-free", "big-pickle", "glm-5.3-flash-free"]
+
+
+def test_render_zen_sheet_prices_free_models_at_zero_and_omits_paid_ones(
+    tmp_path: Path,
+) -> None:
+    text = render_zen_sheet(
+        ["glm-5.3-flash-free", "big-pickle"], FETCHED_AT, ZEN_MODELS_URL
+    )
+    path = tmp_path / "zen.toml"
+    path.write_text(text, encoding="utf-8")
+    sheet = load_price_sheet(path)
+
+    assert "deepseek-v4-pro" not in sheet.models
+    assert "glm-5.3-flash-free" in sheet.models
+    usage = Usage(
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cached_input_tokens=0,
+        cache_write_tokens=0,
+    )
+    assert compute_cost("glm-5.3-flash-free", usage, sheet).usd == 0.0
+    assert compute_cost("deepseek-v4-pro", usage, sheet).usd is None

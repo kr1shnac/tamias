@@ -438,3 +438,62 @@ async def test_effort_is_applied_to_the_routed_model(
     assert body["model"] == CHEAP
     assert body["reasoning"] == {"effort": "low"}
     assert store.last["effort_used"] == "low"
+
+
+def test_active_validates_every_pool_member_not_only_the_primary(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    pool = RouterConfig(cheap_pool=(CHEAP, "gpt-other"), min_gap=0)
+    with pytest.raises(ValueError, match="gpt-other.*not in the capability registry"):
+        build_app(
+            upstream, store, sheet, router_config=pool, capabilities=registry(cheap_with_tools())
+        )
+
+
+def test_active_refuses_a_pool_member_that_cannot_call_tools(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    other = ModelInfo(id="gpt-other", provider="test", context_window=8192, tools=False)
+    pool = RouterConfig(cheap_pool=(CHEAP, "gpt-other"), min_gap=0)
+    with pytest.raises(ValueError, match="gpt-other.*does not support tool calls"):
+        build_app(
+            upstream,
+            store,
+            sheet,
+            router_config=pool,
+            capabilities=registry(cheap_with_tools(), other),
+        )
+
+
+def test_active_refuses_an_unpriced_pool_member(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    other = ModelInfo(id="gpt-other", provider="test", context_window=8192, tools=True)
+    pool = RouterConfig(cheap_pool=(CHEAP, "gpt-other"), min_gap=0)
+    with pytest.raises(ValueError, match="gpt-other.*not priced by the price sheet"):
+        build_app(
+            upstream,
+            store,
+            sheet,
+            router_config=pool,
+            capabilities=registry(cheap_with_tools(), other),
+        )
+
+
+def test_active_starts_when_every_pool_member_is_vouched_for(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    other = ModelInfo(id="gpt-other", provider="test", context_window=8192, tools=True)
+    price = ModelPrice(input=1.0, output=2.0)
+    priced = PriceSheet(
+        date="2026-10-15", models={CHEAP: price, STRONG: price, "gpt-other": price}
+    )
+    pool = RouterConfig(cheap_pool=(CHEAP, "gpt-other"), min_gap=0)
+    app = build_app(
+        upstream,
+        store,
+        priced,
+        router_config=pool,
+        capabilities=registry(cheap_with_tools(), other),
+    )
+    assert app.state.router_mode == "active"

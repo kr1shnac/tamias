@@ -34,10 +34,20 @@ or an in-process mock. What it pins down:
 - **Budgets and keys.** Reserve-then-settle, sub-caps, both rate windows, the
   reservation TTL, and 402/429 refusals on every metered route, against mocks.
   **UNTESTED live** — the arithmetic and the refusals are exercised against mocks; a live exercise (one capped key, one real request, one refusal) has not been run, so the caveat stands.
-- **The savings arithmetic is falsifiable.** The dashboard `saved` and both
-  `report` saving lines price the stay model with a warm cache and the switch
+- **The savings arithmetic is falsifiable.** The `report` saving lines price the stay model with a warm cache and the switch
   model on the row's real counts, so a constructed cache-miss replay yields
-  `saved <= 0` (`tests/test_dashboard.py`, `tests/test_cli.py`).
+  `saved <= 0` (`tests/test_cli.py`).
+- **Cheap-pool selection is deterministic and fail-closed.** A session keeps one
+  pool member across request indexes, different sessions spread across members,
+  the requested model is skipped, and every member is validated at active-mode
+  startup (`tests/test_router.py`, `tests/test_active_routing.py`). A single
+  model remains a one-member pool.
+- **The background unit is generated, not guessed.** `service install` writes
+  absolute paths, systemd-safe quoting, the routing flags, refuses an overwrite
+  without `--force`, validates every active target against the registry and
+  price sheet, and `service uninstall` refuses a unit it did not write
+  (`tests/test_service.py`). No systemctl call is made unless `--start` is
+  passed.
 
 ## Verified with authored rates (`scripts/shadow_rate_check.py`)
 
@@ -120,6 +130,41 @@ OpenRouter's live API (`https://openrouter.ai/api`), served by NVIDIA.
   is not deterministic. The live check therefore judges probe 2 on delivery, not
   on token counts.
 
+## Verified by hand against OpenCode Zen (routing only)
+Observed **2026-10-30** on Linux (Python 3.14, opencode 2.0.32), against
+`https://opencode.ai/zen` with **no API key**.
+
+- **The model list is live.** `tamias prices zen` fetched 82 ids and priced the
+  9 free ones at exactly `$0`; paid models were left out (UNKNOWN), not guessed.
+- **The registry is published, not assumed.** `tamias registry zen` joined that
+  list to models.dev's `tool_call` field and wrote 8 tool-capable free models;
+  `jev-1.13-free` was excluded because models.dev publishes no capability.
+- **Active routing fired against the real upstream.** A chat request whose last
+  message was a `read` tool result produced
+  `decision=SWITCH target=deepseek-v4.1-flash-free reason=easy tool: read`, and
+  the rewritten request reached Zen.
+- **The pool path is live (routing only).** The same request with a
+  two-member pool (`deepseek-v4.1-flash-free,big-pickle`) switched to
+  `deepseek-v4.1-flash-free`; the log and `tamias report` both named that switch
+  target. Zen still answered `429`, so this proves selection and logging, not a
+  completed turn on either member.
+- **The generated systemd unit is valid.** A unit written to a temporary
+  `XDG_CONFIG_HOME` passed `systemd-analyze verify` (exit 0), and its exact
+  `ExecStart` started the proxy and proxied `/v1/models` from Zen (HTTP 200).
+  It was not enabled with `systemctl --user`, so login startup is untested.
+- **No successful completion.** Zen returned `429` (anonymous request, no key),
+  so there are no token counts and no cost for that row. This proves the routing
+  decision and the rewrite, **not** that the free model completes a turn or that
+  money is saved.
+- **The default hysteresis matters.** With the default `--min-gap 3` the same
+  request stayed on the requested model (`hysteresis: 0 of 3`); `--min-gap 0`
+  produced the switch. The OpenCode guide recommends `0` for that reason.
+- **OpenCode config shape.** `opencode debug config` (v2.0.32) normalises the
+  documented `provider`/`npm`/`options` shape into `providers`. A provider block
+  **without** a `models` map lists nothing in `opencode models`; the installer
+  now writes the map from the registry or the free half of the price sheet, and
+  `opencode models` listed all 8.
+
 ## Verified with the provider ledger (`scripts/credit_ab_check.py`)
 
 A provider-ledger measurement is the one number that does not come from a price
@@ -166,7 +211,7 @@ smaller than the floor is reported as below the floor, not as a measurement.
 ## Not verified
 
 - **Savings measurement.** No measured savings exist. Every saving figure the
-  report or dashboard prints is arithmetic over invented or listed rates applied
+  report or the OpenCode panel prints is arithmetic over invented or listed rates applied
   to logged token counts; none has been reconciled against a provider invoice, and
   no paid, non-zero-price run has been authorised. The *arithmetic* is now
   verified against authored rates (`scripts/shadow_rate_check.py`, above,
@@ -176,6 +221,14 @@ smaller than the floor is reported as below the floor, not as a measurement.
   cheaper per task.
 - **Paid-model behaviour.** Every live rate used was a real `0`. Real per-token
   arithmetic against a **non-zero** rate has never been checked.
+- **Pool members beyond the routing-only target.** Only
+  `deepseek-v4.1-flash-free` has been observed receiving a rewritten request
+  (routing only; the upstream answered 429 without a key). No other pool member
+  has completed a live tool-calling turn, and a 429 on the chosen member is not
+  retried on another.
+- **The systemd unit has not been started here.** Its text, paths, quoting and
+  guards are tested offline; `systemctl --user enable --now` and a real
+  post-login restart have not been run.
 - **Anthropic, Codex and Claude Code live traffic.** The `/v1/messages` and
   `/v1/responses` routes are fixture-tested only; no live Anthropic, Codex or
   Claude Code traffic has been observed. Only `/v1/chat/completions` was
@@ -339,7 +392,7 @@ pending publisher existed. TestPyPI's newest is `0.1.0a3`.
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
 | Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`); no live ledger measurement has been taken |
-| Live provider behavior | Unverified | CI uses offline/injected transports only |
+| Live provider behavior | Partly verified | CI uses offline/injected transports only. One live OpenCode-Zen run (2026-10-30) observed a routing decision and rewrite against the real endpoint; it returned 429 without a key, so no completion, no token counts, and no cost were observed. |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions |
 | Publish | Released | `0.1.0a8` is on PyPI, published from tag `v0.1.0a8` via Trusted Publishing (OIDC) |
 

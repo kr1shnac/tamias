@@ -17,7 +17,7 @@ and every file it produces says SYNTHETIC on the face of it.
 What makes it a *demo* of tamias rather than a made-up table:
 
 * the request rows are written by the real :class:`tamias.store.Store`, so
-  ``tamias report``, ``tamias.dashboard`` and every other reader see a normal
+  ``tamias report`` and every other reader see a normal
   log and need no special case;
 * the routing decisions come from the real :func:`tamias.router.decide` fed the
   real message shapes an agent session produces, so the SWITCH/STAY mix is the

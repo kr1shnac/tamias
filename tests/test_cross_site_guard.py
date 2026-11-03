@@ -30,7 +30,6 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from tamias import proxy  # noqa: E402
-from tamias.dashboard import create_dashboard_app  # noqa: E402
 from tamias.pricing import load_price_sheet  # noqa: E402
 from tamias.security import host_is_allowed, origin_is_allowed  # noqa: E402
 from tamias.store import Store  # noqa: E402
@@ -118,21 +117,3 @@ def test_the_honest_non_browser_client_is_not_affected(tmp_path) -> None:
     app, store = _proxy_app(tmp_path, enforce_host=True)
     assert _client(app).post(CHAT, json=BODY).status_code == 200
     store.close()
-
-
-def test_the_dashboard_refuses_a_foreign_origin(tmp_path) -> None:
-    db = tmp_path / "dash.db"
-    Store(str(db)).close()
-    app = create_dashboard_app(str(db), str(PRICES))
-    client = _client(app)
-    assert client.get("/api/summary", headers={"Origin": "http://evil.example"}).status_code == 403
-    assert client.get("/api/summary").status_code == 200
-
-
-def test_the_dashboard_refuses_a_rebound_host_when_enforced(tmp_path) -> None:
-    db = tmp_path / "dash.db"
-    Store(str(db)).close()
-    app = create_dashboard_app(str(db), str(PRICES), enforce_host=True, trusted_hosts=["ok.local"])
-    client = _client(app)
-    assert client.get("/api/summary", headers={"Host": "evil.example"}).status_code == 403
-    assert client.get("/api/summary", headers={"Host": "ok.local"}).status_code == 200

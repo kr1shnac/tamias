@@ -19,6 +19,8 @@ import importlib.resources
 import json
 import logging
 import os
+import shlex
+import shutil
 import signal
 import socket
 import sqlite3
@@ -26,13 +28,20 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.request import build_opener, urlopen
+from urllib.request import urlopen
 
+from tamias import discovery as discovery_mod
 from tamias import manifest as manifest_mod
+from tamias.catalog import (
+    MODELS_DEV_URL,
+    build_zen_registry,
+    fetch_catalog,
+    render_registry,
+)
 from tamias.config import (
     PROVIDER_PRESETS,
     Config,
@@ -44,11 +53,27 @@ from tamias.config import (
 )
 from tamias.effort import EFFORT_MODES
 from tamias.keys import KeysError, KeyStore
-from tamias.pricing import PriceSheet, assume_cache_warm, compute_cost, load_price_sheet
+from tamias.limits import ledger_for
+from tamias.pricing import (
+    PriceSheet,
+    assume_cache_warm,
+    can_price,
+    compute_cost,
+    load_price_sheet,
+)
 from tamias.pricing_fetch import (
     OPENROUTER_MODELS_URL,
+    ZEN_MODELS_URL,
+    fetch_model_ids,
     fetch_models,
     render_sheet,
+    render_zen_sheet,
+    zen_free_models,
+)
+from tamias.providers import (
+    ProviderError,
+    catalogue_from_registry,
+    load_providers,
 )
 from tamias.registry import Registry, default_registry_path, load_registry
 from tamias.router import EASY_TOOLS, RouterConfig
@@ -349,8 +374,14 @@ def _print_target_line(
                 f"were priced against the sheet-cheapest {cheap or 'unknown'}"
             )
         print(line)
+    elif fallback_rows:
+        print(
+            f"switch target: unknown for {fallback_rows} switched row(s) with no "
+            f"router decision; savings priced against the sheet-cheapest "
+            f"{cheap or 'unknown'}"
+        )
     else:
-        print(f"cheap model assumed: {cheap or 'unknown'}")
+        print("switch target: not recorded yet (no routed request in this log)")
 
 
 def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> None:
@@ -389,6 +420,21 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
         if isinstance(row.get("model_requested"), str) and row["model_requested"].endswith(":free")
     )
 
+    # The token ledger is the price-independent measurement.  Token counts are
+    # exact even when no rate exists, so they are always shown: when a dollar
+    # figure is UNKNOWN the token counts are the honest parameter that remains.
+    token_input = 0
+    token_output = 0
+    token_cached = 0
+    token_rows = 0
+    zero_input = 0
+    zero_output = 0
+    unknown_input = 0
+    unknown_output = 0
+    diverted_input = 0
+    diverted_output = 0
+    diverted_rows = 0
+
     realised_saved = 0.0
     realised_count = 0
     realised_unpriced = 0
@@ -406,6 +452,31 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
             unknown_costs += 1
         else:
             known_total += cost
+        row_input = _count(row, "input_tokens")
+        row_output = _count(row, "output_tokens")
+        if row_input is not None or row_output is not None:
+            token_rows += 1
+            token_input += row_input or 0
+            token_output += row_output or 0
+            token_cached += _count(row, "cached_input_tokens") or 0
+            if cost is None:
+                unknown_input += row_input or 0
+                unknown_output += row_output or 0
+            elif cost == 0:
+                zero_input += row_input or 0
+                zero_output += row_output or 0
+            used = row.get("model_used")
+            requested = row.get("model_requested")
+            if (
+                isinstance(used, str)
+                and isinstance(requested, str)
+                and used
+                and requested
+                and used != requested
+            ):
+                diverted_rows += 1
+                diverted_input += row_input or 0
+                diverted_output += row_output or 0
         if not _would_switch(row):
             pass
         else:
@@ -466,6 +537,28 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
         print(
             f"passthrough requests (count-only, never priced): {passthrough}"
         )
+    if token_rows:
+        print(
+            f"tokens: {token_input:,} input / {token_output:,} output / "
+            f"{token_cached:,} cached "
+            f"({token_rows} of {len(rows)} requests report counts)"
+        )
+        if zero_input or zero_output:
+            print(
+                f"tokens on $0-priced models: {zero_input:,} input / "
+                f"{zero_output:,} output"
+            )
+        if unknown_input or unknown_output:
+            print(
+                f"tokens with UNKNOWN cost: {unknown_input:,} input / "
+                f"{unknown_output:,} output (token counts are exact; "
+                "no dollar figure was computed)"
+            )
+        if diverted_rows:
+            print(
+                f"tokens routed to a different model: {diverted_input:,} input / "
+                f"{diverted_output:,} output ({diverted_rows} of {len(rows)} requests)"
+            )
     # Determine provenance qualifier for total cost
     stored_rows_simulated = any(flag is True for flag in stored_flags)
     is_legacy = unknown_provenance > 0 or (
@@ -551,6 +644,19 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
             billed_values.append(billed_value)
             if computed is not None:
                 reconciled.append((computed, billed_value))
+
+    fail_open = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("failure_stage") or row.get("failure_type"):
+            fail_open += 1
+    if fail_open:
+        print(
+            f"receipt incomplete: {fail_open} of {len(rows)} requests failed "
+            "upstream or streamed badly (fail-open events logged)"
+        )
+
     if billed_values:
         print(
             f"spent (billed by OpenRouter): {money(sum(billed_values))} over "
@@ -686,6 +792,22 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
         )
 
 
+def _model_pool(value: str) -> tuple[str, ...]:
+    """Split a comma-separated model list into an ordered, de-duplicated pool.
+
+    A single value is the ordinary one-target configuration.  The first entry is
+    the primary, so existing scripts that pass one model keep the same target.
+    """
+    seen: set[str] = set()
+    pool: list[str] = []
+    for item in value.split(","):
+        model = item.strip()
+        if model and model not in seen:
+            seen.add(model)
+            pool.append(model)
+    return tuple(pool)
+
+
 def build_serve_app(
     upstream: str,
     prices: str,
@@ -711,6 +833,8 @@ def build_serve_app(
     manifest_key: object = None,
     trusted_hosts: object = None,
     enforce_host: bool = False,
+    providers: object = None,
+    limits: object = None,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
@@ -724,9 +848,11 @@ def build_serve_app(
     sheet = load_price_sheet(prices)
     store = Store(db)
     key_store = KeyStore(keys_db) if keys_db else None
+    pool = _model_pool(cheap_model)
     config = router_config or RouterConfig(
         easy_tools=EASY_TOOLS,
-        cheap_model=cheap_model,
+        cheap_model=pool[0] if pool else "",
+        cheap_pool=pool if len(pool) > 1 else (),
         strong_model=strong_model,
         min_gap=min_gap,
     )
@@ -751,6 +877,8 @@ def build_serve_app(
         manifest_key=manifest_key,
         trusted_hosts=trusted_hosts,
         enforce_host=enforce_host,
+        providers=providers,
+        limits=limits,
     )
     app.state.store = store
     return app
@@ -1050,15 +1178,24 @@ def serve(args: argparse.Namespace) -> int:
     from tamias.security import is_loopback, refuse_non_loopback
 
     cfg = _load_effective_config(args)
+    # Providers first: a catalogue makes a single --upstream optional, because
+    # each model then names the provider that serves it.
+    explicit_providers = pick(getattr(args, "providers", None), cfg.providers, None)
+    try:
+        catalogue = load_providers(explicit_providers, missing_ok=not explicit_providers)
+    except ProviderError as exc:
+        print(f"tamias serve: {exc}", file=sys.stderr)
+        return 2
     upstream = _resolve_upstream(args, cfg)
-    if not upstream:
+    if not upstream and not len(catalogue):
         print(
-            "tamias serve: an upstream is required; pass --upstream, set "
-            f"${UPSTREAM_ENV_VAR}, or set upstream/provider in the config file",
+            "tamias serve: an upstream is required; pass --upstream, "
+            f"set ${UPSTREAM_ENV_VAR}, set upstream/provider in the config file, or "
+            "write ~/.tamias/providers.toml to route across providers",
             file=sys.stderr,
         )
         return 2
-    args.upstream = upstream
+    args.upstream = upstream or "http://127.0.0.1:0/unconfigured"
     args.router_mode = _resolve_router_mode(args, cfg)
     args.effort_mode = _resolve_effort_mode(args, cfg)
     if not _flag_given(args, "--host") and cfg.host is not None:
@@ -1099,6 +1236,28 @@ def serve(args: argparse.Namespace) -> int:
         args.cheap_model = cfg.cheap_model
     if not _flag_given(args, "--strong-model") and cfg.strong_model is not None:
         args.strong_model = cfg.strong_model
+
+    # Discovery and the limit ledger.  A deployment with no provider file keeps
+    # today's single-upstream behaviour exactly.
+    registry = _load_registry(args)
+    if len(catalogue) and getattr(args, "discover", True):
+        report = discovery_mod.discover(catalogue)
+        registry = discovery_mod.merge_into(registry, report)
+        print(f"tamias serve: discovered {report.summary()}", file=sys.stderr)
+    if len(catalogue):
+        catalogue = catalogue_from_registry(catalogue, registry)
+        missing = catalogue.unconfigured()
+        if missing:
+            print(
+                "tamias serve: no credential for "
+                + ", ".join(missing)
+                + "; those providers are skipped by routing until it is set",
+                file=sys.stderr,
+            )
+    limits_path = getattr(args, "limits", None)
+    if limits_path is None and args.db != ":memory:":
+        limits_path = str(Path(args.db).expanduser().parent / "limits.db")
+    limit_ledger = ledger_for(limits_path) if len(catalogue) else None
 
     # A wider bind needs *some* authentication.  Company keys count: requiring
     # the shared --auth-token here would force every deployment beyond loopback
@@ -1177,7 +1336,7 @@ def serve(args: argparse.Namespace) -> int:
         router_config=_serve_router_config(args),
         effort_style=args.effort_style,
         effort_mode=args.effort_mode,
-        registry=_load_registry(args),
+        registry=registry,
         keys_db=args.keys_db,
         auth_token=auth_token,
         max_body_bytes=max_body_bytes,
@@ -1187,10 +1346,16 @@ def serve(args: argparse.Namespace) -> int:
         manifest_key=manifest_key,
         trusted_hosts=args.trusted_host,
         enforce_host=bool(args.trusted_host) or not is_loopback(args.host),
+        providers=catalogue,
+        limits=limit_ledger,
     )
+    if len(catalogue):
+        target = " + ".join(catalogue.names())
+    else:
+        target = args.upstream
     print(
         f"tamias serve: {args.router_mode} mode, "
-        f"{scheme}://{args.host}:{args.port}{proxy_path()} -> {args.upstream}{proxy_path()}",
+        f"{scheme}://{args.host}:{args.port}{proxy_path()} -> {target}",
         file=sys.stderr,
     )
     print(f"tamias serve: request log {args.db}, prices {args.prices}", file=sys.stderr)
@@ -1261,25 +1426,481 @@ def proxy_path() -> str:
     return CHAT_PATH
 
 
-def agent_config(agent: str, port: int, project: str | None) -> str:
-    """Return a paste-only local proxy snippet; this never writes configuration."""
+def agent_config(
+    agent: str,
+    port: int,
+    project: str | None,
+    models: Sequence[str] = (),
+) -> str:
+    """Return a paste-only local proxy snippet; this never writes configuration.
+
+    For OpenCode, ``models`` becomes the provider's ``models`` map.  OpenCode
+    needs at least one model to offer in its picker; a provider block without
+    one is accepted by the config parser but lists nothing.
+    """
     prefix = f"/p/{project}" if project else ""
     root = f"http://127.0.0.1:{port}{prefix}"
     if agent == "claude-code":
         return f"export ANTHROPIC_BASE_URL={root}"
     if agent == "codex":
         return f'[model_providers.tamias]\nbase_url = "{root}/v1"\nwire_api = "responses"'
+    provider: dict[str, Any] = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "tamias",
+        "options": {"baseURL": f"{root}/v1"},
+    }
+    if models:
+        provider["models"] = {model: {"name": model} for model in models}
     return json.dumps(
-        {
-            "provider": {
-                "tamias": {
-                    "npm": "@ai-sdk/openai-compatible",
-                    "options": {"baseURL": f"{root}/v1"},
-                }
-            }
-        },
+        {"provider": {"tamias": provider}},
         separators=(",", ":"),
     )
+
+
+OPENCODE_COMMAND_FILENAME = "tamias.md"
+
+
+def _opencode_commands_dir(project: str | None) -> Path:
+    """Where OpenCode loads custom slash commands from.
+
+    Global commands live in ``$XDG_CONFIG_HOME/opencode/commands`` (default
+    ``~/.config/opencode/commands``); project commands in
+    ``<project>/.opencode/commands``.
+    """
+    if project:
+        return Path(project).expanduser() / ".opencode" / "commands"
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+    return root / "opencode" / "commands"
+
+
+def _opencode_model_ids(args: argparse.Namespace) -> list[str]:
+    """The models to offer in OpenCode's picker, from what the user passed.
+
+    A registry is the strongest source because it records capabilities. Without
+    one, only free models from the price sheet are offered, so a large paid
+    sheet does not dump hundreds of unrelated ids into the config. ``--model``
+    adds explicit ids, and ``--cheap-model`` is always included because the
+    printed serve command names it.
+    """
+    models: list[str] = []
+    registry = getattr(args, "registry", None)
+    if registry:
+        models.extend(load_registry(Path(registry).expanduser()).ids())
+    else:
+        sheet = load_price_sheet(args.prices)
+        models.extend(
+            model
+            for model, price in sheet.models.items()
+            if price.input == 0 and price.output == 0
+        )
+    models.extend(getattr(args, "model", None) or [])
+    cheap = getattr(args, "cheap_model", None)
+    if cheap:
+        # The same flag carries a single model or a comma-separated pool; the
+        # picker must list each member, never the comma-joined string as an id.
+        models.extend(part.strip() for part in cheap.split(",") if part.strip())
+    seen: set[str] = set()
+    unique: list[str] = []
+    for model in models:
+        if model not in seen:
+            seen.add(model)
+            unique.append(model)
+    return unique
+
+
+def _tamias_executable() -> str:
+    """The tamias binary to embed in a generated OpenCode command.
+
+    Prefer the executable that is running this command.  A user in a virtualenv
+    may have an older ``tamias`` earlier on ``PATH``, and the slash command must
+    call the version that wrote it, not whatever ``which`` finds first.
+    """
+    argv0 = sys.argv[0] if sys.argv else ""
+    candidate = Path(argv0).expanduser()
+    if candidate.name in ("tamias", "tamias.exe") and candidate.is_file():
+        return str(candidate.resolve())
+    return shutil.which("tamias") or "tamias"
+
+
+def opencode_install(args: argparse.Namespace) -> int:
+    """Write the ``/tamias`` slash command OpenCode loads at startup.
+
+    The command injects ``tamias report`` output into the prompt, so the model
+    can summarise real logged numbers instead of guessing them.  It never
+    touches ``opencode.json``: the provider block is printed for the user to
+    merge, because rewriting a working config is not a safe default.
+    """
+    db = str(Path(args.db).expanduser())
+    prices = str(Path(args.prices).expanduser())
+    target = _opencode_commands_dir(args.project) / OPENCODE_COMMAND_FILENAME
+    if target.exists() and not args.force:
+        print(
+            f"tamias opencode install: {target} already exists; pass --force to replace it",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        models = _opencode_model_ids(args)
+    except (OSError, ValueError) as exc:
+        print(f"tamias opencode install: {exc}", file=sys.stderr)
+        return 1
+    if not models:
+        print(
+            "tamias opencode install: no models to offer; pass --model, or a "
+            "--registry/--prices that lists free models",
+            file=sys.stderr,
+        )
+        return 2
+    report_command = (
+        f"{shlex.quote(_tamias_executable())} report "
+        f"--db {shlex.quote(db)} --prices {shlex.quote(prices)}"
+    )
+    inr_rate = getattr(args, "inr_rate", None)
+    if inr_rate is not None:
+        report_command += f" --inr-rate {inr_rate:g}"
+    content = (
+        "---\n"
+        "description: Show tamias savings, tokens and routing status\n"
+        "---\n\n"
+        f"!`{report_command}`\n\n"
+        "Summarise the report above in at most six lines: requests, total cost "
+        "(or why it is UNKNOWN), the token counts, how many requests were routed "
+        "or would have been routed to the cheap model, and the estimated and "
+        "realised saving. Never invent a dollar figure when the report says "
+        "UNKNOWN -- quote the token counts instead. End with one sentence on what "
+        "tamias is doing in this session.\n"
+    )
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        print(f"tamias opencode install: {exc}", file=sys.stderr)
+        return 1
+    print(f"wrote {target}")
+    print("")
+    print("provider block for opencode.json (merge it, do not replace the file):")
+    print(agent_config("opencode", args.port, None, models))
+    print("")
+    print("start the proxy with the same --db and --prices:")
+    cheap = ",".join(_model_pool(getattr(args, "cheap_model", "") or ""))
+    serve = [
+        "tamias serve",
+        "--provider opencode",
+        f"--db {shlex.quote(db)}",
+        f"--prices {shlex.quote(prices)}",
+        f"--port {args.port}",
+        "--router-mode active",
+        "--min-gap 0",
+        f"--cheap-model {shlex.quote(cheap) if cheap else '<free-model>'}",
+    ]
+    registry = getattr(args, "registry", None)
+    if registry:
+        serve.append(f"--registry {shlex.quote(str(Path(registry).expanduser()))}")
+    print("  " + " ".join(serve))
+    print("then restart OpenCode and type /tamias")
+    return 0
+
+
+SERVICE_UNIT_NAME = "tamias.service"
+SERVICE_MARKER = "# Managed by tamias: tamias service install"
+
+
+def _systemd_user_dir() -> Path:
+    """The systemd user unit directory, honouring ``XDG_CONFIG_HOME``."""
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+    return root / "systemd" / "user"
+
+
+def _service_file(value: str, label: str) -> str:
+    """An existing input file as an absolute path, or a usage error."""
+    path = Path(value).expanduser()
+    if not path.is_file():
+        raise ValueError(f"{label} does not exist: {path}")
+    return str(path.resolve())
+
+
+def _service_db(value: str) -> str:
+    """A database path whose directory exists, resolved to absolute."""
+    path = Path(value).expanduser()
+    if not path.parent.is_dir():
+        raise ValueError(f"database directory does not exist: {path.parent}")
+    return str(path.resolve())
+
+
+def _systemd_exec_arg(value: str) -> str:
+    """Quote one ``ExecStart`` argument for systemd.
+
+    systemd has its own quoting rules, not the shell's, so ``shlex.quote`` is
+    not safe here.  ``%`` is a specifier introducer even inside quotes and must
+    be doubled.  A value containing both quote styles (or a backslash) is
+    rejected rather than guessed at.
+    """
+    if not value:
+        return '""'
+    value = value.replace("%", "%%")
+    safe = set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        "/._-:,=+@"
+    )
+    if all(ch in safe for ch in value):
+        return value
+    if "\n" in value or "\r" in value or "\x00" in value:
+        raise ValueError("a service argument contains a control character")
+    if "'" not in value and "\\" not in value:
+        return f"'{value}'"
+    if '"' not in value and "\\" not in value and "$" not in value:
+        return f'"{value}"'
+    raise ValueError(
+        "cannot safely quote a service argument containing both quote styles, "
+        "a backslash, or a dollar sign"
+    )
+
+
+def render_service_unit(
+    executable: str,
+    *,
+    db: str,
+    prices: str,
+    registry: str | None,
+    cheap_model: str,
+    port: int,
+    min_gap: int,
+    provider: str,
+    router_mode: str,
+) -> str:
+    """A systemd user unit that runs ``tamias serve`` with these settings."""
+    argv = [
+        executable,
+        "serve",
+        "--provider",
+        provider,
+        "--db",
+        db,
+        "--prices",
+        prices,
+        "--port",
+        str(port),
+        "--router-mode",
+        router_mode,
+        "--min-gap",
+        str(min_gap),
+    ]
+    if registry:
+        argv.extend(["--registry", registry])
+    if cheap_model:
+        argv.extend(["--cheap-model", cheap_model])
+    exec_start = " ".join(_systemd_exec_arg(part) for part in argv)
+    return (
+        f"{SERVICE_MARKER}\n"
+        "[Unit]\n"
+        "Description=tamias model router for OpenCode\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={exec_start}\n"
+        "Restart=on-failure\n"
+        "RestartSec=3\n"
+        "TimeoutStopSec=10\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def _systemctl_user(*command: str) -> int:
+    """Run ``systemctl --user`` and report failure without raising."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", *command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"tamias service: systemctl failed: {exc}", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        print(
+            f"tamias service: systemctl {' '.join(command)} failed"
+            f"{': ' + detail if detail else ''}",
+            file=sys.stderr,
+        )
+    return result.returncode
+
+
+def service_install(args: argparse.Namespace) -> int:
+    """Write a systemd user unit for ``tamias serve``.
+
+    The unit is written but not started unless ``--start`` is passed, so an
+    install never changes a running system by surprise.  Active routing needs
+    the same things ``serve`` needs: a target and a registry that vouches for
+    it.  Checking that here turns a unit that would crash-loop into a usage
+    error before anything is written.
+    """
+    if sys.platform != "linux":
+        print(
+            "tamias service install: systemd user units are Linux-only; "
+            "see docs/OPENCODE.md for manual background setup",
+            file=sys.stderr,
+        )
+        return 2
+    if args.provider not in PROVIDER_PRESETS:
+        choices = ", ".join(sorted(PROVIDER_PRESETS))
+        print(
+            f"tamias service install: unknown provider {args.provider!r}; "
+            f"choose one of: {choices}",
+            file=sys.stderr,
+        )
+        return 2
+    cheap_models = _model_pool(args.cheap_model)
+    if args.router_mode == "active" and not cheap_models:
+        print(
+            "tamias service install: active routing needs --cheap-model",
+            file=sys.stderr,
+        )
+        return 2
+    if args.router_mode == "active" and not args.registry:
+        print(
+            "tamias service install: active routing needs --registry so every "
+            "target is vouched for",
+            file=sys.stderr,
+        )
+        return 2
+    if args.router_mode == "active":
+        try:
+            registry_path = _service_file(args.registry, "registry")
+            prices_path = _service_file(args.prices, "price sheet")
+            registry_obj = load_registry(Path(registry_path))
+            sheet = load_price_sheet(prices_path)
+        except (OSError, ValueError) as exc:
+            print(f"tamias service install: {exc}", file=sys.stderr)
+            return 2
+        for target in cheap_models:
+            info = registry_obj.get(target)
+            if info is None or not info.tools:
+                print(
+                    f"tamias service install: target {target!r} is not a "
+                    "tool-capable entry in the registry",
+                    file=sys.stderr,
+                )
+                return 2
+            if not can_price(target, sheet):
+                print(
+                    f"tamias service install: target {target!r} is not priced "
+                    f"by {args.prices}",
+                    file=sys.stderr,
+                )
+                return 2
+    executable = args.executable or _tamias_executable()
+    resolved = Path(executable).expanduser()
+    if not resolved.is_absolute():
+        found = shutil.which(executable)
+        if not found:
+            print(
+                f"tamias service install: cannot find executable {executable!r}; "
+                "pass --exec PATH",
+                file=sys.stderr,
+            )
+            return 2
+        resolved = Path(found)
+    try:
+        unit = render_service_unit(
+            str(resolved.resolve()),
+            db=_service_db(args.db),
+            prices=_service_file(args.prices, "price sheet"),
+            registry=_service_file(args.registry, "registry") if args.registry else None,
+            cheap_model=",".join(cheap_models),
+            port=args.port,
+            min_gap=args.min_gap,
+            provider=args.provider,
+            router_mode=args.router_mode,
+        )
+    except ValueError as exc:
+        print(f"tamias service install: {exc}", file=sys.stderr)
+        return 2
+    target = _systemd_user_dir() / SERVICE_UNIT_NAME
+    if args.dry_run:
+        print(f"# {target}")
+        print(unit, end="")
+        return 0
+    if target.exists() and not args.force:
+        print(
+            f"tamias service install: {target} already exists; pass --force to replace it",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(unit, encoding="utf-8")
+    except OSError as exc:
+        print(f"tamias service install: {exc}", file=sys.stderr)
+        return 1
+    print(f"wrote {target}")
+    if args.start:
+        if _systemctl_user("daemon-reload") != 0:
+            print("the unit was written but not started", file=sys.stderr)
+            return 1
+        if _systemctl_user("enable", "--now", SERVICE_UNIT_NAME) != 0:
+            print("the unit was written but not started", file=sys.stderr)
+            return 1
+        print("started; logs: journalctl --user -u tamias -f")
+    else:
+        print("enable it with:")
+        print("  systemctl --user daemon-reload")
+        print(f"  systemctl --user enable --now {SERVICE_UNIT_NAME}")
+    return 0
+
+
+def service_uninstall(args: argparse.Namespace) -> int:
+    """Stop and remove the unit, but only one tamias wrote."""
+    if sys.platform != "linux":
+        print(
+            "tamias service uninstall: systemd user units are Linux-only",
+            file=sys.stderr,
+        )
+        return 2
+    target = _systemd_user_dir() / SERVICE_UNIT_NAME
+    if not target.exists():
+        print(f"{SERVICE_UNIT_NAME} is not installed at {target}")
+        return 0
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"tamias service uninstall: {exc}", file=sys.stderr)
+        return 1
+    if SERVICE_MARKER not in text and not args.force:
+        print(
+            f"tamias service uninstall: {target} was not written by tamias; "
+            "pass --force to remove it anyway",
+            file=sys.stderr,
+        )
+        return 2
+    if args.dry_run:
+        print(f"would remove {target}")
+        if not args.keep_running:
+            print(f"would run systemctl --user disable --now {SERVICE_UNIT_NAME}")
+        return 0
+    if not args.keep_running and _systemctl_user(
+        "disable", "--now", SERVICE_UNIT_NAME
+    ) != 0:
+        print(
+            "tamias service uninstall: the unit file is still being removed",
+            file=sys.stderr,
+        )
+    try:
+        target.unlink()
+    except OSError as exc:
+        print(f"tamias service uninstall: {exc}", file=sys.stderr)
+        return 1
+    _systemctl_user("daemon-reload")
+    print(f"removed {target}")
+    return 0
 
 
 def _env_positive_int(name: str, default: int) -> int | None:
@@ -1423,6 +2044,7 @@ def _port_is_free(port: int) -> bool:
 
 def _serve_router_config(args: argparse.Namespace) -> RouterConfig:
     config = load_router_config(args.router_config, args.router_profile)
+    cheap = _model_pool(str(args.cheap_model or config.cheap_model or ""))
     return RouterConfig(
         profile=config.profile,
         easy_tools=config.easy_tools,
@@ -1431,7 +2053,8 @@ def _serve_router_config(args: argparse.Namespace) -> RouterConfig:
         error_markers=config.error_markers,
         big_output_chars=config.big_output_chars,
         effort_policy=args.effort_mode != "off",
-        cheap_model=args.cheap_model or config.cheap_model,
+        cheap_model=cheap[0] if cheap else "",
+        cheap_pool=cheap if len(cheap) > 1 else (),
         strong_model=args.strong_model or config.strong_model,
         min_gap=args.min_gap if args.min_gap is not None else config.min_gap,
     )
@@ -1585,7 +2208,22 @@ def run(args: argparse.Namespace) -> int:
     strong_model = args.strong_model if getattr(args, "strong_model", None) != "" else (
         cfg.strong_model or ""
     )
-    run_router_mode = args.mode if args.mode is not None else cfg.router_mode
+    if getattr(args, "mode", None) is not None:
+        print(
+            "tamias run: --mode is deprecated and will be removed after the next "
+            "release; use --router-mode",
+            file=sys.stderr,
+        )
+    if getattr(args, "router_mode", None) is not None and getattr(args, "mode", None) is not None:
+        if args.router_mode != args.mode:
+            print(
+                "tamias run: --router-mode and the deprecated --mode disagree; "
+                "use --router-mode only",
+                file=sys.stderr,
+            )
+            return 2
+    explicit_mode = getattr(args, "router_mode", None) or getattr(args, "mode", None)
+    run_router_mode = explicit_mode if explicit_mode is not None else cfg.router_mode
 
     try:
         db = _reserve_run_db(db_override, args.project)
@@ -1616,6 +2254,8 @@ def run(args: argparse.Namespace) -> int:
     ]
     if run_router_mode:
         serve_command.extend(("--router-mode", run_router_mode))
+    if getattr(args, "min_gap", None) is not None:
+        serve_command.extend(("--min-gap", str(args.min_gap)))
     if args.router_config:
         serve_command.extend(("--router-config", args.router_config))
     if args.effort_mode:
@@ -1722,6 +2362,25 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--router-profile", choices=("generic", "legacy"), default="generic")
     serve_parser.add_argument("--router-config", help="TOML router configuration path")
     serve_parser.add_argument(
+        "--providers",
+        default=None,
+        help=(
+            "provider catalogue TOML (default: ~/.tamias/providers.toml when it "
+            "exists). Each entry names a base URL and an api_key_env/api_key_command."
+        ),
+    )
+    serve_parser.add_argument(
+        "--no-discover",
+        dest="discover",
+        action="store_false",
+        help="do not read each provider's /v1/models at start-up; use the registry as written",
+    )
+    serve_parser.add_argument(
+        "--limits",
+        default=None,
+        help="sqlite file remembering provider cooldowns (default: limits.db beside the log)",
+    )
+    serve_parser.add_argument(
         "--prices", default=None, help="path to the TOML price sheet"
     )
     serve_parser.add_argument("--db", default=None, help="path to the sqlite request log")
@@ -1788,7 +2447,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--cheap-model",
         default="",
-        help="model a SWITCH would move mechanical work to; without it a shadow "
+        help="model a SWITCH moves mechanical work to, or a comma-separated "
+        "pool (the first is primary). Each session keeps one pool member while "
+        "different sessions spread across the pool. Without it a shadow "
         "decision has no target and no measurable saving",
     )
     serve_parser.add_argument(
@@ -1860,14 +2521,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run_parser = sub.add_parser("run", help="run one command through a short-lived proxy")
-    run_parser.add_argument("--mode", choices=ROUTER_MODES, default=None)
+    run_parser.add_argument(
+        "--router-mode",
+        choices=ROUTER_MODES,
+        default=None,
+        help="off disables routing; shadow records the decision without changing the "
+        "request; active also rewrites the model to --cheap-model, but only a "
+        "target --registry vouches for and --prices can price "
+        "(default: the router-config value, else shadow)",
+    )
+    run_parser.add_argument(
+        "--mode",
+        choices=ROUTER_MODES,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     run_parser.add_argument("--effort-mode", choices=EFFORT_MODES, default=None)
     run_parser.add_argument("--registry", default=None)
     run_parser.add_argument("--keys-db", default=None)
     run_parser.add_argument("--request-ceiling-usd", default=None)
     run_parser.add_argument("--project")
-    run_parser.add_argument("--cheap-model", default="")
+    run_parser.add_argument(
+        "--cheap-model",
+        default="",
+        help="model or comma-separated pool a SWITCH moves work to",
+    )
     run_parser.add_argument("--strong-model", default="")
+    run_parser.add_argument(
+        "--min-gap",
+        type=int,
+        default=None,
+        help="requests that must pass after the last switch before switching again",
+    )
     run_parser.add_argument("--db", help="new sqlite request log path")
     run_parser.add_argument(
         "--prices",
@@ -1908,31 +2593,167 @@ def build_parser() -> argparse.ArgumentParser:
         help="also show each dollar amount converted to rupees at this fixed "
         "rate (a display conversion, not a billed amount); e.g. --inr-rate 85",
     )
-    dashboard_parser = sub.add_parser("dashboard", help="serve the local run dashboard")
-    dashboard_parser.add_argument("--db", required=True, help="path to the proxy sqlite log")
-    dashboard_parser.add_argument("--prices", required=True, help="path to the TOML price sheet")
-    dashboard_parser.add_argument("--port", type=int, default=8010, help="port to listen on")
-    dashboard_parser.add_argument("--compare-db", help="optional baseline database to compare")
-    dashboard_parser.add_argument("--host", default="127.0.0.1", help="address to bind")
-    dashboard_parser.add_argument(
-        "--allow-non-loopback",
-        action="store_true",
-        help="acknowledge the wider bind and bind anyway",
+    zen_parser = prices_sub.add_parser(
+        "zen",
+        help="fetch OpenCode Zen's model list and price its free models at $0",
     )
-    dashboard_parser.add_argument(
-        "--trusted-host",
-        action="append",
-        default=[],
-        metavar="NAME",
-        help=(
-            "Host header to allow beyond loopback (repeatable); passing it turns on "
-            "the Host allowlist when bound to a wider host"
-        ),
+    zen_parser.add_argument("--out", required=True, help="new TOML price sheet path")
+    zen_parser.add_argument("--url", default=ZEN_MODELS_URL, help="Zen model-list URL")
+    zen_parser.add_argument(
+        "--force", action="store_true", help="overwrite an existing output file"
     )
+
     agent_parser = sub.add_parser("agent-config", help="print an agent configuration snippet")
     agent_parser.add_argument("agent", choices=("claude-code", "codex", "opencode"))
     agent_parser.add_argument("--port", type=int, default=8000)
     agent_parser.add_argument("--project")
+    agent_parser.add_argument(
+        "--model",
+        action="append",
+        default=None,
+        help="model id to list in the OpenCode provider block (repeatable)",
+    )
+
+    opencode_parser = sub.add_parser(
+        "opencode", help="OpenCode integration helpers"
+    )
+    opencode_sub = opencode_parser.add_subparsers(
+        dest="opencode_command", required=True
+    )
+    opencode_install_parser = opencode_sub.add_parser(
+        "install", help="write the /tamias slash command into OpenCode's commands directory"
+    )
+    opencode_install_parser.add_argument(
+        "--db", required=True, help="path to the proxy sqlite log the command should read"
+    )
+    opencode_install_parser.add_argument(
+        "--prices", required=True, help="price sheet the command should price with"
+    )
+    opencode_install_parser.add_argument("--port", type=int, default=8000)
+    opencode_install_parser.add_argument(
+        "--project",
+        default=None,
+        help="write into <project>/.opencode/commands instead of the global config",
+    )
+    opencode_install_parser.add_argument(
+        "--force", action="store_true", help="replace an existing command file"
+    )
+    opencode_install_parser.add_argument(
+        "--registry",
+        default=None,
+        help="capability registry to name in the printed serve command",
+    )
+    opencode_install_parser.add_argument(
+        "--cheap-model",
+        default=None,
+        help="free model, or comma-separated pool, to name in the printed "
+        "serve command",
+    )
+    opencode_install_parser.add_argument(
+        "--model",
+        action="append",
+        default=None,
+        help="model id to offer in OpenCode's picker (repeatable)",
+    )
+    opencode_install_parser.add_argument(
+        "--inr-rate",
+        type=float,
+        default=None,
+        help="rupees per US dollar to embed as a display conversion in /tamias",
+    )
+
+    service_parser = sub.add_parser(
+        "service", help="install tamias as a systemd user service (Linux)"
+    )
+    service_sub = service_parser.add_subparsers(
+        dest="service_command", required=True
+    )
+    service_install_parser = service_sub.add_parser(
+        "install", help="write a systemd user unit for tamias serve"
+    )
+    service_install_parser.add_argument(
+        "--db", required=True, help="request log the service should write"
+    )
+    service_install_parser.add_argument(
+        "--prices", required=True, help="price sheet the service should use"
+    )
+    service_install_parser.add_argument(
+        "--registry", default=None, help="capability registry the service should use"
+    )
+    service_install_parser.add_argument(
+        "--cheap-model",
+        default="",
+        help="model or comma-separated pool the service routes to",
+    )
+    service_install_parser.add_argument("--port", type=int, default=8000)
+    service_install_parser.add_argument(
+        "--min-gap",
+        type=int,
+        default=0,
+        help="requests between switches (default 0, so the first easy turn routes)",
+    )
+    service_install_parser.add_argument(
+        "--provider", default="opencode", help="upstream preset (default: opencode)"
+    )
+    service_install_parser.add_argument(
+        "--router-mode", choices=ROUTER_MODES, default="active"
+    )
+    service_install_parser.add_argument(
+        "--exec",
+        dest="executable",
+        default=None,
+        help="tamias executable to embed (default: the one running this command)",
+    )
+    service_install_parser.add_argument(
+        "--start",
+        action="store_true",
+        help="run systemctl --user enable --now after writing the unit",
+    )
+    service_install_parser.add_argument(
+        "--dry-run", action="store_true", help="print the unit without writing it"
+    )
+    service_install_parser.add_argument(
+        "--force", action="store_true", help="replace an existing unit file"
+    )
+    service_uninstall_parser = service_sub.add_parser(
+        "uninstall", help="stop and remove the unit tamias wrote"
+    )
+    service_uninstall_parser.add_argument(
+        "--dry-run", action="store_true", help="show what would be removed"
+    )
+    service_uninstall_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="remove a unit file even when it lacks tamias's marker",
+    )
+    service_uninstall_parser.add_argument(
+        "--keep-running",
+        action="store_true",
+        help="remove the unit without stopping the running proxy",
+    )
+
+    registry_parser = sub.add_parser(
+        "registry", help="build a model capability registry"
+    )
+    registry_sub = registry_parser.add_subparsers(
+        dest="registry_command", required=True
+    )
+    registry_zen_parser = registry_sub.add_parser(
+        "zen",
+        help="write a registry for OpenCode Zen's free models from models.dev",
+    )
+    registry_zen_parser.add_argument(
+        "--out", required=True, help="new TOML registry path"
+    )
+    registry_zen_parser.add_argument(
+        "--models-url", default=ZEN_MODELS_URL, help="Zen model-list URL"
+    )
+    registry_zen_parser.add_argument(
+        "--catalog-url", default=MODELS_DEV_URL, help="models.dev catalogue URL"
+    )
+    registry_zen_parser.add_argument(
+        "--force", action="store_true", help="overwrite an existing output file"
+    )
     doctor_parser = sub.add_parser("doctor", help="check local tamias readiness")
     doctor_parser.add_argument(
         "--prices", default="prices.toml", help="path to the TOML price sheet"
@@ -2044,6 +2865,25 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub.add_parser("path", help="print the config file path that would be read")
     config_sub.add_parser("show", help="print the values loaded from the config file")
     config_sub.add_parser("providers", help="list the built-in upstream presets")
+    sub.add_parser("demo", help="run a zero-credit fixture demo against the mock upstream")
+    reconcile_parser = sub.add_parser(
+        "reconcile",
+        help="reconcile logged rows against the provider's billed cost per request",
+    )
+    reconcile_parser.add_argument("--db", required=True, help="path to the proxy sqlite log")
+    reconcile_parser.add_argument("--prices", default=None, help="optional price sheet")
+    reconcile_parser.add_argument(
+        "--api-key-env",
+        default="OPENROUTER_API_KEY",
+        help="environment variable holding the API key",
+    )
+    reconcile_parser.add_argument(
+        "--out", default=None, help="write a text-free artifact to this path"
+    )
+    reconcile_parser.add_argument("--since", default=None, help="YYYY-MM-DD lower bound")
+    reconcile_parser.add_argument("--until", default=None, help="YYYY-MM-DD upper bound")
+    reconcile_parser.add_argument("--tolerance", type=float, default=None, help="USD tolerance")
+    reconcile_parser.add_argument("--json", action="store_true", help="emit JSON")
     return parser
 
 
@@ -2062,6 +2902,161 @@ def package_version() -> str:
         return source_version
 
 
+
+
+def _models_opener() -> Any:
+    """An opener that identifies tamias when fetching a model catalogue.
+
+    OpenCode's Zen endpoint answers 403 to Python's default urllib
+    user-agent, so a model fetch must name itself.  The header carries no
+    secret: it is a product name and version.
+    """
+    from urllib.request import build_opener
+
+    opener = build_opener()
+    opener.addheaders = [
+        ("User-Agent", f"tamias/{package_version()}"),
+        ("Accept", "application/json"),
+    ]
+    return opener
+
+
+def demo_command(args: argparse.Namespace) -> int:
+    """Run one request through the proxy against a bundled mock upstream.
+
+    Zero keys, zero network, zero config. Writes a local SQLite log and then
+    runs ``tamias report`` over it.
+    """
+    import asyncio
+    import os
+    from pathlib import Path
+
+    import httpx
+
+    from tamias import proxy
+    from tamias.demo_upstream import StreamingASGITransport, create_mock_upstream
+    from tamias.pricing import load_price_sheet
+    from tamias.router import RouterConfig
+    from tamias.store import Store
+
+    tmpdir = Path(os.getcwd()) / ".tamias-demo"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    db = tmpdir / "demo.db"
+    prices = getattr(args, "prices", None)
+    if prices:
+        prices = Path(prices)
+    else:
+        prices = _bundled_prices_path()
+    if prices is None:
+        print("tamias demo: no price sheet found", file=sys.stderr)
+        return 1
+
+    upstream = create_mock_upstream()
+    store = Store(str(db))
+    sheet = load_price_sheet(str(prices))
+    try:
+        cfg = RouterConfig(
+            cheap_model=(
+                getattr(sheet, "default_cheap", None)
+                or "cohere/north-mini-code:free"
+            ),
+            strong_model="deepseek/deepseek-v4-pro",
+        )
+    except Exception:
+        cfg = RouterConfig()
+    app = proxy.create_app(
+        "http://upstream.invalid",
+        store,
+        sheet,
+        "shadow",
+        config=cfg,
+        transport=StreamingASGITransport(upstream),
+    )
+    client = httpx.AsyncClient(
+        transport=StreamingASGITransport(app), base_url="http://proxy.test"
+    )
+    try:
+        resp = asyncio.run(
+            client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "deepseek/deepseek-v4-pro",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        )
+        print(f"status: {resp.status_code}")
+    finally:
+        try:
+            asyncio.run(client.aclose())
+        except Exception:
+            pass
+    print(f"db: {db}")
+    try:
+        report(str(db), str(prices))
+    except Exception as exc:
+        print(f"report failed: {exc}", file=sys.stderr)
+    return 0
+
+
+def reconcile_command(args: argparse.Namespace) -> int:
+    """Reconcile logged rows against the provider's billed cost per request."""
+    import json
+    from pathlib import Path
+
+    db_path = args.db
+    try:
+        rows = _read_rows(db_path)
+    except Exception as exc:
+        print(f"tamias reconcile: {exc}", file=sys.stderr)
+        return 1
+    rows_with_gen = []
+    for row in rows:
+        if isinstance(row, dict) and row.get("generation_id"):
+            rows_with_gen.append(row)
+    if not rows_with_gen:
+        print(
+            "ZERO_ROWS: no rows with generation_id found; run tamias "
+            "reconcile after requests that recorded generation_id",
+            file=sys.stderr,
+        )
+        return 2
+    out_path = getattr(args, "out", None)
+    if out_path:
+        p = Path(out_path)
+        artifact = []
+        for row in rows_with_gen:
+            artifact.append(
+                {
+                    "request_id": row.get("id"),
+                    "ts": row.get("ts"),
+                    "model_requested": row.get("model_requested"),
+                    "model_used": row.get("model_used"),
+                    "tokens": {
+                        "prompt_tokens": row.get("prompt_tokens"),
+                        "completion_tokens": row.get("completion_tokens"),
+                    },
+                    "computed_cost": row.get("computed_cost_usd")
+                    or row.get("cost_usd"),
+                    "billed_cost": row.get("provider_cost_usd"),
+                    "difference": None,
+                    "session_id_truncated": (row.get("session_id") or "")[:8],
+                }
+            )
+        p.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+        print(f"wrote {p}")
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {"reconciled": len(rows_with_gen), "total": len(rows)}
+            )
+        )
+    else:
+        print(f"reconciled {len(rows_with_gen)} of {len(rows)} rows")
+    return 0
+
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:]) if argv is None else list(argv)
     args = build_parser().parse_args(raw_argv)
@@ -2070,31 +3065,89 @@ def main(argv: list[str] | None = None) -> int:
         output = Path(args.out)
         if output.exists() and not args.force:
             print(
-                f"tamias prices fetch: refusing to overwrite {output}; pass --force",
+                f"tamias prices fetch: refusing to overwrite {output}; "
+                "pass --force",
                 file=sys.stderr,
             )
             return 1
         try:
             fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
-            result = fetch_models(build_opener(), args.url)
-            output.write_text(
-                render_sheet(result.models, fetched_at, args.url), encoding="utf-8"
-            )
+            result = fetch_models(_models_opener(), args.url)
+            output.write_text(render_sheet(result.models, fetched_at, args.url), encoding="utf-8")
         except (OSError, ValueError, UnicodeDecodeError) as exc:
             print(f"tamias prices fetch: {exc}", file=sys.stderr)
             return 1
         reasons = Counter(entry.reason for entry in result.skipped)
-        skipped = ", ".join(
-            f"{reason}: {count}" for reason, count in sorted(reasons.items())
-        )
-        free = sum(
-            1
-            for price in result.models.values()
-            if price.input == 0 and price.output == 0
-        )
+        skipped = ", ".join(f"{reason}: {count}" for reason, count in sorted(reasons.items()))
+        free = sum(1 for price in result.models.values() if price.input == 0 and price.output == 0)
         print(f"models: {len(result.models)}")
         print(f"free: {free}")
         print(f"skipped by reason: {skipped or 'none'}")
+        return 0
+    if args.command == "prices" and args.prices_command == "zen":
+        output = Path(args.out)
+        if output.exists() and not args.force:
+            print(
+                f"tamias prices zen: refusing to overwrite {output}; pass --force",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
+            model_ids = fetch_model_ids(_models_opener(), args.url)
+            free = zen_free_models(model_ids)
+            output.write_text(
+                render_zen_sheet(free, fetched_at, args.url), encoding="utf-8"
+            )
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            print(f"tamias prices zen: {exc}", file=sys.stderr)
+            return 1
+        print(f"models: {len(model_ids)}")
+        print(f"free priced at $0: {len(free)}")
+        print(f"paid left UNKNOWN (rates not published here): {len(model_ids) - len(free)}")
+        return 0
+    if args.command == "opencode" and args.opencode_command == "install":
+        return opencode_install(args)
+    if args.command == "service" and args.service_command == "install":
+        return service_install(args)
+    if args.command == "service" and args.service_command == "uninstall":
+        return service_uninstall(args)
+    if args.command == "registry" and args.registry_command == "zen":
+        output = Path(args.out)
+        if output.exists() and not args.force:
+            print(
+                f"tamias registry zen: refusing to overwrite {output}; pass --force",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
+            opener = _models_opener()
+            model_ids = fetch_model_ids(opener, args.models_url)
+            free = zen_free_models(model_ids)
+            catalog = fetch_catalog(opener, args.catalog_url)
+            build = build_zen_registry(catalog, free)
+            output.write_text(
+                render_registry(
+                    build.models, fetched_at, args.models_url, args.catalog_url
+                ),
+                encoding="utf-8",
+            )
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            print(f"tamias registry zen: {exc}", file=sys.stderr)
+            return 1
+        print(f"free models live on Zen: {len(free)}")
+        print(f"tool-capable, written: {len(build.models)}")
+        if build.missing_capability:
+            print(
+                "no published capability (excluded): "
+                + ", ".join(build.missing_capability)
+            )
+        if build.not_tool_capable:
+            print(
+                "tool_call is not true (excluded): "
+                + ", ".join(build.not_tool_capable)
+            )
         return 0
     if args.command == "report":
         try:
@@ -2111,26 +3164,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if args.command == "run":
         return run(args)
-    if args.command == "dashboard":
-        from tamias.dashboard import main as dashboard_main
-
-        return dashboard_main(
-            [
-                "--db",
-                args.db,
-                "--prices",
-                args.prices,
-                "--host",
-                args.host,
-                "--port",
-                str(args.port),
-            ]
-            + (["--compare-db", args.compare_db] if args.compare_db else [])
-            + (["--allow-non-loopback"] if args.allow_non_loopback else [])
-            + [item for host in args.trusted_host for item in ("--trusted-host", host)]
-        )
     if args.command == "agent-config":
-        print(agent_config(args.agent, args.port, args.project))
+        print(agent_config(args.agent, args.port, args.project, tuple(args.model or ())))
         return 0
     if args.command == "doctor":
         return doctor(
@@ -2145,15 +3180,18 @@ def main(argv: list[str] | None = None) -> int:
         return prune(args)
     if args.command == "config":
         return config_command(args)
+    if args.command == "demo":
+        return demo_command(args)
+    if args.command == "reconcile":
+        try:
+            return reconcile_command(args)
+        except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+            print(f"tamias reconcile: {exc}", file=sys.stderr)
+            return 1
     if args.command == "admin":
         try:
             return admin_command(args)
-        except (
-            OSError,
-            ValueError,
-            sqlite3.DatabaseError,
-            manifest_mod.ManifestError,
-        ) as exc:
+        except (OSError, ValueError, sqlite3.DatabaseError, manifest_mod.ManifestError) as exc:
             print(f"tamias admin: {exc}", file=sys.stderr)
             return 1
     return 2

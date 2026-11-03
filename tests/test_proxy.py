@@ -502,7 +502,7 @@ async def test_session_counter_counts_the_first_request(
     # nth request of a session must be planned with request_index == n - 1.
     planned: list[int] = []
 
-    def spy(body: dict[str, Any], state: Any, config: Any = None) -> Decision:
+    def spy(body: dict[str, Any], state: Any, config: Any = None, **_: Any) -> Decision:
         planned.append(state.request_index)
         return Decision(action="STAY", target_model=None, reason="spy")
 
@@ -635,7 +635,7 @@ async def test_interleaved_sessions_keep_independent_counters(
     """
     planned: list[tuple[str, int]] = []
 
-    def spy(body: dict[str, Any], state: Any, config: Any = None) -> Decision:
+    def spy(body: dict[str, Any], state: Any, config: Any = None, **_: Any) -> Decision:
         planned.append((state.session_id, state.request_index))
         return Decision(action="STAY", target_model=None, reason="spy")
 

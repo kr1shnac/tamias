@@ -2,8 +2,8 @@
 
 Everything on this page describes `tamias.router.decide`: a pure function that
 looks at one request and answers STAY (keep the requested model) or SWITCH
-(rewrite to the configured cheap model). It never mutates the request body and
-never stores conversation text in a decision reason.
+(rewrite to a model the routing gates admit). It never mutates the request body
+and never stores conversation text in a decision reason.
 
 ## Modes
 
@@ -12,39 +12,89 @@ never stores conversation text in a decision reason.
 | Mode | What it does |
 | --- | --- |
 | `off` | Calls nothing. Every request runs on the model the caller named, and no decision is recorded. |
-| `shadow` (default) | Calls `decide`, records the decision on the log row, and forwards the request byte-for-byte. |
-| `active` | Calls `decide`, and when it says SWITCH rewrites `model` to the cheap model before forwarding. |
+| `shadow` (default) | Calls `decide`, records the decision on the log row, and forwards the request byte-for-byte. A decision forced by availability (the requested model is locked out) still switches. |
+| `active` | Calls `decide`, and when it says SWITCH rewrites `model` to a pool member before forwarding. |
 
 Active is opt-in and **fail-closed**. `tamias serve` refuses to start active
-unless the target is (1) named by `--cheap-model`, (2) listed in `--registry`,
-(3) marked `tools = true` there, and (4) priced by the price sheet -- because
-the gateway prices, caps and reports the request against the model that
-actually runs, not the one the caller typed.
+unless the routing gates admit at least one target that is (1) in `--registry`,
+(2) marked `tools = true` there, (3) priced by the price sheet, and (4) served by
+a configured provider -- because the gateway prices, caps and reports the
+request against the model that actually runs, not the one the caller typed. A
+provider catalogue makes the pool dynamic, so this is checked over the *gated
+universe* at start-up rather than against a hand-typed list; an explicit
+`--cheap-model` list stays an allowlist and every one of its members is checked.
 
 `tamias.router.applied_target` is the single place that turns a decision plus
 those conditions into the model to run. It returns the target only when the
-mode is active, the decision is SWITCH, the target differs from the requested
-model, and the caller's key (if any) allows it; otherwise it returns `None`,
-meaning "no rewrite". A switch the caller's key does not allow is
-**suppressed**: the request stays on the model it named rather than failing,
+mode is active, or the decision was forced by availability, the target differs
+from the requested model, and the caller's key (if any) allows it; otherwise it
+returns `None`, meaning "no rewrite". A switch the caller's key does not allow
+is **suppressed**: the request stays on the model it named rather than failing,
 and the log still records the SWITCH that was declined.
 
 Active routing rewrites `POST /v1/chat/completions` and `POST /v1/messages`.
-`POST /v1/responses` is metered only and is never rewritten.
+`POST /v1/responses` is metered only and is never rewritten. Both rewritten
+routes build their gate inputs from one helper, so the same agent step gets the
+same decision whatever wire format carried it; an Anthropic `tool_result` turn
+is normalized to the tool-turn shape the rules read.
 
 ## Rules, in order
 
+0. The requested model is locked out by the limit ledger -> SWITCH to the most
+   capable model that passed the gates, preferring one at least as good as the
+   model asked for. Running it again can only fail, so this rule outranks every
+   other and applies in every mode.
 1. A trailing `user` message means the agent is planning -> STAY.
 2. A trailing `tool` message containing an error marker (see
    [Error markers](#error-markers)) -> STAY.
 3. A trailing `tool` message from a shell-family tool whose output is at or
    over `big_output_chars` -> STAY.
 4. A trailing `tool` message from an easy tool, with at least `min_gap`
-   requests since the last switch -> SWITCH to `cheap_model`.
+   requests since the last switch -> SWITCH to a model from the pool.
 5. Anything else -> STAY.
 
-While the session is already on the cheap model the gap counts as zero, so
+While the session is already on a pool model the gap counts as zero, so
 hysteresis keeps it there until `min_gap` fresh requests have passed.
+
+## The model pool
+
+The pool is whatever the three gates admit for this request -- capability,
+supply, health. See [PROVIDERS.md](PROVIDERS.md) for what each gate checks and
+how models are ranked. Two ways to bound it:
+
+- **`--cheap-model`** takes one model or a comma-separated list and becomes an
+  allowlist: routing may only choose from it.
+- **A provider catalogue** (one or more `[[providers]]`) makes the pool dynamic:
+  every discovered model that passes the gates is a candidate.
+
+Within the pool:
+
+- **A session stays on one member.** With an allowlist the member is chosen by a
+  stable hash of the session id, so a conversation does not jump between models
+  on every tool turn. With a gated pool the order is the ranking itself
+  (cheapest first), so a newly cheaper or newly available model changes the
+  answer without any state.
+- **Different sessions spread across an allowlisted pool.** That spreads
+  free-tier rate limits and load instead of sending every conversation to the
+  same free model.
+- **The requested model is skipped.** Switching to the model already running
+  would be a no-op and could not save anything.
+- **The first entry is the primary.** With one entry the behaviour is exactly
+  the old single-target configuration.
+
+The pool **is** the failover set. A retryable limit moves the same request to
+the cheapest candidate that is at least as capable as the model that refused;
+when every survivor is weaker, the request still runs on the strongest survivor
+rather than failing. The limit ledger keeps the refused model out of later
+decisions until its cooldown expires. A `400` or `422` is a request problem and
+does not move anything. `active` still validates every member at start-up
+(registry membership, tool support, a known price), so a pool cannot contain a
+model the deployment has not vouched for.
+
+A fresh session starts at zero requests since the last switch, so the default
+`min_gap = 3` holds back the first three easy turns. `--min-gap 0` routes the
+first one. The OpenCode setup in [OPENCODE.md](OPENCODE.md) uses `0` for that
+reason; raise it if a long session flaps between models.
 
 ## The generic matcher
 

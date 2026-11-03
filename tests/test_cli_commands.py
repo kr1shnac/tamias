@@ -4,6 +4,7 @@ import json
 import socket
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,46 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tamias import cli
 from tamias.store import Store
 from tamias.types import CostBreakdown, Decision, Usage
-
-
-def test_dashboard_delegates_without_starting_a_server(monkeypatch) -> None:
-    calls: list[list[str]] = []
-
-    def dashboard_main(argv: list[str]) -> int:
-        calls.append(argv)
-        return 17
-
-    monkeypatch.setattr("tamias.dashboard.main", dashboard_main)
-    assert (
-        cli.main(
-            [
-                "dashboard",
-                "--db",
-                "log.db",
-                "--prices",
-                "prices.toml",
-                "--compare-db",
-                "baseline.db",
-                "--port",
-                "9124",
-            ]
-        )
-        == 17
-    )
-    assert calls == [
-        [
-            "--db",
-            "log.db",
-            "--prices",
-            "prices.toml",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "9124",
-            "--compare-db",
-            "baseline.db",
-        ]
-    ]
 
 
 def test_prune_keeps_the_newest_rows(tmp_path: Path, capsys) -> None:
@@ -210,6 +171,63 @@ def _write_prices(directory: Path) -> Path:
     return sheet
 
 
+def test_run_passes_router_mode_and_min_gap(monkeypatch, tmp_path: Path) -> None:
+    _write_prices(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    command = _capture_serve_command(monkeypatch)
+
+    code = cli.main(
+        [
+            "run",
+            "--router-mode",
+            "active",
+            "--min-gap",
+            "7",
+            "--",
+            "fake-child",
+        ]
+    )
+
+    assert code == 1
+    assert command[command.index("--router-mode") + 1] == "active"
+    assert command[command.index("--min-gap") + 1] == "7"
+
+
+def test_run_keeps_the_deprecated_mode_alias(monkeypatch, tmp_path: Path, capsys) -> None:
+    _write_prices(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    command = _capture_serve_command(monkeypatch)
+
+    assert cli.main(["run", "--mode", "off", "--", "fake-child"]) == 1
+    assert command[command.index("--router-mode") + 1] == "off"
+    assert "--mode is deprecated" in capsys.readouterr().err
+
+
+def test_run_rejects_disagreeing_router_mode_and_mode(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    _write_prices(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    command = _capture_serve_command(monkeypatch)
+
+    code = cli.main(
+        ["run", "--router-mode", "active", "--mode", "off", "--", "fake-child"]
+    )
+
+    assert code == 2
+    assert command == []
+    assert "disagree" in capsys.readouterr().err
+
+
+def test_run_does_not_pass_min_gap_when_unset(monkeypatch, tmp_path: Path) -> None:
+    _write_prices(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    command = _capture_serve_command(monkeypatch)
+
+    assert cli.main(["run", "--", "fake-child"]) == 1
+    assert "--min-gap" not in command
+
+
 def test_run_defaults_prices_and_upstream(monkeypatch, tmp_path: Path) -> None:
     _write_prices(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -292,3 +310,32 @@ def test_run_reserves_a_new_default_database_without_overwriting(
     assert second.is_file()
     with pytest.raises(FileExistsError):
         cli._reserve_run_db(str(first), None)
+
+
+def test_serve_router_config_parses_a_comma_separated_pool(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        router_config=None,
+        router_profile="generic",
+        effort_mode="off",
+        cheap_model="cheap-a, cheap-b, cheap-a",
+        strong_model="",
+        min_gap=None,
+    )
+    config = cli._serve_router_config(args)
+    assert config.cheap_model == "cheap-a"
+    assert config.pool == ("cheap-a", "cheap-b")
+
+
+def test_serve_router_config_single_model_is_a_one_member_pool(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        router_config=None,
+        router_profile="generic",
+        effort_mode="off",
+        cheap_model="cheap-a",
+        strong_model="",
+        min_gap=0,
+    )
+    config = cli._serve_router_config(args)
+    assert config.cheap_model == "cheap-a"
+    assert config.pool == ("cheap-a",)
+    assert config.min_gap == 0

@@ -351,3 +351,62 @@ def test_two_thousand_messages_stay_within_the_budget() -> None:
 
     assert decision.action == "SWITCH" and decision.target_model == CHEAP
     assert elapsed < TIME_BUDGET_S, f"decide took {elapsed:.3f}s over {BIG_HISTORY} messages"
+
+
+# --- the same step, whatever wire format carried it ---------------------------
+
+
+def anthropic_tool_turn(tool: str, text: str, *, is_error: bool = False) -> dict[str, Any]:
+    return {
+        "model": STRONG,
+        "messages": [
+            {"role": "user", "content": "read the file"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tu_1", "name": tool, "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_1",
+                        "content": [{"type": "text", "text": text}],
+                        **({"is_error": True} if is_error else {}),
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def test_an_anthropic_tool_result_routes_like_an_openai_tool_message() -> None:
+    """Same agent step, same decision: the wire format must not change routing.
+
+    ``/v1/messages`` puts a tool result in a ``user`` turn.  Read literally, that
+    is "the user is planning", and the router would stay on the strong model for
+    every Anthropic tool step -- the opposite of the savings the router exists
+    for.
+    """
+    decision = decide(anthropic_tool_turn("read", "all good"), SessionState("s", 9, STRONG), CONFIG)
+
+    assert decision.action == "SWITCH"
+    assert decision.target_model == CHEAP
+    assert decision.reason == "easy tool: read"
+
+
+def test_an_anthropic_tool_error_keeps_the_strong_model() -> None:
+    decision = decide(
+        anthropic_tool_turn("read", "boom", is_error=True),
+        SessionState("s", 9, STRONG),
+        CONFIG,
+    )
+
+    assert decision.action == "STAY"
+    assert decision.reason == "tool error: needs strong model"
+
+
+def test_an_anthropic_user_turn_is_still_planning() -> None:
+    body = {"model": STRONG, "messages": [{"role": "user", "content": "plan a refactor"}]}
+
+    assert decide(body, SessionState("s", 9, STRONG), CONFIG).reason == "user turn: planning"

@@ -33,6 +33,11 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "effort_style": "openai",
         "description": "OpenAI platform",
     },
+    "opencode": {
+        "upstream": "https://opencode.ai/zen",
+        "effort_style": "openai",
+        "description": "OpenCode Zen (free models; paid rates are not published)",
+    },
     "ollama": {
         "upstream": "http://127.0.0.1:11434/v1",
         "effort_style": "openai",
@@ -43,6 +48,7 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
 CONFIG_KEYS = (
     "upstream",
     "provider",
+    "providers",
     "prices",
     "db",
     "router_mode",
@@ -68,6 +74,7 @@ class Config:
     path: Path | None = None
     upstream: str | None = None
     provider: str | None = None
+    providers: str | None = None
     prices: str | None = None
     db: str | None = None
     router_mode: str | None = None

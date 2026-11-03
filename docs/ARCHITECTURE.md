@@ -1,15 +1,19 @@
 # Architecture
 
-Tamias is a local, single-user, OpenAI-compatible HTTP proxy. An agent points
-its base URL at tamias; tamias forwards each request to the upstream, logs what
-the request cost, and (optionally) rewrites the model selection before
-forwarding. The unit of intervention is **one HTTP request**: tamias sees only
-that request's messages, keeps no turn orchestration, and never asks the agent's
-harness to change.
+Tamias is a local, single-user, OpenAI-compatible HTTP proxy that can sit on
+top of several providers. An agent points its base URL at tamias; tamias
+decides which configured provider serves the named model, presents that
+provider's credential, logs what the request cost, and (optionally) rewrites
+the model selection before forwarding. The unit of intervention is **one HTTP
+request**: tamias sees only that request's messages, keeps no turn
+orchestration, and never asks the agent's harness to change.
+
+Tamias is never a provider itself: it ships no model and issues no credential.
 
 ```text
-Agent / client  ──HTTP POST──▶  tamias :8000  ──same request──▶  upstream
-                                  │   (FastAPI app)
+Agent / client  ──HTTP POST──▶  tamias :8000  ──same request──▶  provider
+                                  │   (FastAPI app)                (one of N)
+                                  ├─ Gates     capability / supply / health
                                   ├─ Router    decide → STAY / SWITCH
                                   ├─ Adapters  chat / messages / responses
                                   ├─ Store     one row per request (SQLite)
@@ -20,10 +24,14 @@ Agent / client  ──HTTP POST──▶  tamias :8000  ──same request──
 
 | Module | Key entry points | What it does |
 | --- | --- | --- |
+| `providers` | `load_providers(path)`, `ProviderCatalogue` | Maps a model to the provider that serves it, and applies that provider's credential. Secrets are read once at start-up from an env var or a command. |
+| `candidates` | `build_pool(...)`, `CandidatePool` | Runs the three routing gates and ranks what survives (cheapest first). |
+| `limits` | `LimitLedger` | Remembers provider lockouts (429/402/403/5xx/transport) in SQLite with an escalating cooldown. |
+| `discovery` | `discover(provider)` | Reads `/v1/models` per provider, caches it, and merges it under hand-written registry entries. |
 | `router` | `decide(body, state, config)` | Pure function: reads the body and session state, returns a `Decision(action, target_model, reason)`. Never mutates the body. |
 | `router_config` | `load_router_config(path)` | Parses the router TOML into a `RouterConfig`. Strict validation; a typo fails loudly. |
 | `proxy` | `create_app(upstream, store, sheet, mode)` | Builds the FastAPI app, registers the three adapter routes plus the catch-all, and applies the routing mode. |
-| `anthropic_adapter` | route handler | Serves `/v1/messages`: meters Anthropic-style usage, merges stream usage, and can rewrite the model. |
+| `anthropic_adapter` | route handler | Serves `/v1/messages`: meters Anthropic-style usage, merges stream usage, and can rewrite the model within the same gated pool as the chat route. |
 | `responses_adapter` | route handler | Serves `/v1/responses`: meters only, never rewrites a model. |
 | `forward` / relay | `forward_headers`, `outbound` | Forwards headers hop-by-hop-free; shadow returns the raw bytes unchanged, active mode rewrites `model`, `--inject-usage` adds `stream_options.include_usage`. |
 | `store` | `log_request(...)` | Appends one row per request to SQLite. |
@@ -31,14 +39,15 @@ Agent / client  ──HTTP POST──▶  tamias :8000  ──same request──
 | `effort` | `apply_effort` | Rewrites `reasoning.effort` / `reasoning_effort` on chat-completions bodies only. |
 | `session` | `derive_session_id(headers, body, salt)` | Hashes `authorization` + first system/developer message + first user message with a per-process salt. Explicit `x-tamias-session` wins. Only the digest is stored. |
 | `security` | `host_is_allowed`, `origin_is_allowed`, loopback policy | Refuses a wider bind without an explicit acknowledgement; cross-site guard against DNS rebinding. |
-| `cli` | `serve`, `report`, `dashboard`, `doctor`, ... | Command line entry point. |
+| `cli` | `serve`, `report`, `doctor`, ... | Command line entry point. |
 
 ## Routes, wire protocols and coverage
 
 `tamias serve --upstream` takes the provider **root**; the proxy appends the
-route path. `TAMIAS_UPSTREAM_TIMEOUT_SECONDS` bounds every upstream request and
-defaults to 600 seconds; invalid or non-positive values fall back to that
-default.
+route path. With a provider catalogue, the root and credential come from the
+provider that serves the running model instead. `TAMIAS_UPSTREAM_TIMEOUT_SECONDS`
+bounds every upstream request and defaults to 600 seconds; invalid or
+non-positive values fall back to that default.
 
 | Route | Routed | Metered |
 | --- | --- | --- |
@@ -63,8 +72,13 @@ exercised against tamias.
 | Codex using the OpenAI Responses API | `http://localhost:8000/v1` so the client reaches `/v1/responses` | Not verified: the route is fixture-tested, but no Codex traffic is confirmed here. |
 | Claude Code using the Anthropic Messages API | `http://localhost:8000` so the client reaches `/v1/messages` | Not verified: the route is fixture-tested, but no Claude Code traffic is confirmed here. |
 
-Keep credentials in the agent's normal configuration. Tamias forwards client
-credentials upstream and provides no credential-setting flag.
+A client may keep sending its own credential; tamias drops it before the
+provider's credential is applied, so a client token is never forwarded to a
+third party. With no provider catalogue, the legacy behaviour holds: tamias
+forwards client credentials to `--upstream` untouched and provides no
+credential-setting flag. With a catalogue, the credential comes from the
+provider entry (`api_key_env` / `api_key_command`), never from the client. See
+[PROVIDERS.md](PROVIDERS.md).
 
 ## The request lifecycle
 
@@ -82,7 +96,7 @@ credentials upstream and provides no credential-setting flag.
 4. **Forward** — the body goes to the provider; the SSE response is relayed
    chunk-by-chunk without buffering; upstream status codes pass through;
    `Authorization` (or `x-api-key`) is forwarded untouched.
-5. **Report** — `tamias report` and the dashboard price the log cache-aware and
+5. **Report** — `tamias report` prices the log cache-aware and
    can report a negative saving. This is arithmetic over logged counts, not a
    measurement of a bill.
 
@@ -161,22 +175,25 @@ observable from inside the proxy.
 quality: no prompt or response text is stored; the shared bearer token is
 compared with `hmac.compare_digest`; loopback binding is **enforced, not merely
 defaulted** (a wider bind is refused unless the operator passes an explicit
-acknowledgement); upstream credentials are forwarded untouched so tamias never
-persists them. The shared token carries no per-client identity — for that, use
-company keys ([`KEYS.md`](KEYS.md)). Registry and price sheets are a
-fleet-wide remote-config surface with no signing or pinning: a stale sheet
-silently changes what a request costs and what the router does. A silent model
-rewrite sends the transcript to a vendor the user did not name (privacy / ToS
-consequence).
+acknowledgement); provider credentials are never persisted by tamias (they are
+read at start-up from an env var or a command, and are opaque in logs). In the
+legacy single-upstream mode, client credentials are forwarded untouched, so
+tamias still never persists them. The shared token carries no per-client
+identity — for that, use company keys ([`KEYS.md`](KEYS.md)). Registry and price
+sheets are a fleet-wide remote-config surface with no signing or pinning: a
+stale sheet silently changes what a request costs and what the router does. A
+silent model rewrite sends the transcript to a vendor the user did not name
+(privacy / ToS consequence).
 
 **Fail-closed and fail-open.** Routing to a cheaper model is fail-closed:
-`serve` refuses to start in active mode unless the target is named by
-`--cheap-model`, listed in `--registry`, marked tool-capable there, and priced
-by the sheet — and a switch the caller's key does not allow is suppressed, not
-applied. Every other internal error is **fail-open**: the original request is
-forwarded unchanged and a warning is logged, so the agent never breaks. The
-honest consequence of fail-open is that a fault converts into silently zero
-savings; fail-open events should therefore be watched, not assumed absent.
+`serve` refuses to start in active mode unless the routing gates admit at least
+one target — in `--registry`, marked tool-capable there, priced by the sheet,
+and served by a configured provider — and a switch the caller's key does not
+allow is suppressed, not applied. Every other internal error is **fail-open**:
+the original request is forwarded unchanged and a warning is logged, so the
+agent never breaks. The honest consequence of fail-open is that a fault
+converts into silently zero savings; fail-open events should therefore be
+watched, not assumed absent.
 
 ## Cache semantics
 
