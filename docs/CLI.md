@@ -192,7 +192,7 @@ rate stays `UNKNOWN` — never free by assumption.
 
 ```text
 tamias opencode install --db PATH --prices PATH [--port PORT]
-                        [--project DIR] [--registry PATH]
+                        [--project DIR] [--registry PATH] [--providers PATH]
                         [--cheap-model MODEL[,MODEL...]] [--model ID ...]
                         [--inr-rate RUPEES_PER_USD] [--force]
 ```
