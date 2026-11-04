@@ -87,7 +87,18 @@ the cheapest candidate that is at least as capable as the model that refused;
 when every survivor is weaker, the request still runs on the strongest survivor
 rather than failing. The limit ledger keeps the refused model out of later
 decisions until its cooldown expires. A `400` or `422` is a request problem and
-does not move anything. `active` still validates every member at start-up
+does not move anything.
+
+A `404` from an upstream is treated as a routing miss rather than a client
+error. It means the provider does not serve that model to this credential --
+retired, never granted, or offered on a different wire -- so the request fails
+over to the next gated candidate the same way a `429` does. The miss is recorded
+for twelve hours under the reason `not offered for this account`, which is
+deliberately longer than the rate-limit ladder: asking a retired model again
+does not make it appear. Providers whose catalogue advertises far more than a
+key can invoke (NVIDIA's public list names 85 models and a dev key reaches 14)
+can be pinned to the ids that work with `discover = "listed"`, so the miss is
+not discovered at all. `active` still validates every member at start-up
 (registry membership, tool support, a known price), so a pool cannot contain a
 model the deployment has not vouched for.
 

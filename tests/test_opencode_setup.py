@@ -1,0 +1,195 @@
+"""Tests for ``tamias opencode setup``.
+
+The claim these tests defend: one command can point OpenCode at tamias without
+destroying the config the user already has, and it says so when it cannot keep
+something (JSONC comments) or cannot find the plugin.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from tamias.cli import main
+
+PRICES = """
+date = "2026-01-05"
+
+["free-model"]
+input = 0.0
+output = 0.0
+"""
+
+
+def setup_args(config: Path, prices: Path, *extra: str) -> list[str]:
+    return [
+        "opencode",
+        "setup",
+        "--config",
+        str(config),
+        "--prices",
+        str(prices),
+        "--port",
+        "8123",
+        *extra,
+    ]
+
+
+def write_prices(tmp_path: Path) -> Path:
+    path = tmp_path / "prices.toml"
+    path.write_text(PRICES, encoding="utf-8")
+    return path
+
+
+def test_setup_creates_a_config_with_the_provider_block(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "opencode.json"
+
+    assert main(setup_args(config, write_prices(tmp_path))) == 0
+
+    document = json.loads(config.read_text())
+    tamias = document["provider"]["tamias"]
+    assert tamias["name"] == "tamias"
+    assert tamias["options"]["baseURL"] == "http://127.0.0.1:8123/v1"
+    assert tamias["options"]["apiKey"], "OpenCode hides a provider with no credential"
+    assert "free-model" in tamias["models"]
+
+
+def test_setup_keeps_every_other_key_in_the_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "opencode.json"
+    config.write_text(
+        json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {"other": {"type": "remote", "url": "https://example.test"}},
+                "provider": {"someone-else": {"npm": "x", "name": "other"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(setup_args(config, write_prices(tmp_path))) == 0
+
+    document = json.loads(config.read_text())
+    assert document["$schema"] == "https://opencode.ai/config.json"
+    assert "other" in document["mcp"]
+    assert "someone-else" in document["provider"]
+    assert "tamias" in document["provider"]
+
+
+def test_setup_strips_jsonc_comments_but_keeps_a_backup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "opencode.jsonc"
+    config.write_text(
+        "{\n  // a comment that JSON does not allow\n  \"$schema\": \"https://opencode.ai/config.json\",\n}\n",
+        encoding="utf-8",
+    )
+
+    assert main(setup_args(config, write_prices(tmp_path))) == 0
+
+    assert json.loads(config.read_text())["$schema"] == "https://opencode.ai/config.json"
+    backups = list(tmp_path.glob("opencode.jsonc.bak-*"))
+    assert len(backups) == 1
+    assert "// a comment" in backups[0].read_text()
+    assert "not preserved" in capsys.readouterr().err
+
+
+def test_a_dry_run_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "opencode.json"
+
+    assert main(setup_args(config, write_prices(tmp_path), "--dry-run")) == 0
+
+    assert not config.exists()
+    assert "would write" in capsys.readouterr().out
+
+
+def test_setup_registers_the_plugin_in_the_tui_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plugin = tmp_path / "tamias-opencode-plugin"
+    plugin.mkdir()
+    (plugin / "tui.tsx").write_text("export default {}\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    config = tmp_path / "opencode.json"
+    assert (
+        main(setup_args(config, write_prices(tmp_path), "--plugin", str(plugin))) == 0
+    )
+
+    cli_path = tmp_path / "config" / "opencode" / "cli.json"
+    assert json.loads(cli_path.read_text())["plugins"] == [str(plugin)]
+
+
+def test_setup_does_not_add_the_same_plugin_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plugin = tmp_path / "tamias-opencode-plugin"
+    plugin.mkdir()
+    (plugin / "tui.tsx").write_text("export default {}\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    cli_path = tmp_path / "config" / "opencode" / "cli.json"
+    cli_path.parent.mkdir(parents=True)
+    cli_path.write_text(json.dumps({"plugins": [str(plugin)]}), encoding="utf-8")
+    config = tmp_path / "opencode.json"
+
+    assert main(setup_args(config, write_prices(tmp_path), "--plugin", str(plugin))) == 0
+
+    assert json.loads(cli_path.read_text())["plugins"] == [str(plugin)]
+
+
+def test_setup_refuses_when_there_is_no_model_to_offer(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prices = tmp_path / "prices.toml"
+    prices.write_text('date = "2026-01-05"\n\n["paid"]\ninput = 1.0\noutput = 2.0\n')
+
+    assert main(setup_args(tmp_path / "opencode.json", prices)) == 2
+    assert not (tmp_path / "opencode.json").exists()
+
+
+def test_the_serve_command_names_the_provider_catalogue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One endpoint in front of every provider is the v1 shape.
+
+    The single-upstream `--provider opencode` preset points at Zen alone, which
+    is not what a multi-provider setup is meant to serve.
+    """
+    providers = tmp_path / "providers.toml"
+    providers.write_text('[[providers]]\nname = "nvidia"\n', encoding="utf-8")
+
+    assert (
+        main(
+            setup_args(
+                tmp_path / "opencode.json",
+                write_prices(tmp_path),
+                "--providers",
+                str(providers),
+            )
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert f"--providers {providers}" in out
+    assert "--provider opencode" not in out
+
+
+def test_without_a_catalogue_the_serve_command_falls_back_to_the_preset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    assert main(setup_args(tmp_path / "opencode.json", write_prices(tmp_path))) == 0
+
+    assert "--provider opencode" in capsys.readouterr().out

@@ -1,2 +1,2 @@
-"""Tamias - Local HTTP proxy that logs token usage and cost per request."""
-__version__ = "0.1.0a8"
+"""Tamias - provider-agnostic LLM router, failover proxy and cost meter."""
+__version__ = "1.0.0"

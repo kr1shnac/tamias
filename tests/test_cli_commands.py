@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,8 +21,11 @@ def test_prune_keeps_the_newest_rows(tmp_path: Path, capsys) -> None:
     store = Store(db)
     try:
         for index in range(4):
+            # Relative to now: the second call below prunes by age, so a
+            # literal timestamp would silently age out of the 30-day window.
+            ts = (datetime.now(UTC) - timedelta(minutes=index)).isoformat()
             store.log_request(
-                f"2026-10-04T12:00:0{index}Z",
+                ts,
                 "session-1",
                 "model-a",
                 "model-a",

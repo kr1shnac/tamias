@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tamias"
-version = "0.1.0a8"
-description = "Local HTTP proxy that logs token usage and cost per request for OpenAI-compatible agents."
+version = "1.0.0"
+description = "Provider-agnostic proxy that routes each request to the cheapest model that can do the work, fails over, and meters what it saved."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -16,13 +16,17 @@ authors = [
 keywords = [
     "llm",
     "proxy",
+    "router",
+    "failover",
+    "cost-optimization",
     "observability",
     "cost-tracking",
     "openai-compatible",
+    "opencode",
     "tokens",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",

@@ -40,6 +40,7 @@ base_url = "http://127.0.0.1:11434/v1"
 | `auth`            | no       | `bearer` (default) or `none` for a local runtime that authenticates nothing. |
 | `effort_style`    | no       | `openrouter` or `openai`; defaults from the preset.                        |
 | `models`          | no       | Model ids this provider serves, for an explicit mapping.                   |
+| `discover`        | no       | `all` (default) or `listed`; `listed` keeps only the ids in `models`.      |
 
 Built-in presets (base URL and effort style, never a credential or a model
 list): `openrouter`, `openai`, `opencode`, `nvidia`, `groq`, `deepseek`,
@@ -100,6 +101,29 @@ New models therefore appear without editing config. `--no-discover` skips the
 fetch and uses the cache/registry as they are. Set `TAMIAS_MODELS_CACHE` to
 move the cache file.
 
+A `/v1/models` answer is a *catalogue*, not an entitlement list. NVIDIA's public
+list names 85 models while a development key can call 14; the rest answer `404`,
+and an account-specific refusal reads
+`Function '<uuid>': Not found for account`. Set `discover = "listed"` on such a
+provider and only the ids in `models` are merged, so routing never ranks a model
+the key cannot reach:
+
+```toml
+[[providers]]
+name = "nvidia"
+api_key_env = "NVIDIA_API_KEY"
+discover = "listed"
+models = [
+  "nvidia/nemotron-3.5-lightning-30b-a3b",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+]
+```
+
+The list wins over the catalogue in both directions: an id the provider stops
+advertising stays routable (the operator knows it works), and one it advertises
+but the operator left out is not offered. A `404` that does reach routing is
+still remembered and failed over -- see [ROUTING.md](ROUTING.md).
+
 ## The routing gates
 
 A model is only ever chosen after passing three independent gates:
@@ -115,6 +139,12 @@ quality, then model id**, with each model's blended cost per million tokens
 (3:1 input:output). The router may only switch within this pool, and the caller
 supplies a quality floor for the step, so cheapness can only choose among models
 already judged good enough.
+
+A direct provider's rate usually is not in the OpenRouter catalogue, so a model
+served only by that provider is *unpriced* until the operator states the rate.
+State it in the overlay beside the generated sheet — `tamias prices set MODEL
+--input 0 --output 0` for a free tier — and the model becomes a candidate
+without editing the generated file. See [PRICING.md](PRICING.md#the-local-overlay).
 
 `GET /limits` shows the result:
 

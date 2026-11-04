@@ -316,6 +316,23 @@ def write_cache(path: Path, found: dict[str, list[DiscoveredModel]]) -> None:
         return
 
 
+def _listed(provider: Provider, models: list[DiscoveredModel]) -> list[DiscoveredModel]:
+    """Apply the operator's allowlist when the provider is pinned to it.
+
+    The list wins over the catalogue in both directions: an id the provider no
+    longer advertises is still routable, because the operator is the one who
+    knows it works, and an id it does advertise but the operator left out is not
+    offered at all.  Metadata comes from the catalogue when it is there.
+    """
+    if provider.discover != "listed":
+        return models
+    listed = set(provider.models)
+    found = {model.id: model for model in models if model.id in listed}
+    for model_id in provider.models:
+        found.setdefault(model_id, DiscoveredModel(id=model_id, provider=provider.name))
+    return [found[model_id] for model_id in provider.models]
+
+
 def discover(
     catalogue: ProviderCatalogue,
     *,
@@ -331,16 +348,20 @@ def discover(
         if not provider.configured:
             report.failed[provider.name] = "no credential"
             continue
-        models = fetch_models(
+        models = _listed(
             provider,
-            credential=catalogue.credential(provider.name),
-            transport=transport,
+            fetch_models(
+                provider,
+                credential=catalogue.credential(provider.name),
+                transport=transport,
+            ),
         )
         if models:
             report.found[provider.name] = models
             continue
-        if cached.get(provider.name):
-            report.found[provider.name] = cached[provider.name]
+        fallback = _listed(provider, cached.get(provider.name, []))
+        if fallback:
+            report.found[provider.name] = fallback
             report.cached = True
         else:
             report.failed[provider.name] = "unreachable"

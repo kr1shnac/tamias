@@ -805,11 +805,23 @@ step(
   String(paletteFor(undefined, "light").bg) !== String(paletteFor(undefined, "dark").bg),
 );
 
-const { parsePriceSheet, tierFor } = await import("../src/utils/priceSheet");
+const { localSheetPath, mergePriceSheets, parsePriceSheet, tierFor } = await import(
+  "../src/utils/priceSheet"
+);
 const sheet = parsePriceSheet(readFileSync(PRICES_PATH, "utf-8"));
 step("a zero-rated model is free", tierFor("acme/free-one", sheet) === "free");
 step("a positive-rated model is paid", tierFor("acme/paid-two", sheet) === "paid");
 step("an unquoted model is unknown, not free", tierFor("acme/missing", sheet) === "unknown");
+
+const overlayPath = path.join(TEMP, "unit.local.toml");
+writeFileSync(overlayPath, `["acme/overlay-only"]\ninput = 0.0\noutput = 0.0\n`);
+const mergedSheet = mergePriceSheets(sheet, parsePriceSheet(readFileSync(overlayPath, "utf-8")));
+step("the local overlay prices a model the sheet omits", tierFor("acme/overlay-only", mergedSheet) === "free");
+step("the overlay keeps the generated rates", tierFor("acme/paid-two", mergedSheet) === "paid");
+step(
+  "the overlay path sits beside the sheet",
+  localSheetPath("/x/prices.toml") === "/x/prices.local.toml",
+);
 
 // --- 7. the log-only degradation when tamias is not running -----------------
 

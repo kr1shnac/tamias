@@ -21,6 +21,8 @@ import { Database } from "bun:sqlite";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import {
   listCost,
+  localSheetPath,
+  mergePriceSheets,
   parsePriceSheet,
   tierFor,
   warmBaselineCost,
@@ -416,10 +418,14 @@ export function useTamiasData(
   let disposed = false;
 
   function loadSheet(): PriceSheet | null {
+    const localPath = localSheetPath(pricesPath);
     let stamp: string;
     try {
       const stat = statSync(pricesPath);
-      stamp = `${stat.mtimeMs}:${stat.size}`;
+      const local = existsSync(localPath) ? statSync(localPath) : null;
+      stamp = `${stat.mtimeMs}:${stat.size}|${
+        local ? `${local.mtimeMs}:${local.size}` : "-"
+      }`;
     } catch {
       sheetStamp = "";
       setSheet(null);
@@ -435,11 +441,16 @@ export function useTamiasData(
 
     try {
       const parsed = parsePriceSheet(readFileSync(pricesPath, "utf-8"));
+      // The hand-written overlay prices models the generated sheet cannot:
+      // a free development tier, a local model, a provider the catalogue omits.
+      const merged = existsSync(localPath)
+        ? mergePriceSheets(parsed, parsePriceSheet(readFileSync(localPath, "utf-8")))
+        : parsed;
       sheetStamp = stamp;
-      setSheet(parsed);
+      setSheet(merged);
       setSheetError(null);
       setSheetState("ok");
-      return parsed;
+      return merged;
     } catch (cause) {
       // Keep the previous good sheet: a partial rewrite during one poll must
       // not turn every baseline in the panel into "unknown".

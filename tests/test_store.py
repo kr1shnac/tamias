@@ -8,6 +8,7 @@ nowhere to put prompt or response text.  No test touches the network.
 import sqlite3
 import sys
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,16 @@ from tamias.types import CostBreakdown, Decision, Usage  # noqa: E402
 
 SHEET_DATE = "2026-10-04"
 TS = "2026-10-04T12:00:00Z"
+
+
+def days_ago(days: int) -> str:
+    """An ISO timestamp relative to the clock, not a date baked into the test.
+
+    ``prune`` compares against ``datetime.now(UTC)``, so a literal date that is
+    inside a 30-day window today falls out of it tomorrow.  Anchoring to now
+    keeps these tests about the policy, not about the calendar.
+    """
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
 KNOWN_USAGE = Usage(1_000, 200, 200, 0)
 UNKNOWN_USAGE = Usage(None, None, None, None)
@@ -649,8 +660,8 @@ def test_prune_requires_a_policy(store: Store) -> None:
 
 
 def test_prune_deletes_rows_older_than_keep_days(store: Store) -> None:
-    log(store, ts="2024-01-01T00:00:00")
-    log(store, ts="2026-10-04T12:00:00Z")
+    log(store, ts=days_ago(400))
+    log(store, ts=days_ago(1))
 
     result = store.prune(keep_days=30)
 
@@ -659,8 +670,8 @@ def test_prune_deletes_rows_older_than_keep_days(store: Store) -> None:
 
 
 def test_prune_dry_run_counts_without_deleting(store: Store) -> None:
-    log(store, ts="2024-01-01T00:00:00")
-    log(store, ts="2026-10-04T12:00:00Z")
+    log(store, ts=days_ago(400))
+    log(store, ts=days_ago(1))
 
     result = store.prune(keep_days=30, dry_run=True)
 

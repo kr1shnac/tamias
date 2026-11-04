@@ -242,6 +242,40 @@ async def test_a_limit_moves_the_same_request_to_another_provider():
     assert MODEL_B in store.last["decision"].reason
 
 
+async def test_a_404_moves_the_request_to_a_provider_that_serves_the_model():
+    """A model a provider does not offer is a routing miss, not a client error.
+
+    NVIDIA's catalogue advertises 85 models while a dev key can call 14 of them;
+    those answer 404.  Returning that to the client would fail the turn even
+    though another gated model could answer it.
+    """
+    recorder = Recorder(fail={"openrouter.ai": 404})
+    ledger = LimitLedger(":memory:")
+    store = FakeStore()
+    app = build(recorder, store, limits=ledger)
+
+    response = await post(app, MODEL_A)
+
+    assert response.status_code == 200
+    assert [request.url.host for request in recorder.requests] == [
+        "openrouter.ai",
+        "integrate.api.nvidia.com",
+    ]
+    assert store.last["decision"].action == "SWITCH"
+    assert ledger.is_limited("openrouter", MODEL_A), "the miss is remembered for later turns"
+
+
+async def test_a_404_with_no_other_candidate_comes_back_as_a_404():
+    recorder = Recorder(fail={"openrouter.ai": 404, "integrate.api.nvidia.com": 404})
+    store = FakeStore()
+    app = build(recorder, store)
+
+    response = await post(app, MODEL_A)
+
+    assert response.status_code == 404
+    assert len(recorder.requests) == 2, "one failover attempt, never a loop"
+
+
 async def test_the_learned_limit_is_remembered_for_the_next_request():
     recorder = Recorder(fail={"openrouter.ai": 429})
     ledger = LimitLedger(":memory:")

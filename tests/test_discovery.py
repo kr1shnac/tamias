@@ -16,13 +16,14 @@ from tamias.discovery import (
     ASSUMED_CONTEXT_WINDOW,
     DiscoveredModel,
     DiscoveryReport,
+    discover,
     fetch_models,
     merge_into,
     parse_models,
     read_cache,
     write_cache,
 )
-from tamias.providers import Credential, Provider
+from tamias.providers import Credential, Provider, ProviderCatalogue
 from tamias.registry import ModelInfo, Registry
 
 OPENROUTER_PAYLOAD = {
@@ -181,3 +182,72 @@ def test_the_cache_file_is_private(tmp_path):
 
     assert path.stat().st_mode & 0o777 == 0o600
     assert json.loads(path.read_text())["providers"]["p"][0]["id"] == "m"
+
+
+def catalogue_for(provider: Provider) -> ProviderCatalogue:
+    return ProviderCatalogue(
+        providers={provider.name: provider},
+        credentials={provider.name: Credential("secret")},
+    )
+
+
+def listing(*ids: str) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": model_id} for model_id in ids]})
+
+    return httpx.MockTransport(handler)
+
+
+def test_discovery_mode_listed_ignores_the_rest_of_the_catalogue(tmp_path):
+    """NVIDIA publishes 85 models and a dev key can call 14: trust the operator."""
+    provider = Provider(
+        name="nvidia",
+        base_url="https://integrate.api.nvidia.com/v1",
+        key_source="env:A",
+        discover="listed",
+        models=("good",),
+    )
+
+    report = discover(
+        catalogue_for(provider),
+        cache_path=tmp_path / "cache.json",
+        transport=listing("good", "retired", "no-route"),
+    )
+
+    assert [model.id for model in report.found["nvidia"]] == ["good"]
+
+
+def test_a_pinned_model_stays_routable_when_the_catalogue_drops_it(tmp_path):
+    provider = Provider(
+        name="nvidia",
+        base_url="https://integrate.api.nvidia.com/v1",
+        key_source="env:A",
+        discover="listed",
+        models=("good",),
+    )
+
+    report = discover(
+        catalogue_for(provider),
+        cache_path=tmp_path / "cache.json",
+        transport=listing("something-else"),
+    )
+
+    assert [model.id for model in report.found["nvidia"]] == ["good"]
+    info = report.found["nvidia"][0].as_model_info()
+    assert info.tools is True, "no metadata from the catalogue, so capabilities are assumed"
+
+
+def test_the_default_discovery_mode_still_takes_everything(tmp_path):
+    provider = Provider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api",
+        key_source="env:A",
+    )
+
+    report = discover(
+        catalogue_for(provider),
+        cache_path=tmp_path / "cache.json",
+        transport=listing("new-a", "new-b"),
+    )
+
+    assert [model.id for model in report.found["openrouter"]] == ["new-a", "new-b"]

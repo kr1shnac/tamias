@@ -62,6 +62,25 @@ function sectionName(line: string): string | null {
   return match ? unquote(match[1] ?? "") : null;
 }
 
+/** The hand-written overlay beside a generated sheet: `x.toml` -> `x.local.toml`. */
+export function localSheetPath(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
+  const name = slash >= 0 ? path.slice(slash + 1) : path;
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return `${dir}${name}.local`;
+  return `${dir}${name.slice(0, dot)}.local${name.slice(dot)}`;
+}
+
+/** Overlay wins per model id, exactly as the Python loader merges them. */
+export function mergePriceSheets(base: PriceSheet, overlay: PriceSheet): PriceSheet {
+  return {
+    date: base.date,
+    simulated: base.simulated,
+    models: { ...base.models, ...overlay.models },
+  };
+}
+
 export function parsePriceSheet(content: string): PriceSheet {
   const models: Record<string, ModelRates> = {};
   let date = "";

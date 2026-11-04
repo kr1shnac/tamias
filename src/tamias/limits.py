@@ -30,6 +30,19 @@ from pathlib import Path
 #: request problem and must not cool the model down.
 RETRYABLE_STATUSES = frozenset({402, 403, 429, 500, 502, 503, 504, 529})
 
+#: A 404 from an OpenAI-compatible upstream means the model is not routed there
+#: at all: retired, never granted to this account, or served on a different wire.
+#: It is not a *rate* limit, so the short ladder is wrong (it would retry a model
+#: that will never answer), but ignoring it is worse -- that is how a gateway
+#: picks the same dead model on every request.  So it is remembered separately
+#: and for much longer, and reported with its own reason.
+UNAVAILABLE_STATUSES = frozenset({404})
+
+#: How long a 404 keeps a model out of routing.  Long enough that a retired
+#: model is not rediscovered every minute; short enough that a model the
+#: provider restores is picked up the same day.
+UNAVAILABLE_SECONDS = 12 * 3600
+
 #: A pseudo-status for "the connection never produced a response" -- a refused
 #: connection, DNS failure or timeout.  Not an HTTP code, so it is kept outside
 #: :data:`RETRYABLE_STATUSES`; without it a provider that accepts a connection and
@@ -39,6 +52,15 @@ TRANSPORT_FAILURE = 0
 #: Statuses that are about the *provider's* credential, not one model, so the
 #: whole provider is skipped until the operator fixes the key.
 PROVIDER_STATUSES = frozenset({401})
+
+
+def retryable(status: int) -> bool:
+    """Whether ``status`` says a different model could serve the same request.
+
+    This is the question the proxy actually asks before failing over, so both
+    a transient limit and a model that is not offered on this provider count.
+    """
+    return status in RETRYABLE_STATUSES or status in UNAVAILABLE_STATUSES
 
 #: Escalating cooldown ladder, in seconds, indexed by strike count.
 BACKOFF_SECONDS = (60, 300, 900, 3600)
@@ -197,6 +219,9 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
         elif status == TRANSPORT_FAILURE:
             target = model
             reason = "transport failure"
+        elif status in UNAVAILABLE_STATUSES:
+            target = model
+            reason = f"not offered for this account ({status})"
         elif status in RETRYABLE_STATUSES:
             target = model
             reason = f"upstream {status}"
@@ -211,11 +236,16 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
             ).fetchone()
             strikes = int(row["strikes"]) if row is not None else 0
             strikes += 1
-            ladder = BACKOFF_SECONDS[min(strikes - 1, len(BACKOFF_SECONDS) - 1)]
-            if retry_after is not None and retry_after > 0:
-                seconds = max(ladder, retry_after)
+            if status in UNAVAILABLE_STATUSES:
+                # A model that is not offered does not become available because
+                # it was asked again: one long expiry, no escalating ladder.
+                seconds = UNAVAILABLE_SECONDS
             else:
-                seconds = ladder
+                ladder = BACKOFF_SECONDS[min(strikes - 1, len(BACKOFF_SECONDS) - 1)]
+                if retry_after is not None and retry_after > 0:
+                    seconds = max(ladder, retry_after)
+                else:
+                    seconds = ladder
             until = current + seconds
             self._conn.execute(
                 f"INSERT OR REPLACE INTO {_TABLE} "

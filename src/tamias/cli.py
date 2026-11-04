@@ -19,6 +19,7 @@ import importlib.resources
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -59,7 +60,8 @@ from tamias.pricing import (
     assume_cache_warm,
     can_price,
     compute_cost,
-    load_price_sheet,
+    load_effective_sheet,
+    overlay_path,
 )
 from tamias.pricing_fetch import (
     OPENROUTER_MODELS_URL,
@@ -395,7 +397,7 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
     the bank's, so the rupee amount is a display of the dollar amount and the
     dollar amount remains the one that reconciles against a provider invoice.
     """
-    sheet = load_price_sheet(prices_path)
+    sheet = load_effective_sheet(prices_path)
     rows = _read_rows(db_path)
     cheap = _cheap_model(sheet)
 
@@ -684,7 +686,10 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
         )
     elif stored_sheets:
         print(f"price provenance: {', '.join(stored_sheets)}")
-    requested_name = _sheet_identity(prices_path)
+    # Compare against the sheet that actually priced the rows: with an overlay
+    # that is ``base + overlay``, not the generated file named on the command
+    # line, or every overlay run would warn about itself.
+    requested_name = _sheet_identity(sheet.source or prices_path)
     stored_names = {_sheet_identity(name) for name in stored_sheets}
     if stored_sheets and requested_name not in stored_names:
         print(
@@ -845,7 +850,7 @@ def build_serve_app(
     """
     from tamias import proxy
 
-    sheet = load_price_sheet(prices)
+    sheet = load_effective_sheet(prices)
     store = Store(db)
     key_store = KeyStore(keys_db) if keys_db else None
     pool = _model_pool(cheap_model)
@@ -1447,7 +1452,10 @@ def agent_config(
     provider: dict[str, Any] = {
         "npm": "@ai-sdk/openai-compatible",
         "name": "tamias",
-        "options": {"baseURL": f"{root}/v1"},
+        # OpenCode hides a custom provider that has no credential, even though
+        # tamias replaces whatever the client sends with the provider's own key.
+        # A placeholder keeps the provider visible; it is not a secret.
+        "options": {"baseURL": f"{root}/v1", "apiKey": "tamias-local"},
     }
     if models:
         provider["models"] = {model: {"name": model} for model in models}
@@ -1455,6 +1463,320 @@ def agent_config(
         {"provider": {"tamias": provider}},
         separators=(",", ":"),
     )
+
+
+#: Rates a hand-written price overlay may carry.  The same names the generated
+#: sheet uses, so one parser reads both.
+PRICE_FIELDS = ("input", "output", "cached_input", "cache_write", "cache_write_1h")
+
+
+def _render_price_overlay(models: dict[str, dict[str, float]]) -> str:
+    """Render the overlay as TOML: one model table per id, fixed field order.
+
+    Model ids are written as quoted TOML keys, because most of them carry a
+    slash and several carry a colon.
+    """
+    lines = [
+        "# Hand-written price overlay, read after the generated price sheet.",
+        "# A model listed here wins over the same id in the generated sheet.",
+        "# Use it for a provider the catalogue does not price, a free tier, or a",
+        "# local model.  Re-running `tamias prices fetch` never touches this file.",
+        "",
+    ]
+    for model in sorted(models):
+        rates = models[model]
+        escaped = model.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'["{escaped}"]')
+        for field in PRICE_FIELDS:
+            if field in rates:
+                lines.append(f"{field} = {rates[field]!r}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def prices_set(args: argparse.Namespace) -> int:
+    """Write one model's rates into the overlay beside the generated sheet."""
+    rates = {
+        field: float(getattr(args, field))
+        for field in PRICE_FIELDS
+        if getattr(args, field) is not None
+    }
+    if not rates:
+        print(
+            "tamias prices set: pass at least one rate, e.g. --input 0 --output 0",
+            file=sys.stderr,
+        )
+        return 2
+    negative = sorted(field for field, value in rates.items() if value < 0)
+    if negative:
+        print(
+            f"tamias prices set: a rate cannot be negative ({', '.join(negative)})",
+            file=sys.stderr,
+        )
+        return 2
+
+    target = overlay_path(Path(args.sheet).expanduser())
+    existing: dict[str, dict[str, float]] = {}
+    if target.exists():
+        try:
+            import tomllib
+
+            document = tomllib.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"tamias prices set: {exc}", file=sys.stderr)
+            return 1
+        for model, table in document.items():
+            if not isinstance(table, dict):
+                continue
+            existing[model] = {
+                field: float(table[field])
+                for field in PRICE_FIELDS
+                if isinstance(table.get(field), (int, float))
+            }
+    existing[args.model] = rates
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_render_price_overlay(existing), encoding="utf-8")
+    except OSError as exc:
+        print(f"tamias prices set: {exc}", file=sys.stderr)
+        return 1
+    written = ", ".join(f"{field}={value:g}" for field, value in rates.items())
+    print(f"wrote {target}")
+    print(f"{args.model}: {written} USD per 1M tokens")
+    return 0
+
+
+def _strip_jsonc(text: str) -> tuple[str, bool]:
+    """Remove ``//`` and ``/* */`` comments and trailing commas outside strings.
+
+    OpenCode's config is JSONC.  Rewriting it needs plain JSON, so comments have
+    to go; the caller backs the file up and says so.  String literals are
+    tracked so a ``//`` inside a URL or a key is never mistaken for a comment.
+    """
+    out: list[str] = []
+    index = 0
+    had_comments = False
+    in_string = False
+    escaped = False
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] == "/":
+            had_comments = True
+            while index < length and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] == "*":
+            had_comments = True
+            end = text.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+            continue
+        out.append(char)
+        index += 1
+    stripped = "".join(out)
+    # A trailing comma before a closing brace or bracket is legal JSONC.
+    without_trailing = re.sub(r",(\s*[}\]])", r"\1", stripped)
+    return without_trailing, had_comments
+
+
+def _opencode_config_path() -> Path:
+    """The global OpenCode config, preferring the file that already exists."""
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+    directory = root / "opencode"
+    for name in ("opencode.jsonc", "opencode.json"):
+        candidate = directory / name
+        if candidate.exists():
+            return candidate
+    return directory / "opencode.json"
+
+
+def _opencode_cli_path() -> Path:
+    """OpenCode's TUI settings file, which is where plugins are listed."""
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+    return root / "opencode" / "cli.json"
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError(f"{path}: expected a JSON object")
+    return document
+
+
+def _backup(path: Path, stamp: str) -> Path:
+    backup = path.with_name(f"{path.name}.bak-{stamp}")
+    shutil.copy2(path, backup)
+    return backup
+
+
+def _plugin_directory(explicit: str | None) -> Path | None:
+    """Where the TUI plugin lives, if this install can find it."""
+    candidate = explicit or os.environ.get("TAMIAS_PLUGIN_DIR")
+    if candidate:
+        path = Path(candidate).expanduser()
+        return path if path.is_dir() else None
+    # Running from a source checkout: the plugin sits next to pyproject.toml.
+    for parent in Path(__file__).resolve().parents:
+        sibling = parent / "tamias-opencode-plugin"
+        if (sibling / "tui.tsx").is_file():
+            return sibling
+    return None
+
+
+def opencode_setup(args: argparse.Namespace) -> int:
+    """Write the provider block and plugin entry OpenCode needs, with backups.
+
+    ``install`` deliberately only prints the block, because rewriting a working
+    config is not a safe default.  ``setup`` is the opt-in version: it merges
+    the ``tamias`` provider into the existing file, keeping every other key,
+    and copies the original to a timestamped ``.bak`` first.
+    """
+    config_path = (
+        Path(args.config).expanduser() if args.config else _opencode_config_path()
+    )
+    try:
+        models = _opencode_model_ids(args)
+    except (OSError, ValueError) as exc:
+        print(f"tamias opencode setup: {exc}", file=sys.stderr)
+        return 1
+    if not models:
+        print(
+            "tamias opencode setup: no models to offer; pass --model, or a "
+            "--registry/--prices that lists models",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        raw = config_path.read_text(encoding="utf-8") if config_path.exists() else "{}"
+        stripped, had_comments = _strip_jsonc(raw)
+        document = json.loads(stripped) if stripped.strip() else {}
+        if not isinstance(document, dict):
+            raise ValueError(f"{config_path}: expected a JSON object")
+    except (OSError, ValueError) as exc:
+        print(f"tamias opencode setup: {exc}", file=sys.stderr)
+        return 1
+
+    block = json.loads(agent_config("opencode", args.port, None, models))
+    document.setdefault("provider", {}).update(block["provider"])
+    plugin = _plugin_directory(args.plugin)
+    cli_path = _opencode_cli_path()
+    cli_document: dict[str, Any] = {}
+    if plugin is not None:
+        try:
+            cli_document = _read_json_file(cli_path)
+        except (OSError, ValueError) as exc:
+            print(f"tamias opencode setup: {exc}", file=sys.stderr)
+            return 1
+
+    if args.dry_run:
+        print(f"would write {config_path}:")
+        print(json.dumps(document, indent=2))
+        if plugin is not None:
+            plugins = list(cli_document.get("plugins") or [])
+            if str(plugin) not in plugins:
+                plugins.append(str(plugin))
+            cli_document["plugins"] = plugins
+            print(f"would write {cli_path}:")
+            print(json.dumps(cli_document, indent=2))
+        return 0
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        backups: list[Path] = []
+        if config_path.exists():
+            backups.append(_backup(config_path, stamp))
+        config_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        if plugin is not None:
+            plugins = [str(entry) for entry in (cli_document.get("plugins") or [])]
+            if str(plugin) not in plugins:
+                plugins.append(str(plugin))
+            cli_document["plugins"] = plugins
+            cli_path.parent.mkdir(parents=True, exist_ok=True)
+            if cli_path.exists():
+                backups.append(_backup(cli_path, stamp))
+            cli_path.write_text(
+                json.dumps(cli_document, indent=2) + "\n", encoding="utf-8"
+            )
+    except OSError as exc:
+        print(f"tamias opencode setup: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"wrote {config_path} (provider tamias, {len(models)} model(s))")
+    if had_comments:
+        print(
+            "note: OpenCode's JSONC comments are not preserved; the original "
+            f"is at {backups[0]}",
+            file=sys.stderr,
+        )
+    if plugin is None:
+        print(
+            "plugin not found: pass --plugin /path/to/tamias-opencode-plugin to "
+            "add the live panel",
+            file=sys.stderr,
+        )
+    else:
+        print(f"registered plugin {plugin} in {cli_path}")
+    print("")
+    print("start the proxy with the same --db and --prices:")
+    serve = _opencode_serve_command(args)
+    print("  " + serve)
+    return 0
+
+
+def _opencode_serve_command(args: argparse.Namespace) -> str:
+    """The serve command that mirrors the config just written.
+
+    A provider catalogue is the v1 shape: one endpoint in front of every key the
+    user has.  Only when there is no catalogue does the single-upstream
+    ``--provider`` preset make sense, because that preset points at one service.
+    """
+    db = str(Path(args.db).expanduser())
+    prices = str(Path(args.prices).expanduser())
+    cheap = ",".join(_model_pool(getattr(args, "cheap_model", "") or ""))
+    providers = getattr(args, "providers", None)
+    if providers is None:
+        default = Path.home() / ".tamias" / "providers.toml"
+        providers = str(default) if default.exists() else None
+    parts = ["tamias serve"]
+    if providers:
+        parts.append(f"--providers {shlex.quote(str(Path(providers).expanduser()))}")
+    else:
+        parts.append("--provider opencode")
+    parts.extend(
+        [
+            f"--db {shlex.quote(db)}",
+            f"--prices {shlex.quote(prices)}",
+            f"--port {args.port}",
+            "--router-mode active",
+            "--min-gap 0",
+            f"--cheap-model {shlex.quote(cheap) if cheap else '<free-model>'}",
+        ]
+    )
+    registry = getattr(args, "registry", None)
+    if registry:
+        parts.append(f"--registry {shlex.quote(str(Path(registry).expanduser()))}")
+    return " ".join(parts)
 
 
 OPENCODE_COMMAND_FILENAME = "tamias.md"
@@ -1488,7 +1810,7 @@ def _opencode_model_ids(args: argparse.Namespace) -> list[str]:
     if registry:
         models.extend(load_registry(Path(registry).expanduser()).ids())
     else:
-        sheet = load_price_sheet(args.prices)
+        sheet = load_effective_sheet(args.prices)
         models.extend(
             model
             for model, price in sheet.models.items()
@@ -1583,21 +1905,9 @@ def opencode_install(args: argparse.Namespace) -> int:
     print(agent_config("opencode", args.port, None, models))
     print("")
     print("start the proxy with the same --db and --prices:")
-    cheap = ",".join(_model_pool(getattr(args, "cheap_model", "") or ""))
-    serve = [
-        "tamias serve",
-        "--provider opencode",
-        f"--db {shlex.quote(db)}",
-        f"--prices {shlex.quote(prices)}",
-        f"--port {args.port}",
-        "--router-mode active",
-        "--min-gap 0",
-        f"--cheap-model {shlex.quote(cheap) if cheap else '<free-model>'}",
-    ]
-    registry = getattr(args, "registry", None)
-    if registry:
-        serve.append(f"--registry {shlex.quote(str(Path(registry).expanduser()))}")
-    print("  " + " ".join(serve))
+    print("  " + _opencode_serve_command(args))
+    print("")
+    print("or let `tamias opencode setup` merge the provider block for you")
     print("then restart OpenCode and type /tamias")
     return 0
 
@@ -1777,7 +2087,7 @@ def service_install(args: argparse.Namespace) -> int:
             registry_path = _service_file(args.registry, "registry")
             prices_path = _service_file(args.prices, "price sheet")
             registry_obj = load_registry(Path(registry_path))
-            sheet = load_price_sheet(prices_path)
+            sheet = load_effective_sheet(prices_path)
         except (OSError, ValueError) as exc:
             print(f"tamias service install: {exc}", file=sys.stderr)
             return 2
@@ -1971,7 +2281,7 @@ def doctor(
         blocking = True
 
     try:
-        sheet = load_price_sheet(prices)
+        sheet = load_effective_sheet(prices)
         published = date.fromisoformat(sheet.date)
         age = (today or date.today()) - published
         if age.days < 0 or age.days > PRICE_SHEET_STALE_DAYS:
@@ -2603,6 +2913,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="overwrite an existing output file"
     )
 
+    set_parser = prices_sub.add_parser(
+        "set",
+        help="write a rate for one model into the hand-written overlay",
+    )
+    set_parser.add_argument("model", help="model id, exactly as the provider sends it")
+    for field in PRICE_FIELDS:
+        set_parser.add_argument(
+            f"--{field.replace('_', '-')}",
+            dest=field,
+            type=float,
+            default=None,
+            help=f"USD per 1M tokens for {field.replace('_', ' ')} (0 means free)",
+        )
+    set_parser.add_argument(
+        "--sheet",
+        default=str(Path.home() / ".tamias" / "prices.toml"),
+        help="generated sheet whose overlay should hold the rate "
+        "(default: ~/.tamias/prices.toml)",
+    )
+
     agent_parser = sub.add_parser("agent-config", help="print an agent configuration snippet")
     agent_parser.add_argument("agent", choices=("claude-code", "codex", "opencode"))
     agent_parser.add_argument("--port", type=int, default=8000)
@@ -2628,6 +2958,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     opencode_install_parser.add_argument(
         "--prices", required=True, help="price sheet the command should price with"
+    )
+    opencode_install_parser.add_argument(
+        "--providers",
+        default=None,
+        help="provider catalogue named in the printed serve command "
+        "(default: ~/.tamias/providers.toml when it exists)",
     )
     opencode_install_parser.add_argument("--port", type=int, default=8000)
     opencode_install_parser.add_argument(
@@ -2660,6 +2996,53 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="rupees per US dollar to embed as a display conversion in /tamias",
+    )
+
+    opencode_setup_parser = opencode_sub.add_parser(
+        "setup",
+        help="merge the tamias provider (and optional TUI plugin) into OpenCode's config",
+    )
+    opencode_setup_parser.add_argument(
+        "--config",
+        default=None,
+        help="OpenCode config to edit (default: ~/.config/opencode/opencode.jsonc)",
+    )
+    opencode_setup_parser.add_argument(
+        "--plugin",
+        default=None,
+        help="path to tamias-opencode-plugin; also read from TAMIAS_PLUGIN_DIR",
+    )
+    opencode_setup_parser.add_argument(
+        "--db",
+        default=str(Path.home() / ".tamias" / "requests.db"),
+        help="request log named in the printed serve command",
+    )
+    opencode_setup_parser.add_argument(
+        "--prices",
+        default=str(Path.home() / ".tamias" / "prices.toml"),
+        help="price sheet used for the model list and the serve command",
+    )
+    opencode_setup_parser.add_argument(
+        "--providers",
+        default=None,
+        help="provider catalogue named in the printed serve command "
+        "(default: ~/.tamias/providers.toml when it exists)",
+    )
+    opencode_setup_parser.add_argument("--port", type=int, default=8000)
+    opencode_setup_parser.add_argument(
+        "--registry", default=None, help="capability registry to offer in the picker"
+    )
+    opencode_setup_parser.add_argument(
+        "--cheap-model", default=None, help="free model, or comma-separated pool"
+    )
+    opencode_setup_parser.add_argument(
+        "--model",
+        action="append",
+        default=None,
+        help="model id to offer in OpenCode's picker (repeatable)",
+    )
+    opencode_setup_parser.add_argument(
+        "--dry-run", action="store_true", help="print the result without writing"
     )
 
     service_parser = sub.add_parser(
@@ -2935,7 +3318,6 @@ def demo_command(args: argparse.Namespace) -> int:
 
     from tamias import proxy
     from tamias.demo_upstream import StreamingASGITransport, create_mock_upstream
-    from tamias.pricing import load_price_sheet
     from tamias.router import RouterConfig
     from tamias.store import Store
 
@@ -2953,7 +3335,7 @@ def demo_command(args: argparse.Namespace) -> int:
 
     upstream = create_mock_upstream()
     store = Store(str(db))
-    sheet = load_price_sheet(str(prices))
+    sheet = load_effective_sheet(str(prices))
     try:
         cfg = RouterConfig(
             cheap_model=(
@@ -3073,6 +3455,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
             result = fetch_models(_models_opener(), args.url)
+            output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(render_sheet(result.models, fetched_at, args.url), encoding="utf-8")
         except (OSError, ValueError, UnicodeDecodeError) as exc:
             print(f"tamias prices fetch: {exc}", file=sys.stderr)
@@ -3084,6 +3467,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"free: {free}")
         print(f"skipped by reason: {skipped or 'none'}")
         return 0
+    if args.command == "prices" and args.prices_command == "set":
+        return prices_set(args)
     if args.command == "prices" and args.prices_command == "zen":
         output = Path(args.out)
         if output.exists() and not args.force:
@@ -3096,6 +3481,7 @@ def main(argv: list[str] | None = None) -> int:
             fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
             model_ids = fetch_model_ids(_models_opener(), args.url)
             free = zen_free_models(model_ids)
+            output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(
                 render_zen_sheet(free, fetched_at, args.url), encoding="utf-8"
             )
@@ -3108,6 +3494,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "opencode" and args.opencode_command == "install":
         return opencode_install(args)
+    if args.command == "opencode" and args.opencode_command == "setup":
+        return opencode_setup(args)
     if args.command == "service" and args.service_command == "install":
         return service_install(args)
     if args.command == "service" and args.service_command == "uninstall":
@@ -3127,6 +3515,7 @@ def main(argv: list[str] | None = None) -> int:
             free = zen_free_models(model_ids)
             catalog = fetch_catalog(opener, args.catalog_url)
             build = build_zen_registry(catalog, free)
+            output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(
                 render_registry(
                     build.models, fetched_at, args.models_url, args.catalog_url

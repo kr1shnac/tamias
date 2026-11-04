@@ -55,6 +55,13 @@ _VERSION_SUFFIXES = ("/v1", "/api/v1")
 # authenticates nothing.
 AUTH_STYLES = ("bearer", "none")
 
+# How much of a provider's ``/v1/models`` answer to trust.  ``all`` (the default)
+# takes every id the provider lists; ``listed`` takes only the ids the operator
+# wrote in ``models``, because a catalogue sometimes advertises far more than a
+# key can actually invoke -- NVIDIA's public list names 85 models and a dev key
+# can call 14, so discovery alone would offer a routing pool that is mostly 404.
+DISCOVERY_MODES = ("all", "listed")
+
 # Presets cover the providers a normal deployment already has a key for.  They
 # carry no credential and no model list: only where the API lives and which
 # reasoning vocabulary it speaks.
@@ -110,6 +117,7 @@ _PROVIDER_KEYS = (
     "auth",
     "effort_style",
     "models",
+    "discover",
 )
 
 
@@ -163,6 +171,13 @@ class Provider:
     auth: str = "bearer"
     key_source: str = ""
     """Where the secret came from: ``env:VAR``, ``command``, or empty."""
+
+    discover: str = "all"
+    """``all`` takes every discovered id; ``listed`` takes only ``models``."""
+
+    models: tuple[str, ...] = ()
+    """Ids this provider claims, in the operator's order.  Also the allowlist
+    when :attr:`discover` is ``listed``."""
 
     @property
     def root(self) -> str:
@@ -376,6 +391,16 @@ def _parse_provider(
     if not isinstance(models, list) or not all(isinstance(item, str) for item in models):
         raise ProviderError(f"{where}: 'models' must be an array of strings")
 
+    discover = entry.get("discover", "all")
+    if discover not in DISCOVERY_MODES:
+        known = ", ".join(DISCOVERY_MODES)
+        raise ProviderError(f"{where}: unknown discover {discover!r} (known: {known})")
+    if discover == "listed" and not models:
+        raise ProviderError(
+            f"{where}: discover = 'listed' needs a non-empty 'models' list, "
+            "otherwise the provider would offer no models at all"
+        )
+
     seen.add(name)
     provider = Provider(
         name=name,
@@ -383,6 +408,8 @@ def _parse_provider(
         effort_style=effort_style.strip(),
         auth=auth,
         key_source="",
+        discover=discover,
+        models=tuple(model.strip() for model in models),
     )
     return provider, tuple(model.strip() for model in models), (api_key_env or api_key_command)
 
@@ -460,6 +487,8 @@ def load_providers(
                 effort_style=parsed.effort_style,
                 auth=parsed.auth,
                 key_source=source,
+                discover=parsed.discover,
+                models=parsed.models,
             )
 
     default = next(iter(providers), None) if len(providers) == 1 else None

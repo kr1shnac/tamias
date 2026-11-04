@@ -15,12 +15,14 @@ Every command runs as `tamias <command>`. `tamias --help` lists them:
 | `report` | Summarise cost and shadow routing from a log. |
 | `agent-config` | Print an agent configuration snippet. |
 | `opencode install` | Write the `/tamias` slash command OpenCode loads at startup. |
+| `opencode setup` | Merge the `tamias` provider into OpenCode's config (backup first) and register the TUI panel. |
 | `service install` | Write a systemd user unit that runs `tamias serve` in the background (Linux). |
 | `service uninstall` | Stop and remove the unit tamias wrote. |
 | `doctor` | Check local tamias readiness. |
 | `prune` | Delete old rows from the request log. |
 | `admin` | Manage company keys and signed project manifests. |
 | `prices fetch` | Fetch an OpenRouter model price sheet. |
+| `prices set` | Write one model's rates into the hand-written overlay beside a sheet. |
 | `prices zen` | Fetch OpenCode Zen's model list and write a sheet that prices its free models at $0 (paid models stay UNKNOWN). |
 | `registry zen` | Build a capability registry for Zen's free models from models.dev's published `tool_call` data. |
 | `config` | Show the effective configuration. |
@@ -74,7 +76,8 @@ The sheet a command prices with is resolved in this order:
    (`src/tamias/data/prices.default.toml`).
 
 When it falls back to the bundled snapshot, `tamias` prints a notice on stderr.
-Run `tamias prices fetch` for current rates. See [`PRICING.md`](PRICING.md) for
+Run `tamias prices fetch --out ~/.tamias/prices.toml` for current rates. See
+[`PRICING.md`](PRICING.md) for
 the schema.
 
 ## `tamias serve` flags
@@ -113,9 +116,10 @@ the schema.
 `--cheap-model` accepts a comma-separated pool, for example
 `--cheap-model deepseek-v4.1-flash-free,big-pickle`. With `--router-mode
 active`, a missing, tool-less, or unpriced member refuses startup, so a pool
-can never silently pick a model the deployment did not approve. The pool is
-not a failover: it spreads sessions, and a `429` from the chosen member is not
-retried on another. See [`ROUTING.md`](ROUTING.md#the-cheap-model-pool).
+can never silently pick a model the deployment did not approve. The pool spreads
+sessions across members; on a refusal (`429`, `404`, `5xx`, transport failure)
+the request is retried once on the next member that passed the same gates. See
+[`ROUTING.md`](ROUTING.md#the-cheap-model-pool).
 
 ## `tamias run` flags
 
@@ -166,6 +170,24 @@ publishes ids but no rates, and an absent rate means `UNKNOWN` — never a guess
 dollar figure. `tamias report` then prints exact token counts for those rows and
 says the dollars are unknown, instead of inventing a price.
 
+## `tamias prices set`
+
+```text
+tamias prices set MODEL [--input USD] [--output USD] [--cached-input USD]
+                        [--cache-write USD] [--cache-write-1h USD]
+                        [--sheet PATH]
+```
+
+Writes one model's rates into the hand-written overlay beside a generated sheet:
+`--sheet ~/.tamias/prices.toml` means `~/.tamias/prices.local.toml`. The overlay
+wins per model id, so it prices a direct provider, a free development tier or a
+local model that the generated catalogue does not cover, and re-running
+`tamias prices fetch` cannot erase it. At least one rate is required; a negative
+rate is refused with exit `2`.
+
+`--input 0 --output 0` is how a genuinely free tier is recorded. An omitted
+rate stays `UNKNOWN` — never free by assumption.
+
 ## `tamias opencode install`
 
 ```text
@@ -192,6 +214,34 @@ conversion you supply, not a billed amount; leave it off rather than guess.
 
 Exit codes: `0` written, `2` the command file already exists and `--force` was
 not passed, `1` the file could not be written.
+
+## `tamias opencode setup`
+
+```text
+tamias opencode setup [--config PATH] [--plugin DIR] [--db PATH] [--prices PATH]
+                      [--providers PATH] [--registry PATH] [--port PORT]
+                      [--cheap-model MODEL[,MODEL...]] [--model ID ...]
+                      [--dry-run]
+```
+
+The opt-in writer behind `install`. It merges `provider.tamias` into OpenCode's
+config (`~/.config/opencode/opencode.jsonc` when present, else `opencode.json`),
+keeping every other key, and copies the original to
+`<name>.bak-YYYYMMDDTHHMMSSZ` first. When the TUI plugin can be found — a
+`--plugin` path, `$TAMIAS_PLUGIN_DIR`, or the source checkout beside the package
+— it is appended to `plugins` in `cli.json`, once.
+
+OpenCode's config is JSONC; rewriting it needs plain JSON, so `//` and `/* */`
+comments and trailing commas are dropped. When any comment was present the
+command says so and names the backup. `--dry-run` prints both documents and
+writes nothing.
+
+The printed `tamias serve` command names `--providers` when a catalogue exists
+(default: `~/.tamias/providers.toml`), so one endpoint fronts every provider;
+without a catalogue it falls back to `--provider opencode`.
+
+Exit codes: `0` written, `2` no model to offer or a usage error, `1` the config
+could not be read or written.
 
 ## `tamias service install`
 

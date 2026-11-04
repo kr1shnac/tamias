@@ -14,8 +14,11 @@ import pytest
 
 from tamias.limits import (
     BACKOFF_SECONDS,
+    RETRYABLE_STATUSES,
+    UNAVAILABLE_SECONDS,
     LimitLedger,
     parse_retry_after,
+    retryable,
 )
 
 NOW = 1_800_000_000.0
@@ -59,6 +62,36 @@ def test_a_request_error_never_cools_a_model_down():
     assert ledger.record("openrouter", "m", 400, now=NOW) is None
     assert ledger.record("openrouter", "m", 422, now=NOW) is None
     assert ledger.active(now=NOW) == ()
+
+
+def test_a_404_is_remembered_for_hours_not_minutes():
+    """A model the account cannot call is not a rate limit and must not be retried."""
+    ledger = LimitLedger(":memory:")
+
+    limit = ledger.record("nvidia", "retired/model", 404, now=NOW)
+
+    assert limit is not None
+    assert limit.until - NOW == UNAVAILABLE_SECONDS
+    assert "not offered" in limit.reason
+    assert ledger.is_limited("nvidia", "retired/model", now=NOW + 60)
+    assert not ledger.is_limited("nvidia", "retired/model", now=NOW + UNAVAILABLE_SECONDS + 1)
+
+
+def test_a_repeated_404_does_not_escalate_beyond_one_expiry():
+    ledger = LimitLedger(":memory:")
+
+    first = ledger.record("nvidia", "m", 404, now=NOW)
+    again = ledger.record("nvidia", "m", 404, retry_after=1, now=NOW + 10)
+
+    assert again.until - (NOW + 10) == first.until - NOW
+
+
+def test_retryable_covers_both_a_limit_and_a_model_this_provider_does_not_serve():
+    assert retryable(429)
+    assert retryable(503)
+    assert retryable(404), "a 404 means another model may still answer"
+    assert not retryable(400), "a malformed request would fail everywhere"
+    assert 404 not in RETRYABLE_STATUSES
 
 
 def test_a_rejected_credential_locks_the_whole_provider():

@@ -85,6 +85,64 @@ def load_price_sheet(path: str | Path) -> PriceSheet:
     )
 
 
+def overlay_path(base: str | Path) -> Path:
+    """The hand-written sheet that sits beside a generated one.
+
+    ``~/.tamias/prices.toml`` -> ``~/.tamias/prices.local.toml``.  The generated
+    file is never edited, so re-running ``prices fetch`` cannot erase the rates
+    an operator wrote for a provider the catalogue does not cover.
+    """
+    path = Path(base)
+    return path.with_name(f"{path.stem}.local{path.suffix}")
+
+
+def load_price_overlay(path: str | Path, *, date: str) -> PriceSheet:
+    """Read a hand-written overlay with the same model tables as a sheet.
+
+    An overlay lists only the models the generated sheet cannot price: a
+    provider that bills differently for the same id, a free development tier, a
+    local model that costs nothing.  It needs no ``date`` or ``provenance`` --
+    it makes no claim about the market, only about these entries.
+    """
+    source = Path(path)
+    document: dict[str, Any] = tomllib.loads(source.read_text(encoding="utf-8"))
+    for reserved in ("date", "simulated", "provenance"):
+        document.pop(reserved, None)
+    models = {model: _parse_model(source, model, table) for model, table in document.items()}
+    return PriceSheet(date=date, models=models, simulated=False, source=str(source))
+
+
+def merge_price_sheets(base: PriceSheet, overlay: PriceSheet) -> PriceSheet:
+    """Overlay wins per model id; every other base entry is untouched."""
+    models = dict(base.models)
+    models.update(overlay.models)
+    source = f"{base.source} + {overlay.source}" if base.source else overlay.source
+    return PriceSheet(
+        date=base.date,
+        models=models,
+        simulated=base.simulated,
+        source=source,
+        provenance=base.provenance,
+    )
+
+
+def load_effective_sheet(
+    path: str | Path,
+    *,
+    overlay: str | Path | None = None,
+) -> PriceSheet:
+    """Load a sheet and, when it exists, the local overlay beside it.
+
+    This is what routing, reporting and the doctor use: one call site gets the
+    rates the operator actually configured, without editing the generated file.
+    """
+    base = load_price_sheet(path)
+    candidate = Path(overlay) if overlay is not None else overlay_path(path)
+    if not candidate.exists():
+        return base
+    return merge_price_sheets(base, load_price_overlay(candidate, date=base.date))
+
+
 def _parse_provenance(source: Path, raw: Any) -> dict[str, str] | None:
     if raw is None:
         return None  # a sheet written before provenance existed: no claim at all

@@ -1606,9 +1606,11 @@ def create_app(
                 return _upstream_failure_response()
             # A limit learned here is a limit every later request skips.  A 429
             # means nothing was generated, so one immediate retry on a model
-            # that passed all three gates is safe and saves the turn.
+            # that passed all three gates is safe and saves the turn.  A 404
+            # counts too: it says this provider does not serve the model, which
+            # is exactly the kind of refusal another candidate can absorb.
             remember_limit(running_model, upstream)
-            if upstream.status_code in limits_mod.RETRYABLE_STATUSES:
+            if limits_mod.retryable(upstream.status_code):
                 fallback = retry_target(running_model)
                 if fallback:
                     await upstream.aclose()
@@ -1677,7 +1679,7 @@ def create_app(
         # retried on another gated model without the client seeing a truncated
         # stream.
         remember_limit(running_model, upstream)
-        if upstream.status_code in limits_mod.RETRYABLE_STATUSES:
+        if limits_mod.retryable(upstream.status_code):
             fallback = retry_target(running_model)
             if fallback:
                 await upstream.aclose()

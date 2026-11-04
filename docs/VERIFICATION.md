@@ -165,7 +165,43 @@ Observed **2026-10-30** on Linux (Python 3.14, opencode 2.0.32), against
   now writes the map from the registry or the free half of the price sheet, and
   `opencode models` listed all 8.
 
-## Verified with the provider ledger (`scripts/credit_ab_check.py`)
+## Verified by hand across two providers
+
+Observed **2026-11-04** on Linux (Python 3.14, opencode 2.2.5), against direct
+NVIDIA (`https://integrate.api.nvidia.com/v1`) and OpenRouter at the same time,
+served from one `tamias serve` process.
+
+- **Discovery and mapping.** `tamias serve --providers ~/.tamias/providers.toml`
+  read both keys, discovered 427 model ids from 2 providers, and reported
+  `424 considered, 11 candidates` for the pinned allowlist. Every candidate
+  named its provider in `GET /limits`.
+- **A planning turn stayed.** A chat request naming the paid
+  `deepseek/deepseek-v4.1-flash` was logged `decision=STAY reason=user turn:
+  planning` and reached OpenRouter unchanged (HTTP 200).
+- **An easy tool turn switched.** The same model with a trailing `read` tool
+  result was logged `decision=SWITCH target=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+  reason=easy tool: read`, and the response came from NVIDIA (HTTP 200, 64 input
+  / 32 output tokens). The request row recorded `model_used` as the free NVIDIA
+  id, not the paid one.
+- **Price overlay drove the rank.** The eight pinned NVIDIA ids were priced at
+  `0.0` in `prices.local.toml`; the same ids on OpenRouter were not free. The
+  pool ranked the direct NVIDIA entries first, and `tamias report` printed
+  `tokens on $0-priced models: 64 input / 32 output`.
+- **A 404 was learned and absorbed.** A deliberately bogus model id pinned into
+  the NVIDIA catalogue (`nvidia/nemotron-3-ghost-99b`, priced at `0`) was chosen
+  first, answered `404 Not Found`, and was recorded
+  `limit provider=nvidia model=… status=404 cooldown=43199s strikes=1` with the
+  reason `not offered for this account (404)`. The same request was retried on
+  `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` and returned HTTP 200;
+  `decision_reason` reads `upstream 404 on …: retried on …`. The next `/limits`
+  reported `gates: {"health": 1}` and that model in `cooling_down` for 12 hours.
+- **What this does not prove.** One short session on two providers, not a
+  long-running agent; the NVIDIA tier is free for this account, so the
+  "saving" is the difference between two list-price computations, not an
+  invoice. Long agent sessions, Claude Code and Codex traffic, and every other
+  provider remain unverified.
+
+
 
 A provider-ledger measurement is the one number that does not come from a price
 sheet the caller controls. `credit_ab_check.py` runs the *same* task twice through
@@ -222,10 +258,15 @@ smaller than the floor is reported as below the floor, not as a measurement.
 - **Paid-model behaviour.** Every live rate used was a real `0`. Real per-token
   arithmetic against a **non-zero** rate has never been checked.
 - **Pool members beyond the routing-only target.** Only
-  `deepseek-v4.1-flash-free` has been observed receiving a rewritten request
-  (routing only; the upstream answered 429 without a key). No other pool member
-  has completed a live tool-calling turn, and a 429 on the chosen member is not
-  retried on another.
+  `deepseek-v4.1-flash-free` was observed receiving a rewritten request from the
+  Zen pool (routing only; the upstream answered 429 without a key). The
+  two-provider run on 2026-11-04 did complete turns on NVIDIA, and a `404` was
+  retried on another member inside the same request — but no **429** on the
+  chosen member has been observed being retried.
+- **The free tier is declared, not invoiced.** The eight direct NVIDIA ids are
+  priced at `0.0` in the operator's overlay because that is the account's
+  development tier. No invoice confirms it, and the same weights cost money on
+  OpenRouter.
 - **The systemd unit has not been started here.** Its text, paths, quoting and
   guards are tested offline; `systemctl --user enable --now` and a real
   post-login restart have not been run.
@@ -238,8 +279,9 @@ smaller than the floor is reported as below the floor, not as a measurement.
   provider's cache; this has not been measured either.
 - **Attribution.** A metadata-only log cannot say whether the passing edit came
   from the strong model or the cheap one.
-- **Rate limiting.** 42 requests across the live runs produced no 429; the
-  free-tier limit, the backoff path and the retry were not exercised.
+- **Rate limiting.** The live runs produced no `429`; the free-tier limit, the
+  backoff path and the `429` retry were not exercised. The `404` path was
+  exercised on 2026-11-04 (learned, cooled for 12 h, retried in-request).
 - **Multi-session continuity.** Resuming an existing session, and any
   `opencode run --continue` behaviour, was not exercised.
 
@@ -369,17 +411,20 @@ python scripts/credit_ab_check.py \
 
 ## Release status
 
-Public alpha — **`0.1.0a8` on PyPI** (<https://pypi.org/project/tamias/>),
-published from the annotated tag `v0.1.0a8` (2026-10-20) by the tag-triggered
-`publish.yml` job via PyPI Trusted Publishing (OIDC). The first successful upload
-was `v0.1.0a7`; earlier alpha tags failed with `invalid-publisher` before the PyPI
-pending publisher existed. TestPyPI's newest is `0.1.0a3`.
+Release **`1.0.0`** — the version in this tree. The tag-triggered `publish.yml`
+job publishes a `vX.Y.Z` tag through PyPI Trusted Publishing (OIDC); `0.1.0a8`
+(2026-10-20) was the artifact on PyPI before it, built from tag `v0.1.0a8`. The
+first successful upload was `v0.1.0a7`; earlier alpha tags failed with
+`invalid-publisher` before the PyPI pending publisher existed. TestPyPI's newest
+is `0.1.0a3`.
 
 | Area | Status | Evidence or limitation |
 | --- | --- | --- |
 | Local proxy metering | Implemented | Chat, Responses and Anthropic routes share one log; offline client-matrix test |
 | Shadow routing | Implemented | Decisions recorded without rewriting upstream requests |
 | Active routing | Opt-in | `--router-mode active` rewrites the model to `--cheap-model`; refused at startup unless the target is in `--registry`, tool-capable, and priced; a key-forbidden switch is suppressed, not refused |
+| Multi-provider routing | Implemented, live | Two providers served from one process on 2026-11-04; per-model provider, credential, and cheapest-first ranking. Provider coverage beyond NVIDIA, OpenRouter and Zen is config-tested, not live |
+| Failover | Implemented | `404` learned for 12 h and retried in-request live; `429`/`5xx` cooldowns are fixture-tested only |
 | Cost provenance | Implemented | Provider billed cost and list-price computation remain separate |
 | Legacy cost rows | Unknown | Ambiguous `cost_usd` is excluded from computed/reconciliation totals |
 | Session privacy | Implemented | Per-database salt and legacy session migration |
@@ -388,14 +433,15 @@ pending publisher existed. TestPyPI's newest is `0.1.0a3`.
 | Listener hardening | Implemented | Body cap (413) and concurrency limit; optional TLS via `--tls-cert`/`--tls-key` |
 | Signed policy manifest | Opt-in | `serve --manifest` verifies an Ed25519-signed policy at startup and serves it at `GET /policy`; expired/altered/mis-pinned manifests are refused (404/401/403/503). Needs `tamias[manifest]`; agent-side application is not enforced |
 | Configuration | Implemented | `~/.tamias/config.toml` (or `$TAMIAS_CONFIG`); provider presets; `tamias config` |
+| OpenCode integration | Implemented, live | `opencode setup` writes the provider block, `opencode models` lists it on 2.2.5; the TUI panel needs the source checkout |
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
 | Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`); no live ledger measurement has been taken |
-| Live provider behavior | Partly verified | CI uses offline/injected transports only. One live OpenCode-Zen run (2026-10-30) observed a routing decision and rewrite against the real endpoint; it returned 429 without a key, so no completion, no token counts, and no cost were observed. |
+| Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, and OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key) |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions |
-| Publish | Released | `0.1.0a8` is on PyPI, published from tag `v0.1.0a8` via Trusted Publishing (OIDC) |
+| Publish | Tag-triggered | `v1.0.0` publishes through Trusted Publishing (OIDC); `0.1.0a8` was the last artifact on PyPI |
 
 This page describes implemented repository behaviour and the runs recorded above.
 It does not claim provider compatibility, savings, latency, or live-agent success
-beyond the 2026-10-04 observations.
+beyond the observations dated above.

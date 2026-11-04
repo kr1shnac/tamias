@@ -131,7 +131,7 @@ upstream chose not to itemize: an unverified number would read as money.
 ## Refreshing a sheet
 
 ```sh
-tamias prices fetch
+tamias prices fetch --out ~/.tamias/prices.toml
 ```
 
 The fetcher reads `https://openrouter.ai/api/v1/models` through an injectable
@@ -144,6 +144,37 @@ the same bytes.
 `examples/prices.example.toml` is not that. It is a hand-written illustration, headed
 `EXAMPLE - NOT CURRENT`, and its rates have not been re-checked against a
 provider.
+
+## The local overlay
+
+A generated sheet prices **one catalogue**. A direct provider, a free
+development tier, a local model, or a provider that bills differently for the
+same model id is not in it. Those rates belong in the overlay beside the sheet:
+
+```text
+~/.tamias/prices.toml          generated; never edited by hand
+~/.tamias/prices.local.toml    hand-written; wins per model id
+```
+
+```sh
+tamias prices set nvidia/nemotron-3-nano-omni-30b-a3b-reasoning \
+  --input 0 --output 0
+```
+
+writes that one table into the overlay. `--sheet PATH` chooses a different
+base sheet; the overlay always sits beside it (`x.toml` → `x.local.toml`). The
+overlay has no `date` or `[provenance]`: it makes no claim about the market,
+only about these entries. Re-running `tamias prices fetch` rewrites the
+generated file and leaves the overlay untouched, so a refresh cannot erase a
+hand-written rate.
+
+Every read path loads the pair — `serve`, `report`, `doctor`, `demo`, the model
+picker — and the provenance line names both files. Routing ranks on the
+effective rate, which is what makes a free tier win over a paid reseller for
+the same weights.
+
+An **absent** rate is still UNKNOWN. The overlay is a place to state a price
+you know, not a way to make an unknown price look like zero.
 
 ## What was verified
 

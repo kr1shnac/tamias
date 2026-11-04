@@ -282,6 +282,80 @@ def test_a_missing_default_file_is_an_empty_catalogue_not_a_crash(tmp_path):
     assert len(empty_catalogue()) == 0
 
 
+def test_discover_listed_pins_a_provider_to_its_own_model_list(tmp_path):
+    catalogue = load_providers(
+        write(
+            tmp_path,
+            """
+[[providers]]
+name = "nvidia"
+api_key_env = "NVIDIA_API_KEY"
+discover = "listed"
+models = ["nvidia/nemotron-3.5-lightning-30b-a3b", "poolside/laguna-xs-2.1"]
+""",
+        ),
+        env={"NVIDIA_API_KEY": "secret"},
+    )
+
+    provider = catalogue.get("nvidia")
+
+    assert provider is not None
+    assert provider.discover == "listed"
+    assert provider.models == (
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "poolside/laguna-xs-2.1",
+    )
+
+
+def test_discovery_defaults_to_taking_everything(tmp_path):
+    catalogue = load_providers(
+        write(
+            tmp_path,
+            """
+[[providers]]
+name = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+""",
+        ),
+        env={"OPENROUTER_API_KEY": "secret"},
+    )
+
+    assert catalogue.get("openrouter").discover == "all"
+
+
+def test_a_listed_provider_without_models_is_refused(tmp_path):
+    with pytest.raises(ProviderError, match="non-empty 'models'"):
+        load_providers(
+            write(
+                tmp_path,
+                """
+[[providers]]
+name = "nvidia"
+api_key_env = "X"
+discover = "listed"
+""",
+            ),
+            env={"X": "1"},
+        )
+
+
+def test_an_unknown_discovery_mode_is_refused(tmp_path):
+    with pytest.raises(ProviderError, match="unknown discover"):
+        load_providers(
+            write(
+                tmp_path,
+                """
+[[providers]]
+name = "nvidia"
+api_key_env = "X"
+discover = "everything"
+models = ["m"]
+""",
+            ),
+            env={"X": "1"},
+        )
+
+
 def test_unknown_keys_are_rejected_rather_than_ignored(tmp_path):
     with pytest.raises(ProviderError, match="unknown key 'api_key'"):
         load_providers(

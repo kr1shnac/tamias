@@ -1,8 +1,12 @@
 # Tamias
 
-Tamias is a local HTTP proxy that logs token usage and cost per request for
-OpenAI-compatible agents, and can rewrite model selection in **shadow** or
-**active** mode.
+Tamias is a local proxy that puts **every provider you have** behind one
+OpenAI-compatible endpoint, routes each request to the cheapest model that can
+do the work, fails over when a provider is limited or a model is gone, and
+records what that saved.
+
+It is not a provider. It ships no model, no credential and no subscription of
+its own: you bring the keys, and tamias decides which one to spend.
 
 [![PyPI](https://img.shields.io/pypi/v/tamias.svg)](https://pypi.org/project/tamias/)
 [![Python versions](https://img.shields.io/pypi/pyversions/tamias.svg)](https://pypi.org/project/tamias/)
@@ -11,15 +15,31 @@ OpenAI-compatible agents, and can rewrite model selection in **shadow** or
 
 ## What it does
 
-- **Meters every request.** Writes one row per request — model, tokens, and
-  computed cost — to a local SQLite file. A cost that cannot be computed is
-  recorded as `UNKNOWN`, never guessed as `$0.00`.
-- **Shadows routing decisions.** In the default `shadow` mode the router records
-  which model it *would* pick, while the original request is forwarded untouched.
-- **Can rewrite the model.** In opt-in `active` mode it sends the request to a
-  cheaper model when a rule says that is safe. `active` is fail-closed.
-- **Stays transparent.** It is a pass-through proxy: prompt and response text is
-  never stored, and your provider credentials are forwarded as they are.
+- **Routes across providers, not just models.** Every model id is mapped to the
+  provider that serves it, so a turn can move from a direct NVIDIA key to
+  OpenRouter to a local Ollama without the client knowing. One endpoint, all
+  your keys.
+- **Picks the cheapest *capable* model.** Three gates run before price: the
+  model must have the capability the request needs (tools, context window,
+  modality, reasoning), a configured provider must serve it with a readable key,
+  and it must not be cooling down. Survivors rank cheapest-first, with a quality
+  floor for the step being routed, so cheapness can never buy a bad answer on a
+  hard step.
+- **Fails over on a refusal.** `429` records a cooldown for that model; `404`
+  means "this provider does not serve this model for this account" and is
+  remembered for 12 hours; `5xx` and transport failures cool the model down too.
+  The turn is retried immediately on the next candidate that passed the same
+  gates, preferring one at least as capable as the model that refused.
+- **Makes free and paid visible.** `tamias report` separates tokens on
+  $0-priced models from tokens on paid ones and prints the realised saving for
+  the requests the proxy actually rewrote. A free model is never coloured to
+  look paid, and an unquoted model is `UNKNOWN`, not free.
+- **Meters every request.** One row per request — model requested, model used,
+  tokens, cost — in local SQLite. A cost that cannot be computed is `UNKNOWN`,
+  never `$0.00`.
+- **Stays transparent.** Prompt and response text is never stored, and
+  credentials stay in your environment or secret manager. Tamias never writes a
+  key down.
 
 ## Install
 
@@ -27,14 +47,6 @@ Published on PyPI as `tamias`:
 
 ```sh
 pip install tamias
-```
-
-To confirm the command works in a fresh environment:
-
-```sh
-python -m venv /tmp/tamias-check
-/tmp/tamias-check/bin/pip install tamias     # Windows: /tmp\tamias-check\Scripts\pip
-/tmp/tamias-check/bin/tamias --version       # prints: tamias <version>
 ```
 
 Requires **Python 3.11 or newer**. There is no service or database to install —
@@ -46,60 +58,93 @@ Signing company policy manifests needs the optional `manifest` extra:
 pip install 'tamias[manifest]'
 ```
 
-## Use it with OpenCode
+## Five-minute setup with OpenCode
 
-OpenCode is the first-class client. It speaks `/v1/chat/completions`, the route
-tamias meters, routes, and rewrites, and Zen publishes a set of free models you
-can route mechanical work to.
-
-```sh
-pip install tamias
-tamias prices zen --out prices.toml     # free Zen models priced at exactly $0; paid models stay UNKNOWN
-tamias registry zen --out models.toml   # tools=true only where models.dev publishes tool_call
-tamias serve \
-  --provider opencode \
-  --prices prices.toml \
-  --db requests.db \
-  --registry models.toml \
-  --router-mode active \
-  --min-gap 0 \
-  --cheap-model deepseek-v4.1-flash-free
-```
-
-`--cheap-model` also takes a comma-separated pool
-(`--cheap-model deepseek-v4.1-flash-free,big-pickle`). Each session stays on one
-member and different sessions spread across the pool; `active` validates every
-member against the registry and price sheet at startup.
-
-Then point OpenCode at `http://127.0.0.1:8000/v1` (the exact `opencode.json`
-block is in [`docs/OPENCODE.md`](docs/OPENCODE.md#4-point-opencode-at-the-proxy)),
-install the slash command, and use OpenCode normally:
+OpenCode is the first-class client: it speaks `/v1/chat/completions`, the route
+tamias meters, routes and rewrites, and one command can point it at the proxy.
 
 ```sh
-tamias opencode install --db requests.db --prices prices.toml \
-  --registry models.toml --cheap-model deepseek-v4.1-flash-free
-# restart OpenCode, then type: /tamias
+# 1. What models cost. The OpenRouter catalogue covers most public ids.
+tamias prices fetch --out ~/.tamias/prices.toml
+
+# 2. Which key serves which provider. Credentials stay in the environment, or
+#    in a command that prints one (1Password, pass, a file your OS unlocks).
+cat > ~/.tamias/providers.toml <<'EOF'
+[[providers]]
+name = "nvidia"
+api_key_env = "NVIDIA_API_KEY"
+
+[[providers]]
+name = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+EOF
+
+# 3. What each model can do. One entry per model you route between; `provider`
+#    must name a provider in the catalogue above. This is the one file you may
+#    have to write by hand: it is where the quality floor and tool support live.
+cat > ~/.tamias/models.toml <<'EOF'
+[[models]]
+id = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+provider = "nvidia"
+context_window = 131072
+tools = true
+reasoning = true
+
+[[models]]
+id = "nvidia/nemotron-3.5-lightning-30b-a3b"
+provider = "nvidia"
+context_window = 131072
+tools = true
+reasoning = true
+
+[[models]]
+id = "deepseek/deepseek-v4.1-flash"
+provider = "openrouter"
+context_window = 1048576
+tools = true
+reasoning = true
+quality = 82
+EOF
+
+# 4. Price the direct models at what they cost *you*. The generated OpenRouter
+#    sheet does not cover a direct NVIDIA id, and active routing will not switch
+#    to an unpriced model. The overlay is where the operator's own rate lives.
+tamias prices set nvidia/nemotron-3-nano-omni-30b-a3b-reasoning --input 0 --output 0
+tamias prices set nvidia/nemotron-3.5-lightning-30b-a3b --input 0 --output 0
+
+# 5. Merge the tamias provider into OpenCode's config (backed up first) and
+#    print the matching serve command.
+tamias opencode setup \
+  --providers ~/.tamias/providers.toml \
+  --registry ~/.tamias/models.toml \
+  --prices ~/.tamias/prices.toml \
+  --cheap-model nvidia/nemotron-3-nano-omni-30b-a3b-reasoning,nvidia/nemotron-3.5-lightning-30b-a3b
 ```
 
-`/tamias` shows requests, tokens, cost (or why it is `UNKNOWN`), how many
-requests were routed, and the saving. The proxy runs in the background; the
-foreground is just OpenCode. On Linux, `tamias service install ... --start`
-writes and starts a systemd user unit, so the proxy comes back after login
-without a terminal; see
-[`docs/OPENCODE.md`](docs/OPENCODE.md#6-run-it-in-the-background).
+Run the printed `tamias serve ...` command in one terminal, restart OpenCode,
+pick a `tamias/...` model, and use it normally. In a session, `/tamias` (from
+`tamias opencode install`) prints the same receipt as `tamias report`. Free
+versus paid is shown per model, not inferred from the model name.
+
+The step-3 registry is what makes the quality floor real. A model with an
+explicit `quality` can outrank a cheap unrated one; an unrated model scores at
+most 70, because provider metadata says a model *can* take tools and reasoning
+but never how well it answers. `tamias registry zen` generates this file for
+Zen's free models; for any other provider it is a two-minute edit.
+
+**The overlay survives re-fetching.** Step 4 wrote `prices.local.toml` beside the
+generated sheet; `tamias prices fetch` never touches it, and it wins per model
+id. A rate you leave out stays `UNKNOWN` rather than becoming a guessed number —
+for a paid direct provider, set the real rate, not zero. The full rule is in
+[`docs/PRICING.md`](https://github.com/kr1shnac/tamias/blob/master/docs/PRICING.md#the-local-overlay).
 
 **What routing can and cannot save.** A switch only saves money when the
-requested model is paid and the target is free or cheaper. If you are already on
-a free model, there is nothing to save — tamias will honestly report `$0.00`
-saved and show you the token counts. The router moves mechanical turns (file
-reads, shell lookups) and leaves planning and error recovery on the model you
-chose.
-
-For the paid models you care about, add their per-million-token rates to
-`prices.toml` from Zen's pricing page; a rate you leave out stays `UNKNOWN`
-rather than becoming a guessed number. `tamias report` always prints exact token
-counts, so you have an accurate parameter even when the dollar figure is
-unknown.
+requested model is paid and the target is free or cheaper. If you already start
+on a free model, there is nothing to save — tamias reports `$0.00` saved and
+still shows you the token counts, and the free pool still spreads load and
+fails over. The router moves mechanical turns (file reads, shell lookups,
+search results) to the cheap pool and leaves planning and error recovery on the
+model you chose.
 
 ## Try it without credentials
 
@@ -193,13 +238,19 @@ cost).
 
 ## Status and limitations
 
-Tamias is **alpha** software. Treat every figure it prints with care:
+Tamias is at **1.0**: the command line, the config formats and the three routing
+gates are the stable surface. Treat every figure it prints with care:
 
-- **Savings are estimates, not measurements.** No measured savings exist; every
-  dollar figure is hypothetical. Any percentage you see is an illustration.
-- **Live behaviour is only partly verified.** Routing and pricing are tested
-  against fixtures; real provider and real Codex/Claude Code traffic are
-  unverified.
+- **Savings are estimates, not measurements.** The pence are computed from the
+  price sheet and the tokens that ran; the provider's invoice is the only
+  authority. `tamias report` prints both when both exist, and the realised
+  saving line covers only rows the proxy actually rewrote.
+- **Live routing is verified against two providers, not every provider.** On
+  2026-11-04, direct NVIDIA and OpenRouter were served side by side: a planning
+  turn stayed on the requested paid model, an easy tool turn switched to a free
+  NVIDIA model, and a model that answered `404` was learned, cooled down for
+  12 hours, and retried on the next candidate inside the same request. Claude
+  Code, Codex and the Anthropic route are fixture-tested, not live-tested.
 - **Not multi-user or hardened for remote use.** Single user, loopback by
   default; a wider bind is a deliberate two-key act.
 - **Prompt and response text is never stored**, and credentials are never logged.

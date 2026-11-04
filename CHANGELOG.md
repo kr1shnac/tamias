@@ -5,15 +5,45 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-11-04
 
-### Changed
-
-- Repository cleanup: removed internal design and demo material and repaired
-  references to files that left the public tree.
+The first public release: one OpenAI-compatible endpoint in front of every
+provider you have, choosing the cheapest model that can do the work, failing
+over when one refuses, and metering the result.
 
 ### Added
 
+- **Multi-provider routing.** `providers.toml` lists each provider's base URL
+  and where its key comes from (`api_key_env` or a command that prints it).
+  `models.toml` maps a model id to the provider that serves it, so the same
+  request can move between direct NVIDIA, OpenRouter, OpenAI, Ollama and any
+  other OpenAI-compatible endpoint. Credentials are read at start-up and never
+  written down.
+- **Three gates and cheapest-first ranking.** Capability (tools, context window,
+  modality, reasoning), supply (a configured provider serves it, the key was
+  read, the sheet can price it when required) and health (not cooling down) run
+  independently, each recording its own refusal. Survivors rank by blended price
+  (75% input / 25% output), then quality, then id, behind a per-step quality
+  floor. `GET /limits` returns the pool, the gates' counts and every refusal.
+- **Failover that learns.** `429` and `5xx` cool a model down for the window the
+  provider states; transport failures are remembered too; `404` is recorded as
+  `not offered for this account (404)` for 12 hours, with no escalating strike
+  ladder. Both the streaming and buffered paths retry on the next gated
+  candidate, preferring one at least as capable as the model that refused.
+- **`discover = "listed"`.** A provider whose `/v1/models` over-advertises can
+  be pinned to an explicit list; discovery then returns exactly the models the
+  operator named, in both directions.
+- **A price overlay that survives re-fetching.** `prices.local.toml` sits beside
+  the generated sheet and wins per model id, so `tamias prices fetch` cannot
+  erase a hand-written rate. `tamias prices set MODEL --input 0 --output 0`
+  writes one entry.
+- **`tamias opencode setup`.** Merges the `tamias` provider into OpenCode's
+  config, backs the file up first, registers the TUI plugin in `cli.json`, warns
+  when JSONC comments are dropped, and prints the matching `tamias serve`
+  command. `--dry-run` writes nothing; `install` still only prints the block.
+- **An OpenCode TUI panel.** `tamias-opencode-plugin` 0.3.0 adds a
+  `session.panel` dashboard beside the chat: requests, tokens, cost, the routed
+  model, and free-versus-paid tiers read from the price sheet.
 - **The benchmark oracle (F-35 / §18 Phase 3).** `docs/benchmark/tasks.md`
   specifies five benchmark tasks and the exact pass/fail predicate for each;
   `tests/benchmark/tasks_fixture.py` generates them deterministically;
@@ -32,8 +62,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arm C, a positive A-vs-B delta proves only that swapping models is cheaper —
   which one config line already achieves.
 
+### Changed
+
+- Repository cleanup: removed internal design and demo material and repaired
+  references to files that left the public tree.
+
 ### Fixed
 
+- **`404` no longer looks like a client error.** An upstream `404` means the
+  provider does not serve that model for this account; it is recorded and the
+  request fails over instead of being returned to the agent.
+- **`tamias report` no longer warns about its own overlay.** The stored sheet
+  identity is compared against the effective `base + overlay` sheet, not the
+  generated file alone.
+- **Prune tests no longer depend on the calendar.** They anchor to
+  `datetime.now(UTC)`, so a date rollover cannot fail the gate.
 - **The publish-state guard skipped `docs/audit/claims.md`
   (`tests/test_docs_integrity.py`).** The code-truth ledger is the file that
   *outranks* the SSOT, yet it was absent from the guard's file list, so it kept

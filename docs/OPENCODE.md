@@ -39,6 +39,34 @@ tamias forwards `Authorization` untouched, so the key reaches Zen unchanged.
 
 ## 2. Start tamias
 
+### Across every provider you have
+
+This is the v1 shape: one endpoint in front of every key, with the model id
+deciding which provider is called.
+
+```sh
+tamias serve \
+  --providers ~/.tamias/providers.toml \
+  --prices    ~/.tamias/prices.toml \
+  --db        ~/.tamias/requests.db \
+  --registry  ~/.tamias/models.toml \
+  --router-mode active \
+  --min-gap  0 \
+  --port     8000 \
+  --cheap-model model-a,model-b
+```
+
+`--providers` is the catalogue from [PROVIDERS.md](PROVIDERS.md). Each entry
+names a base URL and where its key comes from; tamias discovers each provider's
+`/v1/models`, maps every id to the provider that serves it, and presents that
+provider's credential on the way out. A `404` from one provider is recorded as
+"not offered for this account" and the request retries on the next gated model
+inside the same turn.
+
+### Zen alone
+
+If Zen is your only provider, the preset is shorter:
+
 ```sh
 tamias serve \
   --provider opencode \
@@ -56,19 +84,21 @@ appends `/v1/chat/completions`, so the upstream URL it calls is
 `https://opencode.ai/zen/v1/chat/completions`. Do **not** include `/v1` in
 `--upstream`.
 
+### The flags that matter either way
+
 - `--router-mode` defaults to `shadow`. `active` applies the switch; `off`
   disables the router entirely. Start with `shadow` for a session if you want
   to see what it *would* do before letting it rewrite.
 - `--cheap-model` is the model a SWITCH moves mechanical work to, or a
-  comma-separated pool of free models. A free Zen model (`-free` suffix, or
-  `big-pickle`) is the cheapest honest target. With a pool, each session stays
-  on one member while different sessions spread across it; the pool is not a
-  `429` failover. Without any target, shadow decisions have no target and no
+  comma-separated pool. With a pool, each session stays on one member while
+  different sessions spread across it; ordering is cheapest first, behind the
+  three gates. Without any target, shadow decisions have no target and no
   measurable saving.
 - `--registry` is required by `active`: the target must be listed there with
   `tools = true`, because a model that cannot carry a tool call would break the
   turn. `tamias registry zen --out models.toml` builds one from the live Zen
-  list plus models.dev's published `tool_call` capability.
+  list plus models.dev's published `tool_call` capability; for other providers
+  write the entries yourself, with `provider` naming the catalogue entry.
 - `--min-gap` (default 3) is how many requests must pass after the last switch
   before switching again. **For savings, use `0`.** A fresh OpenCode session
   starts at zero requests, so the default 3 holds back the first three easy
@@ -84,8 +114,8 @@ one member, spreading different sessions across the rest:
 
 Add a model only after you have seen it complete a tool-calling turn yourself:
 the registry proves models.dev publishes `tool_call = true`, not that the free
-endpoint is available right now. There is no retry-on-`429` yet, so a failed
-member fails that request.
+endpoint is available right now. If a member refuses with `429`, `404`, `5xx` or
+a transport failure, the request is retried on the next gated model.
 
 Check it is up:
 
@@ -131,6 +161,32 @@ for most models and does not report cache writes in `usage`, so a nonzero
 
 ## 4. Point OpenCode at the proxy
 
+### One command
+
+`tamias opencode setup` writes the provider block for you: it merges
+`provider.tamias` into the existing config, keeps every other key, copies the
+original to a timestamped backup, and registers the TUI panel when it can find
+it.
+
+```sh
+tamias opencode setup \
+  --providers ~/.tamias/providers.toml \
+  --registry ~/.tamias/models.toml \
+  --prices ~/.tamias/prices.toml \
+  --cheap-model model-a,model-b
+```
+
+It prints the matching `tamias serve` command, names `--providers` when a
+catalogue exists, and warns when JSONC comments had to be dropped. `--dry-run`
+shows both documents without writing.
+
+The `apiKey` it writes is the literal `tamias-local`: a placeholder, not a
+secret. OpenCode hides a custom provider that carries no credential, while
+tamias replaces whatever the client sends with the provider's own key. A real
+key here would be one more copy to rotate.
+
+### Manually
+
 Add a custom OpenAI-compatible provider to `opencode.json`. Either:
 
 - **global** — `~/.config/opencode/opencode.json`, for every project, or
@@ -142,22 +198,22 @@ Add a custom OpenAI-compatible provider to `opencode.json`. Either:
   "provider": {
     "tamias": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "tamias (local shadow proxy)",
+      "name": "tamias",
       "options": {
         "baseURL": "http://localhost:8000/v1",
-        "apiKey": "{env:OPENCODE_API_KEY}"
+        "apiKey": "tamias-local"
       },
       "models": {
-        "deepseek-v4-pro": {
-          "name": "DeepSeek V4 Pro (via tamias)"
+        "model-a": {
+          "name": "model-a (via tamias)"
         },
-        "deepseek-v4-flash": {
-          "name": "DeepSeek V4 Flash (via tamias)"
+        "model-b": {
+          "name": "model-b (via tamias)"
         }
       }
     }
   },
-  "model": "tamias/deepseek-v4-pro"
+  "model": "tamias/model-a"
 }
 ```
 
@@ -169,13 +225,14 @@ Notes on each key, all from the docs cited above:
   see the Zen caveat below.)
 - `options.baseURL` is the endpoint. The AI SDK appends `/chat/completions`, so
   `http://localhost:8000/v1` produces exactly the path tamias answers on.
-- `options.apiKey` uses `{env:VAR}` substitution. If the variable is unset it
-  becomes an empty string. You can omit `apiKey` and let `/connect` hold the
-  credential instead.
+- `options.apiKey` is a placeholder. Tamias forwards the credential its provider
+  catalogue names, not this value. If you start `tamias serve` with
+  `--auth-token`, put that token here (or in `{env:VAR}`) so OpenCode can
+  authenticate to the proxy.
 - `models` maps the model id OpenCode will send in the request body to a display
   name. These ids are what tamias sees as `model_requested`, so they must match
-  your price sheet keys exactly.
-- `model` is `"<provider-id>/<model-id>"`, here `tamias/deepseek-v4-pro`.
+  your registry and price sheet keys exactly.
+- `model` is `"<provider-id>/<model-id>"`, here `tamias/model-a`.
 
 ### Using `/connect` instead of an inline key
 
@@ -231,6 +288,21 @@ The command runs `tamias report` and hands the real output to the model, so you
 see requests, tokens, cost (or why it is `UNKNOWN`), how many requests were
 routed, and the saving estimate. The model is told never to invent a dollar
 figure when the report says `UNKNOWN`.
+
+For the live panel beside the chat, register `tamias-opencode-plugin` in the TUI
+settings (`~/.config/opencode/cli.json`):
+
+```json
+{
+  "plugins": ["/absolute/path/to/tamias-opencode-plugin"]
+}
+```
+
+`tamias opencode setup` adds that entry when it can find the plugin — from
+`--plugin DIR`, `$TAMIAS_PLUGIN_DIR`, or the source checkout that contains the
+Python package. The plugin is not on npm, so a `pip install tamias` alone does
+not carry it; a source checkout does. The panel is TUI-only: `/tamias` works
+without it.
 
 ## 6. Run it in the background
 

@@ -41,7 +41,9 @@ costs you, rather than drawing an empty chart.
 
 ## Install
 
-Add the directory to the TUI plugin list in `~/.config/opencode/cli.json`:
+`tamias opencode setup` registers this directory in `~/.config/opencode/cli.json`
+when it can find it: pass `--plugin /absolute/path/to/tamias-opencode-plugin`,
+set `$TAMIAS_PLUGIN_DIR`, or run setup from a source checkout. To do it by hand:
 
 ```json
 {
@@ -52,6 +54,10 @@ Add the directory to the TUI plugin list in `~/.config/opencode/cli.json`:
 Restart OpenCode, open a session, then run `/tamias`. The plugin is TUI-only:
 the package has no `exports` field, so the host probes root file names, finds
 `tui.tsx`, and loads no `server`/`index` part.
+
+The plugin is not published to npm. A `pip install tamias` does not carry it;
+the source checkout does, and `bun install` in this directory is only needed for
+type-checking and the verify harness, not for OpenCode to load the panel.
 
 ## Keys
 
