@@ -14,8 +14,8 @@ Every command runs as `tamias <command>`. `tamias --help` lists them:
 | `reconcile` | Reconcile logged rows against the provider's billed cost per request. |
 | `report` | Summarise cost and shadow routing from a log. |
 | `agent-config` | Print an agent configuration snippet. |
-| `opencode install` | Write the `/tamias` slash command OpenCode loads at startup. |
-| `opencode setup` | Merge the `tamias` provider into OpenCode's config (backup first) and register the TUI panel. |
+| `opencode install` | Write the report slash command OpenCode loads at startup (`/tamias`, or `/tamias-report` when the pop-up owns the name). |
+| `opencode setup` | Merge the `tamias` provider into OpenCode's config (backup first) and register the TUI pop-up. |
 | `service install` | Write a systemd user unit that runs `tamias serve` in the background (Linux). |
 | `service uninstall` | Stop and remove the unit tamias wrote. |
 | `doctor` | Check local tamias readiness. |
@@ -194,21 +194,29 @@ rate stays `UNKNOWN` — never free by assumption.
 tamias opencode install --db PATH --prices PATH [--port PORT]
                         [--project DIR] [--registry PATH] [--providers PATH]
                         [--cheap-model MODEL[,MODEL...]] [--model ID ...]
-                        [--inr-rate RUPEES_PER_USD] [--force]
+                        [--plugin DIR] [--inr-rate RUPEES_PER_USD] [--force]
 ```
 
-Writes the `/tamias` slash command into the directory OpenCode loads at startup:
+Writes a report slash command into the directory OpenCode loads at startup:
 
-- global (default): `$XDG_CONFIG_HOME/opencode/commands/tamias.md`, falling back
-  to `~/.config/opencode/commands/tamias.md`
-- project: `<project>/.opencode/commands/tamias.md` when `--project` is given
+- without the pop-up: `/tamias`, at
+  `$XDG_CONFIG_HOME/opencode/commands/tamias.md` (falling back to
+  `~/.config/opencode/commands/tamias.md`) or
+  `<project>/.opencode/commands/tamias.md` with `--project`;
+- with the pop-up installed: `/tamias-report`, in the same directory, because
+  the TUI plugin already registers `/tamias` and two registrations of one slash
+  command are not a contract.
+
+The plugin is found from `--plugin DIR`, `$TAMIAS_PLUGIN_DIR`, or the source
+checkout beside the package. When a legacy `tamias.md` exists, `opencode setup`
+warns that it may shadow the pop-up.
 
 The command file injects `tamias report` output with OpenCode's shell syntax, so
-typing `/tamias` shows real logged numbers. The installer **never edits
+typing the command shows real logged numbers. The installer **never edits
 `opencode.json`**; it prints the provider block for you to merge, because
 rewriting a working config is not a safe default.
 
-`--inr-rate` embeds `report --inr-rate` into the slash command, so `/tamias`
+`--inr-rate` embeds `report --inr-rate` into the slash command, so the report
 shows each dollar amount with a rupee conversion. The rate is a display
 conversion you supply, not a billed amount; leave it off rather than guess.
 
@@ -229,7 +237,8 @@ config (`~/.config/opencode/opencode.jsonc` when present, else `opencode.json`),
 keeping every other key, and copies the original to
 `<name>.bak-YYYYMMDDTHHMMSSZ` first. When the TUI plugin can be found — a
 `--plugin` path, `$TAMIAS_PLUGIN_DIR`, or the source checkout beside the package
-— it is appended to `plugins` in `cli.json`, once.
+— it is appended to `plugins` in `cli.json`, once, and `/tamias` opens the
+pop-up while `/tamias-report` runs the report.
 
 OpenCode's config is JSONC; rewriting it needs plain JSON, so `//` and `/* */`
 comments and trailing commas are dropped. When any comment was present the
@@ -247,17 +256,21 @@ could not be read or written.
 
 ```text
 tamias service install --db PATH --prices PATH [--registry PATH]
+                       [--providers PATH | --provider NAME]
                        [--cheap-model MODEL[,MODEL...]] [--port PORT]
-                       [--min-gap N] [--provider NAME]
-                       [--router-mode {shadow,off,active}]
+                       [--min-gap N] [--router-mode {shadow,off,active}]
                        [--exec PATH] [--start] [--dry-run] [--force]
 ```
 
 Writes `$XDG_CONFIG_HOME/systemd/user/tamias.service` (falling back to
-`~/.config/systemd/user/tamias.service`). `--db`, `--prices`, and `--registry`
-are resolved to absolute paths; the input files must already exist. The unit is
-written but not started unless `--start` is passed, which then runs
-`systemctl --user daemon-reload` and `enable --now tamias.service`.
+`~/.config/systemd/user/tamias.service`). `--db`, `--prices`, `--registry` and
+`--providers` are resolved to absolute paths; the input files must already
+exist. The unit is written but not started unless `--start` is passed, which
+then runs `systemctl --user daemon-reload` and `enable --now tamias.service`.
+
+`--providers` wins over `--provider`, so the unit can route across every
+catalogue entry rather than a single upstream preset. The fallback remains
+`--provider opencode` for an older single-provider setup.
 
 In `active` mode (the default) a target and a registry are required, mirroring
 `tamias serve`'s fail-closed check. `--dry-run` prints the unit without writing

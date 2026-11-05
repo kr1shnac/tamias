@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tamias import cli
 from tamias.cli import main
 
 PRICES = """
@@ -143,6 +144,86 @@ def test_setup_does_not_add_the_same_plugin_twice(
     assert main(setup_args(config, write_prices(tmp_path), "--plugin", str(plugin))) == 0
 
     assert json.loads(cli_path.read_text())["plugins"] == [str(plugin)]
+
+
+def test_install_keeps_tamias_for_the_plugin_and_names_the_report_separately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin = tmp_path / "tamias-opencode-plugin"
+    plugin.mkdir()
+    (plugin / "tui.tsx").write_text("export default {}\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    assert (
+        main(
+            [
+                "opencode",
+                "install",
+                "--db",
+                str(tmp_path / "requests.db"),
+                "--prices",
+                str(write_prices(tmp_path)),
+                "--plugin",
+                str(plugin),
+            ]
+        )
+        == 0
+    )
+
+    commands = tmp_path / "config" / "opencode" / "commands"
+    assert (commands / "tamias-report.md").is_file()
+    assert not (commands / "tamias.md").exists()
+
+
+def test_install_without_the_plugin_keeps_the_tamias_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(cli, "_plugin_directory", lambda explicit: None)
+
+    assert (
+        main(
+            [
+                "opencode",
+                "install",
+                "--db",
+                str(tmp_path / "requests.db"),
+                "--prices",
+                str(write_prices(tmp_path)),
+            ]
+        )
+        == 0
+    )
+
+    commands = tmp_path / "config" / "opencode" / "commands"
+    assert (commands / "tamias.md").is_file()
+    assert not (commands / "tamias-report.md").exists()
+
+
+def test_setup_warns_when_a_legacy_command_shadows_the_plugin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plugin = tmp_path / "tamias-opencode-plugin"
+    plugin.mkdir()
+    (plugin / "tui.tsx").write_text("export default {}\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    legacy = tmp_path / "config" / "opencode" / "commands" / "tamias.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("old command\n", encoding="utf-8")
+
+    assert (
+        main(
+            setup_args(
+                tmp_path / "opencode.json",
+                write_prices(tmp_path),
+                "--plugin",
+                str(plugin),
+            )
+        )
+        == 0
+    )
+
+    assert "also registers /tamias" in capsys.readouterr().err
 
 
 def test_setup_refuses_when_there_is_no_model_to_offer(

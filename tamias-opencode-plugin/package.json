@@ -1,9 +1,9 @@
 {
   "name": "tamias-opencode-plugin",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
-  "description": "OpenCode TUI plugin: live tamias routing panel beside the chat",
+  "description": "OpenCode TUI plugin: a compact live tamias routing and cost pop-up",
   "scripts": {
     "typecheck": "tsc --noEmit"
   },

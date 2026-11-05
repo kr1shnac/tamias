@@ -5,13 +5,13 @@
  * editor:
  *   1. resolve entrypoints the way `Host.resolve` does (server/tui/rpc)
  *   2. import the tui entrypoint exactly as the TUI runtime would
- *   3. run `setup` against a stub context and capture the panel slot + keymaps
- *   4. render the `session.panel` contribution with OpenTUI's test renderer,
- *      against a temporary SQLite fixture and a stub `/limits` server
+ *   3. run `setup` against a stub context and capture the `/tamias` command
+ *   4. open the dialog the command shows, and render it with OpenTUI's test
+ *      renderer against a temporary SQLite fixture and a stub `/limits` server
  *
- * The checks cover the things that broke before: theme-derived colours, tier
- * and provider columns, latest/all scoping, panel keys, narrow reflow, and the
- * log-only degradation when tamias is not running.
+ * The checks defend the pop-up contract: no session is required, no panel slot
+ * is claimed, the dialog is centred and large, Escape closes it, and the body
+ * stays a compact answer rather than the full dashboard.
  *
  * Run with: bun scripts/verify.ts
  */
@@ -27,7 +27,6 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { createSignal } from "solid-js";
 
 const PLUGIN_DIR = path.resolve(import.meta.dir, "..");
 const PLUGIN_NAME = "tamias-opencode-plugin";
@@ -111,8 +110,6 @@ if (!tuiSpecifier) {
 const TEMP = mkdtempSync(path.join("/tmp/opencode", "tamias-verify-"));
 const DB_PATH = path.join(TEMP, "requests.db");
 const PRICES_PATH = path.join(TEMP, "prices.toml");
-const NEW = "auto-aaaaaaaaaaaa";
-const OLD = "auto-bbbbbbbbbbbb";
 
 writeFileSync(
   PRICES_PATH,
@@ -184,10 +181,11 @@ function makeLog() {
   `);
 
   const rows = [
-    // The newest session: one real switch (paid prompt, free answer).
+    // A real switch: a paid prompt answered by a free model.  The baseline is
+    // warm, so the saving is priced against a cache read, not a fresh prompt.
     {
       ts: "2026-11-03T10:03:00+00:00",
-      sid: NEW,
+      sid: "auto-aaaaaaaaaaaa",
       req: "acme/paid-two",
       used: "acme/free-one",
       input: 1_000_000,
@@ -205,7 +203,7 @@ function makeLog() {
     },
     {
       ts: "2026-11-03T10:02:00+00:00",
-      sid: NEW,
+      sid: "auto-aaaaaaaaaaaa",
       req: "acme/paid-two",
       used: "acme/paid-two",
       input: 1000,
@@ -223,7 +221,7 @@ function makeLog() {
     },
     {
       ts: "2026-11-03T10:01:00+00:00",
-      sid: NEW,
+      sid: "auto-aaaaaaaaaaaa",
       req: "acme/free-one",
       used: "acme/free-one",
       input: 2000,
@@ -239,10 +237,11 @@ function makeLog() {
       source: "computed",
       route: "chat",
     },
-    // An older session with a model that must not appear in the latest scope.
+    // An older session.  The pop-up summarises it but has no table, so its
+    // model must not leak into the latest-route line.
     {
       ts: "2026-11-03T09:02:00+00:00",
-      sid: OLD,
+      sid: "auto-bbbbbbbbbbbb",
       req: "acme/old-three",
       used: "acme/old-three",
       input: 3000,
@@ -260,7 +259,7 @@ function makeLog() {
     },
     {
       ts: "2026-11-03T09:01:00+00:00",
-      sid: OLD,
+      sid: "auto-bbbbbbbbbbbb",
       req: "acme/paid-two",
       used: "acme/old-three",
       input: 5000,
@@ -278,7 +277,7 @@ function makeLog() {
     },
     {
       ts: "2026-11-03T09:00:00+00:00",
-      sid: OLD,
+      sid: "auto-bbbbbbbbbbbb",
       req: "acme/paid-two",
       used: "acme/paid-two",
       input: 100,
@@ -294,7 +293,7 @@ function makeLog() {
       source: "unknown",
       route: "chat",
     },
-    // Passthrough rows are count-only and must be filtered out of the table.
+    // Passthrough rows are count-only and must stay out of the summary.
     {
       ts: "2026-11-03T08:59:00+00:00",
       sid: "auto-cccccccccccc",
@@ -315,7 +314,9 @@ function makeLog() {
     },
   ];
 
-  for (const row of rows) {
+  // Insert oldest first so the autoincrement id follows time.  The reader
+  // orders by id, exactly as it does against a live append-only log.
+  for (const row of [...rows].reverse()) {
     insert.run(
       row.ts,
       row.sid,
@@ -453,10 +454,18 @@ interface CapturedLayer {
   enabled?: boolean | (() => boolean);
   commands?: Array<Record<string, unknown>>;
 }
+interface CapturedDialog {
+  render: () => unknown;
+  onClose?: () => void;
+}
 
 const slots: CapturedSlot[] = [];
 const layers: CapturedLayer[] = [];
+const dialogs: CapturedDialog[] = [];
 const toasts: Array<{ title?: string; message?: string; variant?: string }> = [];
+let dialogOptions: unknown;
+let shows = 0;
+let clears = 0;
 
 let liveRenderer:
   | {
@@ -482,19 +491,7 @@ const hostRenderer = {
   },
 };
 
-let panel: { name: string; sessionID: string } | undefined;
-let allowOpen = true;
 const hintStore = { shown: false };
-
-const shortcutMap: Record<string, string> = {
-  "tamias.panel.close": "esc",
-  "tamias.panel.fullscreen": "f",
-  "tamias.panel.scope": "a",
-  "tamias.panel.refresh": "r",
-  "tamias.panel.previous": "k",
-  "tamias.panel.next": "j",
-  "tamias.panel.select": "enter",
-};
 
 const theme = {
   background: {
@@ -537,7 +534,7 @@ const context = {
       return () => {};
     },
     dispatch: () => {},
-    shortcuts: (id: string) => (shortcutMap[id] ? [shortcutMap[id]] : []),
+    shortcuts: () => [],
     commands: () => [],
     pending: () => [],
     active: () => [],
@@ -548,7 +545,27 @@ const context = {
     memory: () => [hintStore, (mutation: (draft: { shown: boolean }) => void) => mutation(hintStore)],
   },
   ui: {
-    dialog: { show: () => {}, set: () => {}, clear: () => {}, alert: async () => {}, confirm: async () => undefined, prompt: async () => undefined, select: async () => undefined },
+    dialog: {
+      show: (render: () => unknown, onClose?: () => void) => {
+        shows += 1;
+        dialogs.push({ render, onClose });
+      },
+      set: (options: unknown) => {
+        dialogOptions = options;
+      },
+      clear: () => {
+        // The host owns the dialog: clearing it fires the close callback.  The
+        // plugin relies on that to reset its "already open" flag, so the stub
+        // must model it rather than only forgetting the render function.
+        clears += 1;
+        const last = dialogs.pop();
+        last?.onClose?.();
+      },
+      alert: async () => {},
+      confirm: async () => undefined,
+      prompt: async () => undefined,
+      select: async () => undefined,
+    },
     toast: { show: (options: { title?: string; message?: string; variant?: string }) => toasts.push(options) },
     format: { path: (value: string) => value },
     router: {
@@ -557,15 +574,9 @@ const context = {
       current: () => ({ type: "session", sessionID: "ses_verify" }),
     },
     panel: {
-      open: (name: string) => {
-        if (!allowOpen) return false;
-        panel = { name, sessionID: "ses_verify" };
-        return true;
-      },
-      close: () => {
-        panel = undefined;
-      },
-      current: () => panel,
+      open: () => false,
+      close: () => {},
+      current: () => undefined,
     },
     tabs: { enabled: () => false, list: () => [], open: () => false, focus: () => false, move: () => false, close: () => false },
     model: { current: () => undefined, variant: { list: () => [], set: () => false } },
@@ -578,7 +589,7 @@ const context = {
 
 const cleanup = await definition.setup(context as never);
 
-step("setup claims the session.panel slot", slots.length === 1 && slots[0]?.append === "session.panel", `${slots.length} slot(s)`);
+step("setup claims no panel slot", slots.length === 0, `${slots.length} slot(s)`);
 step("setup registers a global keymap layer", layers.length === 1 && layers[0]?.mode === "global", `${layers.length} layer(s)`);
 
 const globalCommands = layers[0]?.commands ?? [];
@@ -589,36 +600,31 @@ step(
     openCommand?.palette === true,
   JSON.stringify(openCommand?.slash ?? null),
 );
+step(
+  "the command does not require a session",
+  openCommand !== undefined && typeof openCommand.run === "function",
+);
 
 const run = (command: Record<string, unknown> | undefined) =>
   (command?.run as (() => void | false | Promise<void>) | undefined)?.();
 
-step(
-  "the panel slot renders nothing for another panel name",
-  slots[0]?.render({ name: "diff", sessionID: "ses_verify", width: 80, presentation: "panel", focused: true }) === null,
-);
-
-// Outside a session the host refuses to open a panel; the command must say so.
-allowOpen = false;
 await run(openCommand);
+const firstDialog = dialogs[0];
+step("the slash command opens a dialog", shows === 1 && Boolean(firstDialog), `${shows} show(s)`);
 step(
-  "opening outside a session shows a hint instead of failing silently",
-  toasts.at(-1)?.message?.includes("Open a session first") === true,
-  toasts.at(-1)?.message ?? "none",
+  "the dialog is centred and large",
+  JSON.stringify(dialogOptions) === JSON.stringify({ size: "large", centered: true }),
+  JSON.stringify(dialogOptions ?? null),
 );
-
-allowOpen = true;
-await run(openCommand);
-step("the slash command opens the tamias panel", panel?.name === "tamias", JSON.stringify(panel ?? null));
 step(
-  "the first open explains Escape and full screen",
+  "the first open explains Escape",
   toasts.at(-1)?.message?.includes("esc closes") === true,
   toasts.at(-1)?.message ?? "none",
 );
 const hintCount = toasts.filter((toast) => toast.message?.includes("esc closes")).length;
 
 await run(openCommand);
-step("running /tamias again closes the open panel", panel === undefined, JSON.stringify(panel ?? null));
+step("running /tamias again clears the open dialog", clears === 1 && shows === 1);
 
 await run(openCommand);
 step(
@@ -627,169 +633,84 @@ step(
   `${hintCount} hint(s)`,
 );
 
-// --- 5. render the panel against the fixtures -------------------------------
+const secondDialog = dialogs[0];
+secondDialog?.onClose?.();
+step("the host's close callback resets the open flag", Boolean(secondDialog));
+
+await run(openCommand);
+step("Escape then /tamias opens it again", shows === 3, `${shows} show(s)`);
+
+if (!firstDialog) {
+  console.error("\nNo dialog was captured — nothing to render.");
+  process.exit(1);
+}
+
+// --- 5. render the pop-up against the fixtures -------------------------------
 
 const { createTestRenderer } = await import("@opentui/core/testing");
 const { render } = await import("@opentui/solid");
 
-function makeInput(initialWidth: number) {
-  const [width, setWidth] = createSignal(initialWidth);
-  const [presentation, setPresentation] = createSignal<"panel" | "fullscreen">("panel");
-  const [focused, setFocused] = createSignal(false);
-  const [closed, setClosed] = createSignal(0);
-  const [toggles, setToggles] = createSignal(0);
-
-  const input = {
-    name: "tamias",
-    sessionID: "ses_verify",
-    get width() {
-      return width();
-    },
-    get presentation() {
-      return presentation();
-    },
-    get focused() {
-      return focused();
-    },
-    focus: () => setFocused(true),
-    close: () => setClosed((value) => value + 1),
-    toggleFullscreen: () => {
-      setToggles((value) => value + 1);
-      setPresentation((value) => (value === "fullscreen" ? "panel" : "fullscreen"));
-    },
-  };
-
-  return { input, setWidth, setFocused, presentation, focused, closed, toggles };
+function nonEmpty(frame: string): string[] {
+  return frame.split("\n").filter((line) => line.trim().length > 0);
 }
 
-const slot = slots[0]!;
 let mounted: Awaited<ReturnType<typeof createTestRenderer>> | undefined;
-let smallFrame = "";
 try {
   mounted = await createTestRenderer({ width: 120, height: 44 });
   liveRenderer = mounted.renderer as never;
-  const handle = makeInput(120);
 
-  await render(() => slot.render(handle.input) as never, mounted!.renderer);
+  await render(() => firstDialog.render() as never, mounted!.renderer);
   await sleep(400);
   await mounted.flush();
   let frame = mounted.captureCharFrame();
+  const lines = nonEmpty(frame);
 
-  step("the panel renders", frame.includes("tamias"), `${frame.split("\n").length} lines`);
-  step("the panel focused itself on open", handle.focused() === true);
-  step("the panel shows the newest session by default", frame.includes("latest ·"), frame.split("\n")[0] ?? "");
-  step("the panel shows the request log table", frame.includes("free-one") && frame.includes("paid-two"));
-  step("the latest scope excludes an older session's model", !frame.includes("old-three"));
-  step("the panel shows configured and unconfigured providers", frame.includes("openrout") && frame.includes("nvidia"));
-  step("the panel marks paid models with a glyph", frame.includes("$"));
-  step("the panel shows savings from the stored baseline", frame.includes("+$2.10"), "+$2.10");
+  step("the pop-up renders", frame.includes("tamias"), `${lines.length} non-empty lines`);
   step(
-    "a saving measured against a price-sheet baseline is marked as an estimate",
-    frame.includes("~+$2.10"),
+    "the pop-up is compact, not the full dashboard",
+    lines.length <= 12 && !frame.includes("sessions") && !frame.includes("all sessions"),
+    `${lines.length} lines`,
   );
-  step("the panel shows cooling state with a readable duration", frame.includes("back in 45s"));
-  step("the panel shows the eligible pool and refused gates", frame.includes("3/5 capable") && frame.includes("2 health"));
-  step("the panel shows the session sidebar at 120 columns", frame.includes("sessions") && frame.includes("all sessions"));
-  step("the footer makes Escape discoverable", frame.includes("esc close") && frame.includes("f fullscreen"));
+  step("the header reports the live proxy", frame.includes("● live"));
+  step("the latest route names both requested and used models", frame.includes("latest") && frame.includes("paid-two") && frame.includes("free-one"));
+  step("the latest route says what the router decided", frame.includes("SWITCH") && frame.includes("cheaper capable model"));
+  step("the latest route marks a free model", frame.includes("● free"));
+  step("the savings bar prices the switch as an estimate", frame.includes("$2.10") && frame.includes("baseline") && frame.includes("(est.)"));
+  step("the KPI line counts requests and switches", frame.includes("6 req") && frame.includes("switched"));
+  step("the pool line shows capable models and refused gates", frame.includes("3/5 capable") && frame.includes("2 health"));
+  step("the pool line names a provider without a key", frame.includes("no key: nvidia"));
+  step("the cooling line names the model and the wait", frame.includes("cooling") && frame.includes("back in 45s") && frame.includes("429"));
+  step("the footer makes Escape and the two refresh clocks discoverable", frame.includes("esc close") && frame.includes("log 2s") && frame.includes("live 5s"));
+  step("the pop-up does not leak the older session's model", !frame.includes("old-three"));
 
-  // Panel-local keymap: every documented key must be a real command.
-  const panelLayer = layers.find((layer) =>
-    layer.commands?.some((command) => command.id === "tamias.panel.close"),
-  );
-  const findKey = (id: string) => panelLayer?.commands?.find((command) => command.id === id);
-  step("the panel registers its own keymap layer", Boolean(panelLayer), `layer ${layers.length - 1}`);
-  step(
-    "the panel keys are active only while the panel has focus",
-    typeof panelLayer?.enabled === "function" && panelLayer.enabled() === true,
-    String(typeof panelLayer?.enabled),
-  );
-  handle.setFocused(false);
-  await sleep(20);
-  step(
-    "losing focus disables the panel keys",
-    typeof panelLayer?.enabled === "function" && panelLayer.enabled() === false,
-  );
-  handle.input.focus();
-  await sleep(20);
-  step(
-    "focusing the panel restores its keys",
-    typeof panelLayer?.enabled === "function" && panelLayer.enabled() === true,
-  );
-  step("Escape closes the panel", findKey("tamias.panel.close")?.bind === "escape", String(findKey("tamias.panel.close")?.bind ?? "none"));
-  step("f toggles full screen", findKey("tamias.panel.fullscreen")?.bind === "f", String(findKey("tamias.panel.fullscreen")?.bind ?? "none"));
-  step("a toggles all/latest scope", findKey("tamias.panel.scope")?.bind === "a");
-  step("r refreshes both sources", findKey("tamias.panel.refresh")?.bind === "r");
-  step("j/k move the session cursor", findKey("tamias.panel.next")?.bind === "j,down" && findKey("tamias.panel.previous")?.bind === "k,up");
-  step("enter selects the session under the cursor", findKey("tamias.panel.select")?.bind === "return");
-
-  await run(findKey("tamias.panel.fullscreen"));
-  await sleep(30);
-  await mounted.flush();
-  frame = mounted.captureCharFrame();
-  step("full screen changes the footer back to split", frame.includes("f split") && handle.toggles() === 1);
-
-  await run(findKey("tamias.panel.scope"));
-  await sleep(60);
-  await mounted.flush();
-  frame = mounted.captureCharFrame();
-  step("a shows every recent session", frame.includes("old-three") && frame.includes("all sessions"));
-
-  await run(findKey("tamias.panel.next"));
-  await run(findKey("tamias.panel.select"));
-  await sleep(60);
-  await mounted.flush();
-  frame = mounted.captureCharFrame();
-  step("j + enter pins the selected session", !frame.includes("old-three"));
-
-  await run(findKey("tamias.panel.refresh"));
-  await sleep(150);
-  await mounted.flush();
-
-  await run(findKey("tamias.panel.close"));
-  step("the close command calls the host close", handle.closed() === 1);
-
-  // Reflow: the host emits resize and republishes PanelInput.width; the panel
-  // must drop the sidebar and fit instead of keeping its mount-time width.
-  handle.setWidth(80);
+  // Reflow: the host emits resize and the pop-up must fit, not clip the shell.
   mounted.resize(80, 30);
-  await sleep(300);
+  await sleep(250);
   await mounted.flush();
-  smallFrame = mounted.captureCharFrame();
-  const lines = smallFrame.split("\n");
+  const smallFrame = mounted.captureCharFrame();
+  const smallLines = nonEmpty(smallFrame);
   step(
-    "the panel reflows at 80 columns",
-    lines.every((line) => line.length <= 80) && smallFrame.includes("tamias"),
-    `widest ${Math.max(...lines.map((line) => line.length))}`,
+    "the pop-up reflows at 80 columns",
+    smallLines.every((line) => line.length <= 80) && smallFrame.includes("tamias"),
+    `widest ${Math.max(...smallLines.map((line) => line.length))}`,
   );
-  step("the sidebar is dropped before the table at 80 columns", !smallFrame.includes("sessions"));
-  step("the table keeps the used model at 80 columns", smallFrame.includes("free-one"));
+  step("the compact answer survives the narrow layout", smallFrame.includes("latest") && smallFrame.includes("3/5 capable"));
 
   if (process.env.TAMIAS_VERIFY_DUMP) {
-    console.log("\n--- panel at 120x44 ---");
+    console.log("\n--- popup at 120x44 ---");
     console.log(frame);
-    console.log("--- panel at 80x30 ---");
+    console.log("--- popup at 80x30 ---");
     console.log(smallFrame);
     console.log("--- end ---\n");
   }
 } catch (error) {
-  step("the panel renders through OpenTUI", false, error instanceof Error ? error.message : String(error));
+  step("the pop-up renders through OpenTUI", false, error instanceof Error ? error.message : String(error));
 }
 
-// --- 6. unit checks that do not need a live host ----------------------------
+step("the plugin authenticated to /limits", authorized > 0, `${authorized} authorized call(s)`);
+step("the plugin polled /limits", limitsCalls > 0, `${limitsCalls} call(s)`);
 
-const { columnsFor } = await import("../src/components/RequestTable");
-const wideKeys = columnsFor(110).map((column) => column.key);
-const narrowKeys = columnsFor(40).map((column) => column.key);
-step(
-  "the table keeps tier, provider, cost and savings when there is room",
-  ["tier", "model", "provider", "cost", "saved"].every((key) => wideKeys.includes(key)),
-  wideKeys.join(","),
-);
-step(
-  "the table drops provider before the model and status",
-  !narrowKeys.includes("provider") && narrowKeys.includes("model") && narrowKeys.includes("status"),
-  narrowKeys.join(","),
-);
+// --- 6. unit checks that do not need a live host ----------------------------
 
 const { paletteFor } = await import("../src/utils/palette");
 const mapped = paletteFor(theme, "dark");
@@ -830,24 +751,26 @@ try {
   process.env.TAMIAS_URL = "http://127.0.0.1:1";
   const offline = await createTestRenderer({ width: 100, height: 34 });
   liveRenderer = offline.renderer as never;
-  const handle = makeInput(100);
-  await render(() => slot.render(handle.input) as never, offline.renderer);
+  await render(() => firstDialog.render() as never, offline.renderer);
   await sleep(350);
   await offline.flush();
   const frame = offline.captureCharFrame();
   step(
-    "the panel degrades to the log when /limits is unreachable",
+    "the pop-up degrades to the log when /limits is unreachable",
     frame.includes("log only") && frame.includes("free-one"),
-    frame.split("\n")[0] ?? "",
+    nonEmpty(frame)[0] ?? "",
   );
-  step("the offline panel does not invent provider data", !frame.includes("openrout"));
+  step("the offline pop-up says the live view is unavailable", frame.includes("unavailable") && frame.includes("showing the log alone"));
+  step("the offline pop-up does not invent provider data", !frame.includes("openrouter") && !frame.includes("nvidia"));
+  if (process.env.TAMIAS_VERIFY_DUMP) {
+    console.log("--- popup with /limits unreachable ---");
+    console.log(frame);
+    console.log("--- end ---");
+  }
   await offline.dispose();
 } catch (error) {
-  step("the panel degrades to the log when /limits is unreachable", false, error instanceof Error ? error.message : String(error));
+  step("the pop-up degrades to the log when /limits is unreachable", false, error instanceof Error ? error.message : String(error));
 }
-
-step("the plugin authenticated to /limits", authorized > 0, `${authorized} authorized call(s)`);
-step("the plugin polled /limits", limitsCalls > 0, `${limitsCalls} call(s)`);
 
 if (mounted) {
   await mounted.dispose();

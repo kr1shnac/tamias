@@ -165,7 +165,7 @@ for most models and does not report cache writes in `usage`, so a nonzero
 
 `tamias opencode setup` writes the provider block for you: it merges
 `provider.tamias` into the existing config, keeps every other key, copies the
-original to a timestamped backup, and registers the TUI panel when it can find
+original to a timestamped backup, and registers the TUI pop-up when it can find
 it.
 
 ```sh
@@ -263,10 +263,17 @@ tamias.proxy session=s1 prior_requests=3 model=deepseek-v4-pro mode=shadow \
 `decision=SWITCH` there means *shadow mode would have switched*. It did not, and
 the request that Zen received still said `deepseek-v4-pro`.
 
-## 5. Install the `/tamias` slash command
+## 5. Install the `/tamias` pop-up (and the report command)
 
-Once the proxy has logged a few requests, install the command OpenCode loads at
-startup:
+The TUI pop-up and the report command answer different questions, so they have
+different names when both are installed:
+
+| Surface | Command | What it does |
+| --- | --- | --- |
+| TUI plugin | `/tamias` | opens a centred pop-up with the live pool, the latest route, and the savings bar |
+| Markdown command | `/tamias-report` | runs `tamias report` and hands the real output to the model |
+
+Install the report command once the proxy has logged a few requests:
 
 ```sh
 tamias opencode install \
@@ -275,22 +282,20 @@ tamias opencode install \
   --port   8000
 ```
 
-That writes `~/.config/opencode/commands/tamias.md` (or
-`<project>/.opencode/commands/tamias.md` with `--project .`). It does **not**
-touch `opencode.json`; it prints the provider block to merge instead. Restart
-OpenCode and type `/tamias`:
+Without the plugin it writes `~/.config/opencode/commands/tamias.md` and the
+command is `/tamias`. When `tamias opencode install` (or `setup`) can find the
+plugin, it writes `tamias-report.md` instead, because two registrations of
+`/tamias` are not a contract. If an older `tamias.md` is still present,
+`opencode setup` warns that it may shadow the pop-up. It does **not** touch
+`opencode.json`; it prints the provider block to merge instead.
 
-```
-/tamias
-```
+`/tamias-report` runs `tamias report` and gives the model the real output, so
+you see requests, tokens, cost (or why it is `UNKNOWN`), how many requests were
+routed, and the estimated and realised saving. The model is told never to
+invent a dollar figure when the report says `UNKNOWN`.
 
-The command runs `tamias report` and hands the real output to the model, so you
-see requests, tokens, cost (or why it is `UNKNOWN`), how many requests were
-routed, and the saving estimate. The model is told never to invent a dollar
-figure when the report says `UNKNOWN`.
-
-For the live panel beside the chat, register `tamias-opencode-plugin` in the TUI
-settings (`~/.config/opencode/cli.json`):
+For the pop-up, register `tamias-opencode-plugin` in the TUI settings
+(`~/.config/opencode/cli.json`):
 
 ```json
 {
@@ -301,8 +306,15 @@ settings (`~/.config/opencode/cli.json`):
 `tamias opencode setup` adds that entry when it can find the plugin — from
 `--plugin DIR`, `$TAMIAS_PLUGIN_DIR`, or the source checkout that contains the
 Python package. The plugin is not on npm, so a `pip install tamias` alone does
-not carry it; a source checkout does. The panel is TUI-only: `/tamias` works
-without it.
+not carry it; a source checkout does.
+
+`/tamias` opens a `large`, centred dialog over the conversation. It shows eight
+lines: the live/log-only indicator, one savings bar, the request/switch/free
+counts, the latest route and its reason, the eligible pool with refused gates,
+any cooling model, and a footer. `esc` closes it; the first open in a process
+shows a one-line hint. It is not a full-screen route, and it needs no session
+context — the same pop-up works before the first chat turn. The plugin is
+TUI-only: the report command works without it.
 
 ## 6. Run it in the background
 
@@ -311,13 +323,18 @@ with systemd, tamias can write and optionally start a user unit:
 
 ```sh
 tamias service install \
-  --db     ~/.tamias/requests.db \
-  --prices ~/.tamias/prices.toml \
+  --db       ~/.tamias/requests.db \
+  --prices   ~/.tamias/prices.toml \
   --registry ~/.tamias/models.toml \
+  --providers ~/.tamias/providers.toml \
   --cheap-model deepseek-v4.1-flash-free,big-pickle \
   --port 8000 \
   --start
 ```
+
+`--providers` takes precedence over `--provider`: the unit routes across every
+provider in the catalogue instead of pinning one upstream. Use `--provider
+opencode` only for the older single-upstream setup.
 
 It writes `~/.config/systemd/user/tamias.service` and runs `systemctl --user
 daemon-reload` plus `enable --now` only when `--start` is passed. Paths are

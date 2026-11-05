@@ -1,10 +1,14 @@
 /**
  * tamias OpenCode TUI plugin.
  *
- * Registers a `session.panel` contribution (tamias.dashboard) and the global
- * `/tamias` command. The panel opens beside the chat, `f` toggles full screen,
- * and Escape closes it. The first open in a process shows a one-line hint so
- * the close key is discoverable without reading the README.
+ * `/tamias` opens a centred pop-up, not a full-screen route or a side panel:
+ * the question it answers -- what did that cost, which model ran, is the pool
+ * healthy? -- belongs on top of the conversation, not beside it.  Escape
+ * closes it, and the first open in a process shows a one-line hint so the key
+ * is discoverable without reading the README.
+ *
+ * The pop-up reads the request log directly and polls tamias' `/limits`
+ * endpoint; it never invents provider data when the proxy is not running.
  *
  * Loaded directly from this directory as a TUI-only plugin: the package has no
  * `exports` field, so OpenCode resolves entrypoints from root file names and
@@ -12,7 +16,7 @@
  */
 
 import { Plugin } from "@opencode/plugin/tui";
-import { TamiasDashboard, PANEL_NAME } from "./src/views/TamiasDashboard";
+import { TamiasPopup } from "./src/views/TamiasPopup";
 
 export default Plugin.define({
   id: "tamias",
@@ -21,42 +25,51 @@ export default Plugin.define({
       initial: { shown: false },
     });
 
-    context.ui.slot({
-      append: "session.panel",
-      render: (input) =>
-        input.name === PANEL_NAME ? (
-          <TamiasDashboard
-            input={input}
-            renderer={context.renderer}
-            theme={context.theme}
-            mode={context.themeMode}
-            keymap={context.keymap}
-          />
-        ) : null,
-    });
+    // The dialog API is host-owned: onClose is the only reliable signal that
+    // the pop-up is gone (Escape, a click-away or another plugin replacing it).
+    let open = false;
 
     context.keymap.layer(() => ({
       mode: "global",
       commands: [
         {
           id: "tamias.dashboard.open",
-          title: "Open tamias routing dashboard",
+          title: "Open the tamias routing pop-up",
           group: "tamias",
           palette: true,
           slash: { name: "tamias" },
           suggested: true,
           run: () => {
-            const active = context.ui.panel.current();
-            if (active?.name === PANEL_NAME) {
-              context.ui.panel.close();
+            if (open) {
+              context.ui.dialog.clear();
+              // Do not rely on the host calling onClose here: some hosts clear
+              // without firing it, and a stuck flag would make the next
+              // /tamias clear an already-empty dialog forever.
+              open = false;
               return;
             }
 
-            context.ui.dialog.clear();
-            if (!context.ui.panel.open(PANEL_NAME, { presentation: "panel" })) {
+            open = true;
+            try {
+              context.ui.dialog.show(
+                () => (
+                  <TamiasPopup
+                    renderer={context.renderer}
+                    theme={context.theme}
+                    mode={context.themeMode}
+                  />
+                ),
+                () => {
+                  open = false;
+                },
+              );
+              context.ui.dialog.set({ size: "large", centered: true });
+            } catch {
+              open = false;
+              context.ui.dialog.clear();
               context.ui.toast.show({
                 title: "tamias",
-                message: "Open a session first, then run /tamias.",
+                message: "Could not open the pop-up; see the OpenCode log.",
                 variant: "warning",
               });
               return;
@@ -68,7 +81,7 @@ export default Plugin.define({
               });
               context.ui.toast.show({
                 title: "tamias",
-                message: "esc closes · f full screen",
+                message: "esc closes · /tamias opens it again",
                 variant: "info",
                 duration: 4000,
               });

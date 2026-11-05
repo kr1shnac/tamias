@@ -50,11 +50,22 @@ is normalized to the tool-turn shape the rules read.
 3. A trailing `tool` message from a shell-family tool whose output is at or
    over `big_output_chars` -> STAY.
 4. A trailing `tool` message from an easy tool, with at least `min_gap`
-   requests since the last switch -> SWITCH to a model from the pool.
+   requests since the last switch -> SWITCH to a model from the pool that is
+   **cheaper than the model the caller asked for**.
 5. Anything else -> STAY.
 
-While the session is already on a pool model the gap counts as zero, so
-hysteresis keeps it there until `min_gap` fresh requests have passed.
+Hysteresis is keyed to the *chosen target*, not to "any pool member". Once the
+session is running on the model the gates picked, the gap counts as zero and it
+stays there until `min_gap` fresh requests have passed. A session sitting on a
+dearer pool member still moves to the cheaper target: otherwise a pool whose
+ranking changes would strand the conversation on the old, more expensive model.
+
+A switch to an equal-cost or dearer model is refused with
+`no cheaper pool target than the requested model`. The old behaviour moved to
+the first non-requested pool member even when it cost the same, which bought no
+saving and threw away the warm prompt cache. Prices come from the effective
+sheet (generated + local overlay); when a price is unknown the comparison is
+skipped rather than guessed.
 
 ## The model pool
 
@@ -79,6 +90,9 @@ Within the pool:
   same free model.
 - **The requested model is skipped.** Switching to the model already running
   would be a no-op and could not save anything.
+- **Only a cheaper target is taken.** Rule 4 refuses an equal-cost or dearer
+  candidate; failover (rule 0 and retryable refusals) is not a saving decision
+  and may still move to a more capable or equally priced survivor.
 - **The first entry is the primary.** With one entry the behaviour is exactly
   the old single-target configuration.
 

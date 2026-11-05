@@ -247,7 +247,7 @@ smaller than the floor is reported as below the floor, not as a measurement.
 ## Not verified
 
 - **Savings measurement.** No measured savings exist. Every saving figure the
-  report or the OpenCode panel prints is arithmetic over invented or listed rates applied
+  report or the OpenCode pop-up prints is arithmetic over invented or listed rates applied
   to logged token counts; none has been reconciled against a provider invoice, and
   no paid, non-zero-price run has been authorised. The *arithmetic* is now
   verified against authored rates (`scripts/shadow_rate_check.py`, above,
@@ -411,7 +411,7 @@ python scripts/credit_ab_check.py \
 
 ## Release status
 
-Release **`1.0.0`** — the version in this tree. The tag-triggered `publish.yml`
+Release **`1.0.1`** — the version in this tree. The tag-triggered `publish.yml`
 job publishes a `vX.Y.Z` tag through PyPI Trusted Publishing (OIDC); `0.1.0a8`
 (2026-10-20) was the artifact on PyPI before it, built from tag `v0.1.0a8`. The
 first successful upload was `v0.1.0a7`; earlier alpha tags failed with
@@ -433,14 +433,14 @@ is `0.1.0a3`.
 | Listener hardening | Implemented | Body cap (413) and concurrency limit; optional TLS via `--tls-cert`/`--tls-key` |
 | Signed policy manifest | Opt-in | `serve --manifest` verifies an Ed25519-signed policy at startup and serves it at `GET /policy`; expired/altered/mis-pinned manifests are refused (404/401/403/503). Needs `tamias[manifest]`; agent-side application is not enforced |
 | Configuration | Implemented | `~/.tamias/config.toml` (or `$TAMIAS_CONFIG`); provider presets; `tamias config` |
-| OpenCode integration | Implemented, live | `opencode setup` writes the provider block, `opencode models` lists it on 2.2.5; the TUI panel needs the source checkout |
+| OpenCode integration | Implemented, live | `opencode setup` writes the provider block, `opencode models` lists it on 2.2.5; the TUI pop-up needs the source checkout or `--plugin` |
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
 | Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`); no live ledger measurement has been taken |
 | Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, and OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key) |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions |
-| Publish | Tag-triggered | `v1.0.0` publishes through Trusted Publishing (OIDC); `0.1.0a8` was the last artifact on PyPI |
+| Publish | Tag-triggered | `v1.0.1` publishes through Trusted Publishing (OIDC); `0.1.0a8` was the last artifact on PyPI |
 
 This page describes implemented repository behaviour and the runs recorded above.
 It does not claim provider compatibility, savings, latency, or live-agent success

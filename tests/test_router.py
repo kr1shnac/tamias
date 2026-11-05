@@ -259,20 +259,65 @@ def test_pool_with_only_the_requested_model_stays() -> None:
     config = RouterConfig(cheap_pool=("strong-1",), min_gap=0)
     decision = decide(body_with_tool("read", "contents"), state(index=0), config)
     assert decision.action == "STAY"
-    assert decision.reason == "no pool target differs from the requested model"
+    assert decision.reason == "no cheaper pool target than the requested model"
 
 
-def test_pool_hysteresis_treats_any_member_as_already_cheap() -> None:
+def test_pool_hysteresis_keeps_the_chosen_target_in_place() -> None:
+    """Once the session is on the target, repeat easy turns do not churn."""
     config = RouterConfig(
         cheap_pool=("cheap-a", "cheap-b"), strong_model="strong-1", min_gap=3
     )
     decision = decide(
         body_with_tool("read", "contents"),
-        state(index=10, model="cheap-b"),
+        state(index=10, model="cheap-a"),
         config,
+        ranked=("cheap-a", "cheap-b"),
     )
     assert decision.action == "STAY"
     assert decision.reason == "hysteresis: 0 of 3 requests since last switch"
+
+
+def test_pool_moves_off_a_dearer_member_to_the_cheaper_target() -> None:
+    """Being on *a* pool member is not the same as being on the chosen one."""
+    config = RouterConfig(
+        cheap_pool=("cheap-a", "cheap-b"), strong_model="strong-1", min_gap=0
+    )
+    decision = decide(
+        body_with_tool("read", "contents"),
+        state(index=10, model="cheap-b"),
+        config,
+        ranked=("cheap-a", "cheap-b"),
+        costs={"cheap-a": 0.1, "cheap-b": 1.0},
+    )
+    assert decision.action == "SWITCH"
+    assert decision.target_model == "cheap-a"
+
+
+def test_pool_refuses_a_target_that_is_not_cheaper() -> None:
+    config = RouterConfig(cheap_pool=("cheap-a",), strong_model="strong-1", min_gap=0)
+    decision = decide(
+        body_with_tool("read", "contents"),
+        state(index=10, model="strong-1"),
+        config,
+        ranked=("cheap-a",),
+        costs={"cheap-a": 2.0, "strong-1": 2.0},
+    )
+    assert decision.action == "STAY"
+    assert decision.target_model is None
+    assert decision.reason == "no cheaper pool target than the requested model"
+
+
+def test_pool_switches_when_the_target_is_cheaper() -> None:
+    config = RouterConfig(cheap_pool=("cheap-a",), strong_model="strong-1", min_gap=0)
+    decision = decide(
+        body_with_tool("read", "contents"),
+        state(index=0, model="strong-1"),
+        config,
+        ranked=("cheap-a",),
+        costs={"cheap-a": 0.0, "strong-1": 10.0},
+    )
+    assert decision.action == "SWITCH"
+    assert decision.target_model == "cheap-a"
 
 
 def test_single_model_configuration_still_targets_cheap_model() -> None:

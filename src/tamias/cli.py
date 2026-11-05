@@ -280,6 +280,25 @@ def _logged_target(row: dict[str, Any]) -> str | None:
     return raw if isinstance(raw, str) and raw else None
 
 
+def _applied_switch(row: dict[str, Any]) -> bool:
+    """Whether this row actually ran on a different model than the caller asked for.
+
+    An active-mode row is proof enough on its own: the proxy only rewrites the
+    model in that mode.  For older logs the recorded target is the only evidence
+    left, so a row whose used model equals its logged target is treated as
+    applied too.
+    """
+    used = _pick(row, MODEL_USED_COLUMNS)
+    requested = _pick(row, ("model_requested", "model"))
+    if not isinstance(used, str) or not used or used == "-":
+        return False
+    if not isinstance(requested, str) or not requested or requested == "-":
+        return False
+    if used == requested:
+        return False
+    return _pick(row, ("router_mode",)) == "active" or _logged_target(row) == used
+
+
 def _count(row: dict[str, Any], name: str) -> int | None:
     raw = row.get(name)
     if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
@@ -327,27 +346,48 @@ def _cheap_model(sheet: PriceSheet) -> str | None:
 def _saving(row: dict[str, Any], sheet: PriceSheet, cheap: str | None) -> float | None:
     """What this request would have cost less, had the switch been acted on.
 
-    The stay arm is the model that answered, priced with a **warm** cache
-    (:func:`assume_cache_warm`); the switch arm is the target model on the row's
-    real counts.  The target is the model the router's own decision named
-    (:func:`_logged_target`) when the log recorded one, falling back to the
-    sheet's cheapest only for rows that predate that column.  Charging the
-    switch the context it would have to re-ingest is what makes the estimate
-    falsifiable: the result can be zero or negative, so the report can show a
-    switch that lost money instead of only ever showing winnings (F-1).  It is
-    still an estimate -- no counterfactual was ever run.
+    The stay arm is priced with a **warm** cache (:func:`assume_cache_warm`);
+    the switch arm pays the row's real counts, including the context it has to
+    re-ingest.  Charging that context is what makes the estimate falsifiable:
+    the result can be zero or negative, so the report can show a switch that
+    lost money instead of only ever showing winnings (F-1).
+
+    The two arms depend on whether the switch was applied:
+
+    * **applied** -- the caller asked for model A and the row ran on B, so A is
+      the stay arm and B is the switch arm.  This is the saving the proxy
+      actually produced, and it is the same arithmetic as ``realised saving``.
+    * **shadow or declined** -- the row ran on A, so A is the stay arm and the
+      router's target is the switch arm.  The target is the model the decision
+      named (:func:`_logged_target`), falling back to the sheet's cheapest only
+      for rows that predate that column.
+
+    Before this distinction, an active-mode row whose used model *was* the
+    target compared the target with itself and reported zero, so a successful
+    routing run could not show the money it saved.
     """
-    if cheap is None:
+    used = _pick(row, MODEL_USED_COLUMNS)
+    if not isinstance(used, str) or not used:
         return None
-    stay = _pick(row, MODEL_USED_COLUMNS)
-    if not isinstance(stay, str) or not stay:
+
+    applied = _applied_switch(row)
+    if applied:
+        stay = _pick(row, ("model_requested", "model"))
+        switch = used
+    else:
+        if cheap is None:
+            return None
+        stay = used
+        switch = cheap
+
+    if not isinstance(stay, str) or not stay or not isinstance(switch, str) or not switch:
         return None
     usage = _usage(row)
     staying = compute_cost(stay, assume_cache_warm(usage), sheet).usd
-    switching = compute_cost(cheap, usage, sheet).usd
+    switching = compute_cost(switch, usage, sheet).usd
     if staying is None or switching is None:
         return None
-    if stay == cheap:
+    if stay == switch:
         # Already on the model a switch would choose: there is no switch to
         # price, and comparing a warm price against a cold one for the same
         # model would invent a loss out of a no-op.
@@ -483,8 +523,17 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
             pass
         else:
             switched += 1
+            applied = _applied_switch(row)
             target = _logged_target(row)
-            if target is None:
+            if applied:
+                # The model that actually ran is the switch arm, whether or not
+                # the decision named it.  It belongs in the target line because
+                # it is what the saving was priced against.
+                used_model = _pick(row, MODEL_USED_COLUMNS)
+                named = target or (used_model if isinstance(used_model, str) else None)
+                if named:
+                    targets_logged.add(named)
+            elif target is None:
                 targets_fallback += 1
                 target = cheap
             else:
@@ -1732,11 +1781,18 @@ def opencode_setup(args: argparse.Namespace) -> int:
     if plugin is None:
         print(
             "plugin not found: pass --plugin /path/to/tamias-opencode-plugin to "
-            "add the live panel",
+            "add the live pop-up",
             file=sys.stderr,
         )
     else:
         print(f"registered plugin {plugin} in {cli_path}")
+        legacy = _opencode_commands_dir(None) / "tamias.md"
+        if legacy.exists():
+            print(
+                f"warning: {legacy} also registers /tamias and may shadow the "
+                "plugin pop-up; remove it or rename it to tamias-report.md",
+                file=sys.stderr,
+            )
     print("")
     print("start the proxy with the same --db and --prices:")
     serve = _opencode_serve_command(args)
@@ -1846,16 +1902,26 @@ def _tamias_executable() -> str:
 
 
 def opencode_install(args: argparse.Namespace) -> int:
-    """Write the ``/tamias`` slash command OpenCode loads at startup.
+    """Write a report slash command OpenCode loads at startup.
 
-    The command injects ``tamias report`` output into the prompt, so the model
-    can summarise real logged numbers instead of guessing them.  It never
-    touches ``opencode.json``: the provider block is printed for the user to
-    merge, because rewriting a working config is not a safe default.
+    Without the TUI plugin the command is ``/tamias`` and injects
+    ``tamias report`` output into the prompt, so the model can summarise real
+    logged numbers instead of guessing them.  With the plugin installed it is
+    ``/tamias-report``, because the plugin already owns ``/tamias`` and opens
+    the live pop-up.  It never touches ``opencode.json``: the provider block is
+    printed for the user to merge, because rewriting a working config is not a
+    safe default.
     """
     db = str(Path(args.db).expanduser())
     prices = str(Path(args.prices).expanduser())
-    target = _opencode_commands_dir(args.project) / OPENCODE_COMMAND_FILENAME
+    # The TUI plugin owns `/tamias` when it is installed.  A markdown command
+    # with the same name is a second registration of the same slash command,
+    # and which one OpenCode runs is not a contract.  Keep the report command
+    # under `/tamias-report` in that case; a standalone install without the
+    # plugin still gets the familiar `/tamias`.
+    plugin = _plugin_directory(getattr(args, "plugin", None))
+    command_name = "tamias-report" if plugin is not None else "tamias"
+    target = _opencode_commands_dir(args.project) / f"{command_name}.md"
     if target.exists() and not args.force:
         print(
             f"tamias opencode install: {target} already exists; pass --force to replace it",
@@ -1908,7 +1974,7 @@ def opencode_install(args: argparse.Namespace) -> int:
     print("  " + _opencode_serve_command(args))
     print("")
     print("or let `tamias opencode setup` merge the provider block for you")
-    print("then restart OpenCode and type /tamias")
+    print(f"then restart OpenCode and type /{command_name}")
     return 0
 
 
@@ -1979,24 +2045,33 @@ def render_service_unit(
     min_gap: int,
     provider: str,
     router_mode: str,
+    providers: str | None = None,
 ) -> str:
-    """A systemd user unit that runs ``tamias serve`` with these settings."""
-    argv = [
-        executable,
-        "serve",
-        "--provider",
-        provider,
-        "--db",
-        db,
-        "--prices",
-        prices,
-        "--port",
-        str(port),
-        "--router-mode",
-        router_mode,
-        "--min-gap",
-        str(min_gap),
-    ]
+    """A systemd user unit that runs ``tamias serve`` with these settings.
+
+    ``providers`` names a catalogue and takes precedence over the single
+    ``provider`` preset, so the service can route across every configured
+    provider instead of pinning one upstream.
+    """
+    argv = [executable, "serve"]
+    if providers:
+        argv.extend(["--providers", providers])
+    else:
+        argv.extend(["--provider", provider])
+    argv.extend(
+        [
+            "--db",
+            db,
+            "--prices",
+            prices,
+            "--port",
+            str(port),
+            "--router-mode",
+            router_mode,
+            "--min-gap",
+            str(min_gap),
+        ]
+    )
     if registry:
         argv.extend(["--registry", registry])
     if cheap_model:
@@ -2130,6 +2205,11 @@ def service_install(args: argparse.Namespace) -> int:
             min_gap=args.min_gap,
             provider=args.provider,
             router_mode=args.router_mode,
+            providers=(
+                _service_file(args.providers, "provider catalogue")
+                if getattr(args, "providers", None)
+                else None
+            ),
         )
     except ValueError as exc:
         print(f"tamias service install: {exc}", file=sys.stderr)
@@ -2975,6 +3055,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="replace an existing command file"
     )
     opencode_install_parser.add_argument(
+        "--plugin",
+        default=None,
+        help="path to tamias-opencode-plugin; also read from TAMIAS_PLUGIN_DIR",
+    )
+    opencode_install_parser.add_argument(
         "--registry",
         default=None,
         help="capability registry to name in the printed serve command",
@@ -3077,6 +3162,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     service_install_parser.add_argument(
         "--provider", default="opencode", help="upstream preset (default: opencode)"
+    )
+    service_install_parser.add_argument(
+        "--providers",
+        default=None,
+        help="provider catalogue to route across (wins over --provider)",
     )
     service_install_parser.add_argument(
         "--router-mode", choices=ROUTER_MODES, default="active"

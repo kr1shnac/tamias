@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tamias import cli
 from tamias.cli import main
 
 PRICES = """
@@ -25,6 +26,18 @@ output = 0.0
 input = 3.0
 output = 15.0
 """
+
+
+@pytest.fixture(autouse=True)
+def no_tui_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests describe a standalone install, which owns the /tamias name.
+
+    A source checkout happens to contain tamias-opencode-plugin, and the
+    installer would then reserve /tamias for the pop-up and write
+    /tamias-report instead.  That collision is covered in
+    ``test_opencode_setup.py``; here the report command is the subject.
+    """
+    monkeypatch.setattr(cli, "_plugin_directory", lambda explicit: None)
 
 
 def install_args(project: Path, db: Path, prices: Path, *extra: str) -> list[str]:

@@ -1033,15 +1033,29 @@ def create_app(
         # stays authoritative rather than being replaced by an empty ranked list.
         ranked = pool.ids() if len(capabilities) else None
         qualities = {candidate.model: candidate.quality for candidate in pool.candidates}
+        costs = {candidate.model: candidate.cost for candidate in pool.candidates}
         info = capabilities.get(model_requested)
         if info is not None:
             qualities.setdefault(model_requested, candidates.quality_of(info))
+        if model_requested:
+            # The requested model may sit outside the configured cheap pool.
+            # Its own price is what decides whether a pool member is actually
+            # cheaper, so price it here even though it cannot be a target.
+            costs.setdefault(
+                model_requested,
+                candidates.blended_cost(sheet.get(model_requested)),
+            )
         limited: tuple[str, ...] = ()
         if model_requested:
             locked = limit_ledger.get(provider_of(model_requested), model_requested)
             if locked is not None:
                 limited = (model_requested,)
-        return {"ranked": ranked, "limited": limited, "qualities": qualities}
+        return {
+            "ranked": ranked,
+            "limited": limited,
+            "qualities": qualities,
+            "costs": costs,
+        }
 
     def plan(
         session_id: str,
@@ -1051,6 +1065,7 @@ def create_app(
         ranked: tuple[str, ...] | None = None,
         limited: tuple[str, ...] = (),
         qualities: dict[str, float] | None = None,
+        costs: dict[str, float | None] | None = None,
     ) -> Decision:
         """Ask the router what it would do, and log it.
 
@@ -1069,6 +1084,7 @@ def create_app(
                 ranked=ranked,
                 limited=limited,
                 qualities=qualities,
+                costs=costs,
             )
             if router_mode != "active" and not decision.availability:
                 decision = replace(decision, persisted_only=True)

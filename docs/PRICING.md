@@ -176,6 +176,32 @@ the same weights.
 An **absent** rate is still UNKNOWN. The overlay is a place to state a price
 you know, not a way to make an unknown price look like zero.
 
+## Savings are an estimate, not an invoice
+
+`tamias report` prints two different numbers, and they answer different
+questions:
+
+- **estimated saving** prices every row whose router decision was SWITCH. For a
+  shadow or declined switch the row ran on the requested model, so the saving
+  is `requested (warm) - target (as logged)`. For an applied switch the row ran
+  on the target, so it is `requested (warm) - used`. The target comes from the
+  decision logged with the row; only rows that predate that column fall back to
+  the sheet's cheapest.
+- **realised saving** prices only rows the proxy actually rewrote:
+  `model_requested (warm) - model_used`.
+
+The requested side is always priced with a warm cache, because the counterfactual
+is an ongoing conversation, not a first prompt. That makes the estimate
+falsifiable: it can be zero or negative, and the report shows the loss rather
+than hiding it. Neither number is a provider invoice. A provider's own billed
+amount is stored separately as `provider_cost_usd`; use `tamias reconcile` to
+compare it with the computed figure.
+
+Before 1.0.1, an applied active-mode row compared the target with itself and
+reported `$0.00`, so a run that did save money could not prove it. The report
+now separates applied rows from shadow/declined rows before doing the
+arithmetic.
+
 ## What was verified
 
 **Fixtures only.** In the window that wrote this document, no network call was

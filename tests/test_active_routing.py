@@ -89,8 +89,16 @@ def store() -> FakeStore:
 
 @pytest.fixture
 def sheet() -> PriceSheet:
-    price = ModelPrice(input=1.0, output=2.0)
-    return PriceSheet(date="2026-10-15", models={CHEAP: price, STRONG: price})
+    # The cheap model must actually be cheaper: an active switch to an
+    # equal-or-dearer target is refused, so a flat sheet would make every
+    # rewrite test vacuous.
+    return PriceSheet(
+        date="2026-10-15",
+        models={
+            CHEAP: ModelPrice(input=0.5, output=1.0),
+            STRONG: ModelPrice(input=1.0, output=2.0),
+        },
+    )
 
 
 @pytest.fixture

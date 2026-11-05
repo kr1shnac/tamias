@@ -5,6 +5,43 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-11-05
+
+A correctness and experience pass over the 1.0.0 routing release.
+
+### Changed
+
+- **`/tamias` is a compact pop-up, not a full-screen panel.** The TUI plugin
+  opens a centred `large` dialog with the savings bar, KPI line, latest route
+  and reason, eligible pool, cooling models and a footer. Escape closes it; the
+  first open shows a one-line hint. The unused dashboard, request-table and
+  session-sidebar views were removed.
+- **The report command is renamed when the pop-up owns `/tamias`.** With the
+  plugin installed, `tamias opencode install` writes `tamias-report.md`, so
+  `/tamias` belongs to the pop-up and `/tamias-report` runs the report. A
+  standalone install keeps `/tamias`. `opencode setup` warns when a legacy
+  `tamias.md` may shadow the pop-up.
+- **`tamias service install --providers`.** A systemd unit can route across a
+  provider catalogue; `--providers` wins over `--provider`.
+
+### Fixed
+
+- **Active-mode savings were invisible.** A row the proxy actually rewrote
+  compared its used model with the same target and reported `$0.00`. The report
+  now prices applied rows as `requested → used` and shadow/declined rows as
+  `used → target`, so estimated and realised savings are distinct and a real
+  run shows the money it saved.
+- **A switch to an equal or dearer model is refused.** Rule 4 now takes only a
+  target cheaper than the requested model, using the effective price sheet.
+  This stops switching that bought no saving and discarded the warm prompt
+  cache.
+- **Hysteresis follows the chosen target.** Being on *some* pool member no
+  longer counts as already cheap; a conversation on a dearer member moves to
+  the cheaper target the gates picked.
+- **The offline pop-up keeps its claim readable.** `unavailable · showing the
+  log alone` precedes the raw transport error, so a narrow terminal clips the
+  detail rather than the explanation.
+
 ## [1.0.0] - 2026-11-04
 
 The first public release: one OpenAI-compatible endpoint in front of every

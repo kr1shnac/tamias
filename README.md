@@ -122,9 +122,10 @@ tamias opencode setup \
 ```
 
 Run the printed `tamias serve ...` command in one terminal, restart OpenCode,
-pick a `tamias/...` model, and use it normally. In a session, `/tamias` (from
-`tamias opencode install`) prints the same receipt as `tamias report`. Free
-versus paid is shown per model, not inferred from the model name.
+pick a `tamias/...` model, and use it normally. With the TUI plugin installed,
+`/tamias` opens a compact pop-up (latest route, savings, pool, cooling) and
+`/tamias-report` prints the same receipt as `tamias report`. Free versus paid is
+shown per model, not inferred from the model name.
 
 The step-3 registry is what makes the quality floor real. A model with an
 explicit `quality` can outrank a cheap unrated one; an unrated model scores at

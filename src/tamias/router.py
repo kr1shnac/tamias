@@ -10,7 +10,7 @@ into an action, so no handler has to re-derive what a ``SWITCH`` means.
 """
 
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import Any
@@ -331,12 +331,17 @@ def _pool_target(
     config: RouterConfig,
     requested: str,
     ranked: Collection[str] | None = None,
+    costs: Mapping[str, float | None] | None = None,
 ) -> str:
-    """The pool member this session should use, or ``""`` when none differs.
+    """The pool member this session should use, or ``""`` when none is better.
 
     ``ranked`` is an already-ordered candidate list from the three routing gates
-    (cheapest capable first); the first entry the session is not already on wins,
-    so a limited or newly-cheaper model changes the answer without any state.
+    (cheapest capable first); the first entry that is *cheaper* than the model
+    the caller asked for wins, so a limited or newly-cheaper model changes the
+    answer without any state.  A switch to an equal-cost model would only throw
+    away the warm prompt cache, and a switch to a dearer one would lose money,
+    so both are refused when ``costs`` can price them.
+
     Without ``ranked``, a session keeps one target (stable hash) while different
     sessions spread across the pool.
 
@@ -347,9 +352,19 @@ def _pool_target(
     if not pool:
         return ""
     if ranked is not None:
+        requested_cost = costs.get(requested) if costs else None
         for candidate in pool:
-            if candidate != requested:
-                return candidate
+            if candidate == requested:
+                continue
+            if costs is not None:
+                candidate_cost = costs.get(candidate)
+                if (
+                    requested_cost is not None
+                    and candidate_cost is not None
+                    and candidate_cost >= requested_cost
+                ):
+                    continue
+            return candidate
         return ""
     start = _stable_index(state.session_id, len(pool))
     for offset in range(len(pool)):
@@ -392,6 +407,7 @@ def decide(
     ranked: Collection[str] | None = None,
     limited: Collection[str] = (),
     qualities: dict[str, float] | None = None,
+    costs: Mapping[str, float | None] | None = None,
 ) -> Decision:
     """Decide whether this request should be re-routed to a pool member.
 
@@ -411,8 +427,10 @@ def decide(
 
     ``ranked`` is the ordered output of the three routing gates (cheapest
     capable first); when given it replaces the static pool order.  ``limited``
-    names models the limit ledger has locked out, and ``qualities`` maps a model
-    id to its capability score so rule 0 can avoid a silent downgrade.
+    names models the limit ledger has locked out, ``qualities`` maps a model id
+    to its capability score so rule 0 can avoid a silent downgrade, and
+    ``costs`` maps a model id to its blended USD/Mtok price so rule 4 can
+    refuse a switch that would not be cheaper than the requested model.
     """
     messages = _routing_messages(body)
     last: dict[str, Any] = {}
@@ -467,23 +485,29 @@ def decide(
                         config,
                         requested_model if isinstance(requested_model, str) else "",
                         ranked=ranked,
+                        costs=costs,
                     )
                     if pool and not target:
-                        decision = _stay("no pool target differs from the requested model")
+                        decision = _stay(
+                            "no cheaper pool target than the requested model"
+                        )
                     elif ranked is not None and not ranked:
                         # Every model failed a gate: the limit ledger locked all
                         # of them out.  Recording a SWITCH with no target would
                         # claim a saving that cannot exist.
                         decision = _stay("no model passed the routing gates")
                     else:
-                        # Hysteresis: while we are already on a pool model the
-                        # gap is zero, so we stay put until it grows again.  With
-                        # no pool at all, a SWITCH is still recorded with an
-                        # empty target: shadow mode uses that to show the rule
-                        # matched even though nothing can be applied.
+                        # Hysteresis: once the session is on the chosen target,
+                        # the gap is zero, so it stays put until it grows again.
+                        # Being on *some other* pool member is not the same
+                        # thing: an expensive member must still move to the
+                        # cheaper target the gates picked.  With no pool at all,
+                        # a SWITCH is still recorded with an empty target:
+                        # shadow mode uses that to show the rule matched even
+                        # though nothing can be applied.
                         gap = (
                             0
-                            if pool and state.current_model in pool
+                            if target and state.current_model == target
                             else state.request_index
                         )
                         if gap >= config.min_gap:

@@ -13,6 +13,7 @@ Everything runs in-process against a temporary SQLite log.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -27,10 +28,14 @@ date = "2026-10-15"
 ["strong/model"]
 input = 3.0
 output = 15.0
+cached_input = 0.3
+cache_write = 3.75
 
 ["cheap/model"]
 input = 0.25
 output = 1.25
+cached_input = 0.025
+cache_write = 0.3
 """
 
 STRONG = "strong/model"
@@ -52,7 +57,7 @@ def _log(
         session_id="s1",
         model_requested=requested,
         model_used=used,
-        usage=usage or Usage(2000, 100, 0, None),
+        usage=usage or Usage(2000, 100, 0, 0),
         cost=CostBreakdown(usd=None, formula="test", price_sheet_date="2026-10-15"),
         latency_ms=120,
         status="200",
@@ -98,6 +103,17 @@ def test_active_reports_applied_switches_and_the_ones_it_declined(
     realised = [line for line in out.splitlines() if line.startswith("realised saving")]
     assert len(realised) == 1, f"expected one realised saving line:\n{out}"
     assert "over 1 rows" in realised[0]
+    realised_amount = float(re.search(r"realised saving.*?\$([0-9.]+)", realised[0]).group(1))
+    assert realised_amount == pytest.approx(0.001475, abs=1e-9)
+
+    # The estimated line prices both SWITCH rows: the applied one against the
+    # model the caller asked for, the declined one against the target it named.
+    # Before this, the applied row compared the target with itself and printed
+    # zero, hiding the saving the active run had actually produced.
+    estimated = next(line for line in out.splitlines() if line.startswith("estimated saving"))
+    estimated_amount = float(re.search(r"estimated saving: \$([0-9.]+)", estimated).group(1))
+    assert estimated_amount == pytest.approx(2 * 0.001475, abs=1e-9)
+    assert estimated_amount > realised_amount
 
 
 def test_active_reports_every_switch_applied_when_none_are_declined(

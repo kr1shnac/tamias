@@ -86,6 +86,32 @@ def test_install_writes_a_systemd_user_unit(
     assert "systemctl --user enable --now tamias.service" in out
 
 
+def test_install_can_route_across_a_provider_catalogue(
+    paths: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    providers = paths["tmp"] / "providers.toml"
+    providers.write_text(
+        '[[providers]]\nname = "one"\nbase_url = "https://one.example/v1"\n'
+        "api_key_env = \"ONE_KEY\"\n",
+        encoding="utf-8",
+    )
+
+    assert main(install_args(paths, "--providers", str(providers))) == 0
+    text = (paths["config"] / UNIT).read_text(encoding="utf-8")
+
+    assert f"--providers {providers.resolve()}" in text
+    assert "--provider opencode" not in text
+    assert "systemctl --user enable --now tamias.service" in capsys.readouterr().out
+
+
+def test_install_refuses_a_missing_provider_catalogue(
+    paths: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    absent = paths["tmp"] / "absent-providers.toml"
+    assert main(install_args(paths, "--providers", str(absent))) == 2
+    assert "provider catalogue does not exist" in capsys.readouterr().err
+
+
 def test_install_refuses_to_overwrite_without_force(
     paths: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
