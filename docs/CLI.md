@@ -235,7 +235,10 @@ tamias opencode setup [--config PATH] [--plugin DIR] [--db PATH] [--prices PATH]
 The opt-in writer behind `install`. It merges `provider.tamias` into OpenCode's
 config (`~/.config/opencode/opencode.jsonc` when present, else `opencode.json`),
 keeping every other key, and copies the original to
-`<name>.bak-YYYYMMDDTHHMMSSZ` first. When the TUI plugin can be found — a
+`<name>.bak-YYYYMMDDTHHMMSSZ` first. The backup is written mode `0600` because
+the config it copies may already hold provider credentials; the command names
+it and says to delete it once the new config is confirmed. When the TUI plugin
+can be found — a
 `--plugin` path, `$TAMIAS_PLUGIN_DIR`, or the source checkout beside the package
 — it is appended to `plugins` in `cli.json`, once, and `/tamias` opens the
 pop-up while `/tamias-report` runs the report.

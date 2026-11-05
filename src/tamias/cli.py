@@ -1672,8 +1672,18 @@ def _read_json_file(path: Path) -> dict[str, Any]:
 
 
 def _backup(path: Path, stamp: str) -> Path:
+    """Copy a config aside before rewriting it.
+
+    The copy can contain provider credentials that the config already held.
+    ``copy2`` preserves the original mode, so a 0644 config would leave a
+    world-readable second copy of a secret; force owner-only instead.
+    """
     backup = path.with_name(f"{path.name}.bak-{stamp}")
     shutil.copy2(path, backup)
+    try:
+        backup.chmod(0o600)
+    except OSError:
+        pass
     return backup
 
 
@@ -1772,10 +1782,16 @@ def opencode_setup(args: argparse.Namespace) -> int:
         return 1
 
     print(f"wrote {config_path} (provider tamias, {len(models)} model(s))")
+    for backup in backups:
+        print(
+            f"backup: {backup} (mode 600; it may contain provider credentials "
+            "-- delete it once you are satisfied)",
+            file=sys.stderr,
+        )
     if had_comments:
         print(
             "note: OpenCode's JSONC comments are not preserved; the original "
-            f"is at {backups[0]}",
+            "text is in the backup",
             file=sys.stderr,
         )
     if plugin is None:

@@ -87,10 +87,13 @@ def test_setup_strips_jsonc_comments_but_keeps_a_backup(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = tmp_path / "opencode.jsonc"
+    # A config that already holds a credential is usually readable by the
+    # owner only, but nothing enforces that; the backup must not widen it.
     config.write_text(
         "{\n  // a comment that JSON does not allow\n  \"$schema\": \"https://opencode.ai/config.json\",\n}\n",
         encoding="utf-8",
     )
+    config.chmod(0o644)
 
     assert main(setup_args(config, write_prices(tmp_path))) == 0
 
@@ -98,7 +101,10 @@ def test_setup_strips_jsonc_comments_but_keeps_a_backup(
     backups = list(tmp_path.glob("opencode.jsonc.bak-*"))
     assert len(backups) == 1
     assert "// a comment" in backups[0].read_text()
-    assert "not preserved" in capsys.readouterr().err
+    assert backups[0].stat().st_mode & 0o777 == 0o600, "a backup may hold a secret"
+    error = capsys.readouterr().err
+    assert "not preserved" in error
+    assert "may contain provider credentials" in error
 
 
 def test_a_dry_run_writes_nothing(

@@ -166,7 +166,9 @@ for most models and does not report cache writes in `usage`, so a nonzero
 `tamias opencode setup` writes the provider block for you: it merges
 `provider.tamias` into the existing config, keeps every other key, copies the
 original to a timestamped backup, and registers the TUI pop-up when it can find
-it.
+it. The backup is mode `0600` and may still contain whatever credentials the
+config held; setup names it, and you should delete it once the new config
+works.
 
 ```sh
 tamias opencode setup \
