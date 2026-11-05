@@ -1,14 +1,14 @@
 /**
  * The `/tamias` pop-up.
  *
- * This is deliberately not the full dashboard: a modal is for the question a
- * user asks mid-conversation -- *what did that just cost, which model actually
- * ran, and is the pool healthy?* -- not for browsing five hundred requests.
- * The request table, session sidebar and per-model breakdown stay in the
- * dashboard view; this surface keeps the one-glance answer to six or seven
- * lines.
+ * This is deliberately not a dashboard: a modal is for the question a user
+ * asks mid-conversation -- *what did that just cost, which model actually ran,
+ * and is the pool healthy?* -- not for browsing five hundred requests. The
+ * request table and session sidebar were removed for 1.0.1; `tamias report`
+ * (and `/tamias-report`) remain the place to read the full log. This surface
+ * keeps the one-glance answer to six or seven lines.
  *
- * It reads the same two sources as the dashboard:
+ * It reads two independent sources:
  *
  *   - the request log (SQLite, read-only) for what actually ran and what it
  *     cost;
