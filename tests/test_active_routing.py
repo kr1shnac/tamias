@@ -193,12 +193,73 @@ def body_of(model: str) -> bytes:
     return json.dumps({"model": model, "messages": MESSAGES}).encode()
 
 
-async def post(app: FastAPI, raw: bytes, token: str | None = None) -> httpx.Response:
-    headers = dict(JSON_HEADERS)
+async def post(
+    app: FastAPI, raw: bytes, token: str | None = None, **headers: str
+) -> httpx.Response:
+    all_headers = dict(JSON_HEADERS)
     if token is not None:
-        headers["authorization"] = f"Bearer {token}"
+        all_headers["authorization"] = f"Bearer {token}"
+    all_headers.update(headers)
     async with as_client(app) as client:
-        return await client.post("/v1/chat/completions", content=raw, headers=headers)
+        return await client.post("/v1/chat/completions", content=raw, headers=all_headers)
+
+
+# --------------------------------------------------------------- the pin header ---
+
+
+async def test_a_pinned_request_is_not_rewritten_in_active_mode(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet, sent: list[dict[str, Any]]
+) -> None:
+    """The caller named the model; a hard step is the caller's to know about.
+
+    Active mode switches this exact body, so a request that stays is the pin
+    working, not the router declining to fire.
+    """
+    app = build_app(upstream, store, sheet, capabilities=registry(cheap_with_tools()))
+
+    response = await post(app, body_of(STRONG), **{proxy.PIN_HEADER: "1"})
+
+    assert response.status_code == 200
+    assert [body["model"] for body in sent] == [STRONG], "the pin must win"
+    assert store.last["model_used"] == STRONG
+    assert store.last["decision"].action == "STAY"
+    assert "pinned by client" in store.last["decision"].reason
+    assert proxy.PIN_HEADER in store.last["decision"].reason or STRONG in (
+        store.last["decision"].reason
+    )
+
+
+async def test_the_pin_header_is_not_forwarded_upstream(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet, sent: list[dict[str, Any]]
+) -> None:
+    """A tamias control header must stop here, like the session header."""
+    app = build_app(upstream, store, sheet, capabilities=registry(cheap_with_tools()))
+    seen: list[str] = []
+
+    @upstream.middleware("http")
+    async def capture(request: Request, call_next: Any) -> Response:  # noqa: ANN001
+        seen.extend(
+            sorted(
+                name
+                for name in request.headers
+                if name.startswith("x-tamias-")
+            )
+        )
+        return await call_next(request)
+
+    await post(app, body_of(STRONG), **{proxy.PIN_HEADER: "yes"})
+
+    assert proxy.PIN_HEADER not in seen
+
+
+async def test_an_unrecognised_pin_value_is_ignored(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet, sent: list[dict[str, Any]]
+) -> None:
+    app = build_app(upstream, store, sheet, capabilities=registry(cheap_with_tools()))
+
+    await post(app, body_of(STRONG), **{proxy.PIN_HEADER: "maybe"})
+
+    assert [body["model"] for body in sent] == [CHEAP], "a stray value must not pin"
 
 
 # ------------------------------------------------------- applied_target (pure) ---

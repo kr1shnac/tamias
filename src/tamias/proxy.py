@@ -57,7 +57,7 @@ import os
 import re
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -144,8 +144,29 @@ HOP_BY_HOP = frozenset(
 # client that honours `content-encoding: gzip` then gunzips plain text and
 # fails the read, which surfaces as a connection error rather than a 502.
 DECODED_BODY_HEADERS = frozenset({"content-encoding"})
-DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", SESSION_HEADER}
 PROJECT_HEADER = "x-tamias-project"
+#: A client's "leave this request alone" signal.  Active routing is opt-in and
+#: bounded by three gates, but it still rewrites a model the *caller* named;
+#: a caller that knows the step is a hard one must be able to say so without
+#: turning the router off.  It is per-request and tamias-local: it is dropped
+#: before the upstream request is sent, exactly like the session header.
+PIN_HEADER = "x-tamias-pin"
+
+#: What counts as "yes".  Anything else is ignored, so a stray
+#: ``x-tamias-pin: maybe`` can never silently disable routing.
+PIN_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {
+    "accept-encoding",
+    SESSION_HEADER,
+    PIN_HEADER,
+}
+
+
+def pin_requested(headers: Mapping[str, str]) -> bool:
+    """Does the client ask for this request to stay on the model it named?"""
+    value = headers.get(PIN_HEADER, "")
+    return value.strip().lower() in PIN_TRUE_VALUES
 
 PASSTHROUGH_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # The count-only passthrough row still needs a non-NULL model (the log's schema
@@ -1062,6 +1083,7 @@ def create_app(
         body: dict[str, Any],
         model: str,
         *,
+        pinned: bool = False,
         ranked: tuple[str, ...] | None = None,
         limited: tuple[str, ...] = (),
         qualities: dict[str, float] | None = None,
@@ -1072,10 +1094,22 @@ def create_app(
         The decision is always recorded, whatever the mode.  In shadow mode it is
         marked ``persisted_only`` so that nothing downstream can mistake a
         recorded SWITCH for one that was acted on.
+
+        A client that names ``x-tamias-pin`` keeps the model it asked for: the
+        decision is ``STAY`` with a reason that says why, in every mode including
+        ``active``.  The router never sees the request, so no quality floor, cache
+        or hysteresis argument can override the caller -- a pin is a statement
+        about the step, and only the caller knows about the step.
         """
         record = table.get_or_create(session_id, model)
         if router_mode == "off":
             decision = Decision(action="STAY", target_model=None, reason="router disabled")
+        elif pinned:
+            decision = Decision(
+                action="STAY",
+                target_model=None,
+                reason=f"pinned by client: kept {model}",
+            )
         else:
             decision = router.decide(
                 body,
@@ -1525,7 +1559,13 @@ def create_app(
         # decision comes before the budget gate so the gate can price and cap
         # the model that will actually run; planning has no lasting side effect
         # for a request the gate then refuses.
-        decision = plan(session_id, body, model_requested, **route_context(body, model_requested))
+        decision = plan(
+            session_id,
+            body,
+            model_requested,
+            pinned=pin_requested(dict(request.headers.items())),
+            **route_context(body, model_requested),
+        )
         routed_model = router.applied_target(
             decision,
             requested=model_requested,

@@ -170,6 +170,32 @@ Any other value raises `ValueError` at construction time. All shared rules
 (user turn, error markers, min-gap, hysteresis, edit tools staying put) hold
 under both profiles.
 
+## Overriding the router for one request
+
+A caller that knows a step is hard can keep the model it named, without turning
+routing off for anything else. Send the `x-tamias-pin` header:
+
+```sh
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'x-tamias-pin: 1' \
+  -d '{"model": "deepseek/deepseek-v4.1-flash", "messages": [...]}'
+```
+
+- `1`, `true`, `yes` or `on` pin the request. Anything else — including a missing
+  header — routes normally, so a stray value can never disable routing by
+  accident.
+- The decision is logged `STAY` with reason `pinned by client: kept <model>`,
+  in **every** mode, `active` included. The router never sees the request, so
+  no quality floor, cache or hysteresis rule can override the caller.
+- It is per-request and local: the header is dropped before the upstream request
+  is sent, like `x-tamias-session`, so a provider never sees it.
+
+A pin is a statement about the step, and only the caller knows about the step.
+It costs money honestly — no saving is claimed for a request that was not
+rewritten, which is exactly what `tamias report` prices by comparing the
+requested and used models.
+
 ## TOML configuration
 
 `tamias.router_config.load_router_config(path)` reads a TOML file into a

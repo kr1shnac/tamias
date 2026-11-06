@@ -22,12 +22,16 @@ bar says what it actually measured, and CI now fails when the TUI breaks.
   `tsconfig.json` is load-bearing: without `jsxImportSource: @opentui/solid`
   the host's Bun loader tries React's JSX runtime and the import fails.
 
-### Fixed
+### Added
 
-- **OpenCode config backups are owner-only.** `opencode setup` now writes the
-  `.bak` file mode `0600` and warns that it may still contain provider
-  credentials. Previously it copied the original mode, so a `0644` config
-  left a world-readable second copy of any key.
+- **`x-tamias-pin` keeps the model the caller named.** Active routing rewrites
+  a model the client chose, and a caller that knows a step is hard had no way to
+  say so without turning the router off. Send `x-tamias-pin: 1` (or
+  `true`/`yes`/`on`) and the request is logged `STAY` with
+  `pinned by client: kept <model>`, in every mode. Unrecognised values are
+  ignored, so a stray header cannot disable routing by accident, and the header
+  is dropped before the upstream request is sent.
+
 - **The plugin gate is real.** CI runs `bun install --frozen-lockfile`,
   `tsc --noEmit`, and the 48-check host harness. The stale `package-lock.json`
   was replaced with `bun.lock`; `npm ci` could not install it.
