@@ -20,6 +20,24 @@ jobs:
       - run: python -m pytest -q
       - run: ruff check src tests scripts examples
 
+  plugin:
+    # The TUI pop-up is TypeScript with its own host-contract harness.  Without
+    # this job the Python gate stays green while /tamias stops rendering.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tamias-opencode-plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+      # The harness needs Bun's runtime (`bun:sqlite`, `Bun.serve`), and
+      # @opentui/core requires Bun anyway; one lockfile, one package manager.
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun scripts/verify.ts
+
   package:
     runs-on: ubuntu-latest
     steps:
