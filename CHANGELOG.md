@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-11-06
+
+A packaging and honesty pass: the pop-up travels with the wheel, its savings
+bar says what it actually measured, and CI now fails when the TUI breaks.
+
+### Changed
+
+- **The pop-up bar says `realised`, not `saved`.** It counts only rows the
+  proxy actually rewrote. In shadow mode it stays at zero and the header adds
+  `· shadow`; the hypothetical estimate for shadow decisions remains in
+  `tamias report` / `/tamias-report`. The two numbers were easy to confuse.
+- **`pip install tamias` now carries the OpenCode pop-up.** The wheel and sdist
+  ship `tui.tsx`, `src/` and `tsconfig.json` as `tamias/plugin/`; setup
+  registers that copy, so no source checkout or `--plugin` is required. The
+  `tsconfig.json` is load-bearing: without `jsxImportSource: @opentui/solid`
+  the host's Bun loader tries React's JSX runtime and the import fails.
+
+### Fixed
+
+- **OpenCode config backups are owner-only.** `opencode setup` now writes the
+  `.bak` file mode `0600` and warns that it may still contain provider
+  credentials. Previously it copied the original mode, so a `0644` config
+  left a world-readable second copy of any key.
+- **The plugin gate is real.** CI runs `bun install --frozen-lockfile`,
+  `tsc --noEmit`, and the 48-check host harness. The stale `package-lock.json`
+  was replaced with `bun.lock`; `npm ci` could not install it.
+- **Packaged plugin imports and renders.** A clean-venv wheel install now
+  passes the full harness from `site-packages/tamias/plugin`.
+
 ## [1.0.1] - 2026-11-05
 
 A correctness and experience pass over the 1.0.0 routing release.

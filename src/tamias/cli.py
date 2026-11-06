@@ -1693,6 +1693,12 @@ def _plugin_directory(explicit: str | None) -> Path | None:
     if candidate:
         path = Path(candidate).expanduser()
         return path if path.is_dir() else None
+    # A wheel install carries the pop-up inside the package.  This is checked
+    # before the checkout search because an editable install has no
+    # ``tamias/plugin`` and must keep using the sibling directory.
+    packaged = Path(__file__).resolve().parent / "plugin"
+    if (packaged / "tui.tsx").is_file():
+        return packaged
     # Running from a source checkout: the plugin sits next to pyproject.toml.
     for parent in Path(__file__).resolve().parents:
         sibling = parent / "tamias-opencode-plugin"

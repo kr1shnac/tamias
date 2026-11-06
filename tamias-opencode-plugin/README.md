@@ -56,7 +56,8 @@ numbers answer different questions and are labelled accordingly.
 
 `tamias opencode setup` registers this directory in `~/.config/opencode/cli.json`
 when it can find it: pass `--plugin /absolute/path/to/tamias-opencode-plugin`,
-set `$TAMIAS_PLUGIN_DIR`, or run setup from a source checkout. To do it by hand:
+set `$TAMIAS_PLUGIN_DIR`, or let it find the copy bundled in the installed
+package (a source checkout registers the sibling directory). To do it by hand:
 
 ```json
 {
@@ -68,8 +69,9 @@ Restart OpenCode, then run `/tamias` from any session — or from no session at
 all. The plugin is TUI-only: the package has no `exports` field, so the host
 probes root file names, finds `tui.tsx`, and loads no `server`/`index` part.
 
-The plugin is not published to npm. A `pip install tamias` does not carry it;
-the source checkout does, and `bun install` in this directory is only needed for
+The plugin is not published to npm, but `pip install tamias` does carry it: the
+wheel ships the TSX source plus its `tsconfig.json` under `tamias/plugin`, and
+setup registers that copy. `bun install` in this directory is only needed for
 type-checking and the verify harness, not for OpenCode to load the pop-up.
 
 `tamias opencode install` writes the report command. With the plugin present it

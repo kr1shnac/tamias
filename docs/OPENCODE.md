@@ -306,9 +306,11 @@ For the pop-up, register `tamias-opencode-plugin` in the TUI settings
 ```
 
 `tamias opencode setup` adds that entry when it can find the plugin — from
-`--plugin DIR`, `$TAMIAS_PLUGIN_DIR`, or the source checkout that contains the
-Python package. The plugin is not on npm, so a `pip install tamias` alone does
-not carry it; a source checkout does.
+`--plugin DIR`, `$TAMIAS_PLUGIN_DIR`, or the copy bundled inside the installed
+package (`tamias/plugin`, present in both the wheel and a source checkout). The
+plugin is not on npm; `pip install tamias` carries the TypeScript source and
+setup registers it, so there is no separate install step. A checkout is only
+needed to develop the plugin.
 
 `/tamias` opens a `large`, centred dialog over the conversation. It shows eight
 lines: the live/log-only indicator, one savings bar, the request/switch/free

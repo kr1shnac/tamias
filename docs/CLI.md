@@ -239,8 +239,9 @@ keeping every other key, and copies the original to
 the config it copies may already hold provider credentials; the command names
 it and says to delete it once the new config is confirmed. When the TUI plugin
 can be found — a
-`--plugin` path, `$TAMIAS_PLUGIN_DIR`, or the source checkout beside the package
-— it is appended to `plugins` in `cli.json`, once, and `/tamias` opens the
+`--plugin` path, `$TAMIAS_PLUGIN_DIR`, or the copy bundled at `tamias/plugin`
+inside the installed package — it is appended to `plugins` in `cli.json`, once,
+and `/tamias` opens the
 pop-up while `/tamias-report` runs the report.
 
 OpenCode's config is JSONC; rewriting it needs plain JSON, so `//` and `/* */`

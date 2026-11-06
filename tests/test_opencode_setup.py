@@ -118,6 +118,48 @@ def test_a_dry_run_writes_nothing(
     assert "would write" in capsys.readouterr().out
 
 
+def test_plugin_directory_prefers_the_copy_inside_the_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wheel has no source checkout beside it; the bundled copy must win.
+
+    `pip install tamias` puts the pop-up at ``tamias/plugin`` inside
+    site-packages.  If lookup only walked parent directories it would find the
+    interpreter's own tree, not the plugin, and setup would quietly skip it.
+    """
+    module = tmp_path / "site-packages" / "tamias"
+    (module / "plugin" / "src").mkdir(parents=True)
+    (module / "plugin" / "tui.tsx").write_text("export default {}\n", encoding="utf-8")
+    monkeypatch.delenv("TAMIAS_PLUGIN_DIR", raising=False)
+    monkeypatch.setattr(cli, "__file__", str(module / "cli.py"))
+
+    assert cli._plugin_directory(None) == module / "plugin"
+
+
+def test_an_explicit_plugin_path_beats_the_bundled_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = tmp_path / "site-packages" / "tamias"
+    (module / "plugin").mkdir(parents=True)
+    (module / "plugin" / "tui.tsx").write_text("export default {}\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "__file__", str(module / "cli.py"))
+    chosen = tmp_path / "elsewhere"
+    chosen.mkdir()
+
+    assert cli._plugin_directory(str(chosen)) == chosen
+
+
+def test_plugin_directory_is_none_when_no_copy_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = tmp_path / "site-packages" / "tamias"
+    module.mkdir(parents=True)
+    monkeypatch.delenv("TAMIAS_PLUGIN_DIR", raising=False)
+    monkeypatch.setattr(cli, "__file__", str(module / "cli.py"))
+
+    assert cli._plugin_directory(None) is None
+
+
 def test_setup_registers_the_plugin_in_the_tui_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

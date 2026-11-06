@@ -58,6 +58,16 @@ jobs:
           names = zipfile.ZipFile(wheel).namelist()
           assert all(name.startswith("tamias/") or ".dist-info/" in name for name in names)
           assert not any(name.startswith(("agent", "tui", "demo")) for name in names)
+          # `pip install tamias` must carry the pop-up; without these files
+          # `tamias opencode setup` silently skips plugin registration.
+          required = {
+              "tamias/plugin/tui.tsx",
+              "tamias/plugin/package.json",
+              "tamias/plugin/src/views/TamiasPopup.tsx",
+              "tamias/plugin/tsconfig.json",
+          }
+          missing = sorted(required - set(names))
+          assert not missing, "wheel is missing the plugin: " + ", ".join(missing)
           PY
       - name: Audit sdist contents
         # The sdist is a public download; it must carry only the package and the
@@ -73,6 +83,12 @@ jobs:
               names = [member.name.split("/", 1)[-1] for member in archive.getmembers()]
           allowed_prefixes = (
               "src/tamias/",
+              # `python -m build` builds the wheel from the sdist, so the pop-up
+              # source has to travel through it.
+              "tamias-opencode-plugin/tui.tsx",
+              "tamias-opencode-plugin/src/",
+              "tamias-opencode-plugin/package.json",
+              "tamias-opencode-plugin/tsconfig.json",
               "LICENSE",
               "README.md",
               "CHANGELOG.md",
