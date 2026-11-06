@@ -184,7 +184,8 @@ def test_a_bundled_copy_without_peers_is_installed_with_bun(
     plugin = _bundled_plugin(tmp_path)
     monkeypatch.setattr(cli, "__file__", str(plugin.parent / "cli.py"))
     monkeypatch.delenv("TAMIAS_PLUGIN_DIR", raising=False)
-    monkeypatch.setattr(cli, "PLUGIN_INSTALL_DIR", tmp_path / "data" / "plugin")
+    monkeypatch.setenv(cli.PLUGIN_ENV_HOME, str(tmp_path / "data"))
+    install = tmp_path / "data" / "plugin"
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/bun")
     calls: list[list[str]] = []
 
@@ -195,7 +196,7 @@ def test_a_bundled_copy_without_peers_is_installed_with_bun(
 
     def fake_run(command, **kwargs):  # noqa: ANN001 - subprocess shape
         calls.append(list(command))
-        (cli.PLUGIN_INSTALL_DIR / "node_modules" / cli.PLUGIN_RUNTIME_PEER).mkdir(
+        (install / "node_modules" / cli.PLUGIN_RUNTIME_PEER).mkdir(
             parents=True, exist_ok=True
         )
         return Done()
@@ -205,7 +206,7 @@ def test_a_bundled_copy_without_peers_is_installed_with_bun(
     resolved, note = cli._prepare_plugin(None)
 
     assert note is None
-    assert resolved == cli.PLUGIN_INSTALL_DIR
+    assert resolved == install
     assert (resolved / "tui.tsx").is_file(), "the plugin source must be copied"
     assert (resolved / "package.json").is_file()
     assert calls and calls[0][0] == "bun" and calls[0][1] == "install"
@@ -217,14 +218,15 @@ def test_a_bundled_copy_without_bun_says_so_and_registers_nothing(
     plugin = _bundled_plugin(tmp_path)
     monkeypatch.setattr(cli, "__file__", str(plugin.parent / "cli.py"))
     monkeypatch.delenv("TAMIAS_PLUGIN_DIR", raising=False)
-    monkeypatch.setattr(cli, "PLUGIN_INSTALL_DIR", tmp_path / "data" / "plugin")
+    monkeypatch.setenv(cli.PLUGIN_ENV_HOME, str(tmp_path / "data"))
+    install = tmp_path / "data" / "plugin"
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
 
     resolved, note = cli._prepare_plugin(None)
 
     assert resolved is None
     assert "Bun" in note
-    assert not cli.PLUGIN_INSTALL_DIR.exists(), "no half-installed plugin"
+    assert not install.exists(), "no half-installed plugin"
 
 
 def test_a_directory_that_already_has_peers_is_used_as_is(

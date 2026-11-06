@@ -1723,7 +1723,8 @@ PLUGIN_RUNTIME_PEER = "solid-js"
 
 #: Installed plugin lives under ``~/.tamias/plugin`` unless the operator moves
 #: the data dir.  It is ours to rewrite; a checkout beside the package is not.
-PLUGIN_INSTALL_DIR = Path.home() / ".tamias" / "plugin"
+#: ``TAMIAS_HOME`` is the same switch the plugin reads for its own paths.
+PLUGIN_ENV_HOME = "TAMIAS_HOME"
 
 #: Files copied from the bundled package into the install dir.  Everything the
 #: host needs at runtime: no harness, no lockfile, no node_modules.
@@ -1736,6 +1737,13 @@ PLUGIN_INSTALL_TIMEOUT = 600.0
 
 def _bun_available() -> bool:
     return shutil.which("bun") is not None
+
+
+def _plugin_install_dir() -> Path:
+    """Where ``setup`` stages the bundled plugin, under the data dir."""
+    home = os.environ.get(PLUGIN_ENV_HOME)
+    base = Path(home).expanduser() if home else Path.home() / ".tamias"
+    return base / "plugin"
 
 
 def _install_bundled_plugin() -> tuple[Path | None, str | None]:
@@ -1754,7 +1762,7 @@ def _install_bundled_plugin() -> tuple[Path | None, str | None]:
             "(https://bun.sh) and re-run this command, then re-run "
             "`tamias opencode setup`"
         )
-    target = PLUGIN_INSTALL_DIR
+    target = _plugin_install_dir()
     try:
         if target.exists():
             shutil.rmtree(target)
@@ -1918,7 +1926,7 @@ def opencode_setup(args: argparse.Namespace) -> int:
         )
     else:
         print(f"registered plugin {plugin} in {cli_path}")
-        if plugin_note is None and plugin == PLUGIN_INSTALL_DIR:
+        if plugin_note is None and plugin == _plugin_install_dir():
             print(
                 f"installed the plugin's runtime dependencies under {plugin} "
                 "with Bun",
