@@ -308,9 +308,18 @@ For the pop-up, register `tamias-opencode-plugin` in the TUI settings
 `tamias opencode setup` adds that entry when it can find the plugin — from
 `--plugin DIR`, `$TAMIAS_PLUGIN_DIR`, or the copy bundled inside the installed
 package (`tamias/plugin`, present in both the wheel and a source checkout). The
-plugin is not on npm; `pip install tamias` carries the TypeScript source and
-setup registers it, so there is no separate install step. A checkout is only
-needed to develop the plugin.
+plugin is not on npm; `pip install tamias` carries the TypeScript source. A
+checkout is only needed to develop the plugin.
+
+The host resolves a plugin's imports **next to the plugin directory**, so the
+bundled copy needs its peers (`solid-js`, `@opentui/core`, `@opentui/solid`)
+installed beside it; without them OpenCode 2.2.5 refuses the plugin with
+`Cannot find package 'solid-js'` and shows `1 plugin failed`. `setup` therefore
+copies the bundled plugin to `~/.tamias/plugin`, runs `bun install` there, and
+registers *that* path. It needs Bun on `PATH`; without it, setup says so and
+registers nothing rather than leaving a broken entry behind. A source checkout
+that already has `node_modules` (from `bun install`) is registered as-is and
+rewritten by nothing.
 
 `/tamias` opens a `large`, centred dialog over the conversation. It shows eight
 lines: the live/log-only indicator, one savings bar, the request/switch/free

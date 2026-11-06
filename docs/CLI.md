@@ -244,6 +244,13 @@ inside the installed package — it is appended to `plugins` in `cli.json`, once
 and `/tamias` opens the
 pop-up while `/tamias-report` runs the report.
 
+The bundled copy ships no `node_modules`, and OpenCode resolves a plugin's
+imports beside its directory, so `setup` stages the bundle at `~/.tamias/plugin`
+and runs `bun install` there before registering it. Bun must be on `PATH`;
+otherwise setup prints how to install it and registers nothing. An explicit
+`--plugin` directory is honoured even without its peers, with a warning naming
+the `bun install` that fixes it.
+
 OpenCode's config is JSONC; rewriting it needs plain JSON, so `//` and `/* */`
 comments and trailing commas are dropped. When any comment was present the
 command says so and names the backup. `--dry-run` prints both documents and

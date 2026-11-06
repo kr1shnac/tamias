@@ -1708,6 +1708,113 @@ def _plugin_directory(explicit: str | None) -> Path | None:
     return None
 
 
+#: The runtime peers the host must be able to resolve *next to the plugin
+#: directory*.  The wheel ships TypeScript only; OpenCode resolves a plugin's
+#: imports by walking up from the entrypoint, so ``site-packages/tamias/plugin``
+#: with no ``node_modules`` beside it fails with "Cannot find package
+#: 'solid-js'" and OpenCode reports the plugin as failed.  Verified against
+#: OpenCode 2.2.5 on a bare clean-venv install.
+#:
+#: There is no way around installing them: ``@opentui/*`` is not in OpenCode's
+#: own ``node_modules`` (only ``@opencode-ai/plugin`` is), and shipping ~9 MB of
+#: native and tree-sitter dependencies inside the wheel to save one command is
+#: a bad trade.
+PLUGIN_RUNTIME_PEER = "solid-js"
+
+#: Installed plugin lives under ``~/.tamias/plugin`` unless the operator moves
+#: the data dir.  It is ours to rewrite; a checkout beside the package is not.
+PLUGIN_INSTALL_DIR = Path.home() / ".tamias" / "plugin"
+
+#: Files copied from the bundled package into the install dir.  Everything the
+#: host needs at runtime: no harness, no lockfile, no node_modules.
+PLUGIN_INSTALL_FILES = ("tui.tsx", "package.json", "tsconfig.json", "src")
+
+#: A plugin helper may need the network; a developer's first install is slow,
+#: a hung one must not be.
+PLUGIN_INSTALL_TIMEOUT = 600.0
+
+
+def _bun_available() -> bool:
+    return shutil.which("bun") is not None
+
+
+def _install_bundled_plugin() -> tuple[Path | None, str | None]:
+    """Copy the bundled pop-up beside the data dir and install its peers.
+
+    Returns the ready directory, or ``None`` and why.  A failure is reported,
+    never papered over: registering a directory whose imports cannot resolve is
+    how a machine ends up with a permanent ``1 plugin failed`` toast.
+    """
+    packaged = Path(__file__).resolve().parent / "plugin"
+    if not _bun_available():
+        return None, (
+            "the bundled OpenCode plugin needs Bun to install its runtime "
+            "dependencies (solid-js, @opentui/core, @opentui/solid), which the "
+            "host resolves next to the plugin directory. Install Bun "
+            "(https://bun.sh) and re-run this command, then re-run "
+            "`tamias opencode setup`"
+        )
+    target = PLUGIN_INSTALL_DIR
+    try:
+        if target.exists():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.mkdir(parents=True, exist_ok=True)
+        for name in PLUGIN_INSTALL_FILES:
+            source = packaged / name
+            if not source.exists():
+                continue
+            destination = target / name
+            if source.is_dir():
+                shutil.copytree(source, destination)
+            else:
+                shutil.copy2(source, destination)
+    except OSError as exc:
+        return None, f"could not stage the plugin under {target}: {exc}"
+    try:
+        completed = subprocess.run(  # noqa: S603 - operator opted in
+            ["bun", "install", "--cwd", str(target)],
+            capture_output=True,
+            text=True,
+            timeout=PLUGIN_INSTALL_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"could not install the plugin dependencies with Bun: {exc}"
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        return None, "bun install failed: " + (detail[-1] if detail else "no output")
+    if not (target / "node_modules" / PLUGIN_RUNTIME_PEER).is_dir():
+        return None, f"bun install did not leave {PLUGIN_RUNTIME_PEER} beside the plugin"
+    return target, None
+
+
+def _prepare_plugin(explicit: str | None) -> tuple[Path | None, str | None]:
+    """Resolve the plugin directory, installing peers when it needs them.
+
+    Three sources, in order: an explicit ``--plugin``, the bundled wheel copy,
+    and the source checkout.  A directory that already has its peers beside it
+    is used as-is -- that is the developer checkout, and rewriting it is not
+    tamias's to do.  Only the bundled copy gets staged and installed, because
+    that one ships no ``node_modules`` of its own.
+    """
+    path = _plugin_directory(explicit)
+    if path is None:
+        return None, "the TUI plugin was not found"
+    if (path / "node_modules" / PLUGIN_RUNTIME_PEER).is_dir():
+        return path, None
+    packaged = Path(__file__).resolve().parent / "plugin"
+    if explicit is None and path == packaged:
+        return _install_bundled_plugin()
+    # An explicit path is the operator's choice: honour it, but say why the
+    # host will fail to load it.  A checkout is theirs to fix, not ours.
+    return path, (
+        f"{path} has no installed dependencies, so OpenCode will report the "
+        "plugin as failed (Cannot find package 'solid-js'). Run `bun install` "
+        "in that directory"
+    )
+
+
 def opencode_setup(args: argparse.Namespace) -> int:
     """Write the provider block and plugin entry OpenCode needs, with backups.
 
@@ -1744,7 +1851,9 @@ def opencode_setup(args: argparse.Namespace) -> int:
 
     block = json.loads(agent_config("opencode", args.port, None, models))
     document.setdefault("provider", {}).update(block["provider"])
-    plugin = _plugin_directory(args.plugin)
+    plugin, plugin_note = _prepare_plugin(args.plugin)
+    if plugin_note:
+        print(f"tamias opencode setup: {plugin_note}", file=sys.stderr)
     cli_path = _opencode_cli_path()
     cli_document: dict[str, Any] = {}
     if plugin is not None:
@@ -1803,12 +1912,18 @@ def opencode_setup(args: argparse.Namespace) -> int:
         )
     if plugin is None:
         print(
-            "plugin not found: pass --plugin /path/to/tamias-opencode-plugin to "
-            "add the live pop-up",
+            "plugin not registered: /tamias will not open the pop-up on this "
+            "machine (see the note above)",
             file=sys.stderr,
         )
     else:
         print(f"registered plugin {plugin} in {cli_path}")
+        if plugin_note is None and plugin == PLUGIN_INSTALL_DIR:
+            print(
+                f"installed the plugin's runtime dependencies under {plugin} "
+                "with Bun",
+                file=sys.stderr,
+            )
         legacy = _opencode_commands_dir(None) / "tamias.md"
         if legacy.exists():
             print(
@@ -1942,7 +2057,9 @@ def opencode_install(args: argparse.Namespace) -> int:
     # and which one OpenCode runs is not a contract.  Keep the report command
     # under `/tamias-report` in that case; a standalone install without the
     # plugin still gets the familiar `/tamias`.
-    plugin = _plugin_directory(getattr(args, "plugin", None))
+    plugin, plugin_note = _prepare_plugin(getattr(args, "plugin", None))
+    if plugin_note:
+        print(f"tamias opencode install: {plugin_note}", file=sys.stderr)
     command_name = "tamias-report" if plugin is not None else "tamias"
     target = _opencode_commands_dir(args.project) / f"{command_name}.md"
     if target.exists() and not args.force:

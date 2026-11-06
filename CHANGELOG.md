@@ -38,6 +38,16 @@ bar says what it actually measured, and CI now fails when the TUI breaks.
   silently unconfigured under it. The command now reads the catalogue and prints
   the variables (and the `api_key_command` alternative) on stderr.
 
+- **A `pip install tamias` pop-up now actually loads.** The wheel shipped the
+  TypeScript only, and OpenCode resolves a plugin's imports *beside* the plugin
+  directory — so a clean install registered `site-packages/tamias/plugin`, which
+  has no `node_modules`, and OpenCode refused it with `Cannot find package
+  'solid-js'` and a permanent `1 plugin failed` toast. `opencode setup` now
+  stages the bundle at `~/.tamias/plugin`, runs `bun install` there and
+  registers that path. Verified in a real OpenCode 2.2.5 TUI against a clean
+  venv with no source checkout reachable. Bun must be on `PATH`; without it
+  setup says so instead of writing a broken registration.
+
 ### Docs
 
 - **The credential-bridge contract is written down.** What a helper must print

@@ -160,6 +160,101 @@ def test_plugin_directory_is_none_when_no_copy_exists(
     assert cli._plugin_directory(None) is None
 
 
+def _bundled_plugin(tmp_path: Path) -> Path:
+    module = tmp_path / "site-packages" / "tamias"
+    plugin = module / "plugin"
+    (plugin / "src").mkdir(parents=True)
+    (plugin / "tui.tsx").write_text("export default {}\n", encoding="utf-8")
+    (plugin / "package.json").write_text('{"name":"tamias-opencode-plugin"}')
+    (plugin / "tsconfig.json").write_text("{}")
+    (plugin / "src" / "index.ts").write_text("export const x = 1\n")
+    return plugin
+
+
+def test_a_bundled_copy_without_peers_is_installed_with_bun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pip install tamias` ships TSX only; the host resolves peers beside it.
+
+    OpenCode 2.2.5 refuses a plugin directory with no `node_modules` next to it
+    ("Cannot find package 'solid-js'"), so registering the wheel copy as-is
+    leaves a permanent `1 plugin failed` toast.  Setup must install the peers
+    into a directory tamias owns and register that instead.
+    """
+    plugin = _bundled_plugin(tmp_path)
+    monkeypatch.setattr(cli, "__file__", str(plugin.parent / "cli.py"))
+    monkeypatch.delenv("TAMIAS_PLUGIN_DIR", raising=False)
+    monkeypatch.setattr(cli, "PLUGIN_INSTALL_DIR", tmp_path / "data" / "plugin")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/bun")
+    calls: list[list[str]] = []
+
+    class Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **kwargs):  # noqa: ANN001 - subprocess shape
+        calls.append(list(command))
+        (cli.PLUGIN_INSTALL_DIR / "node_modules" / cli.PLUGIN_RUNTIME_PEER).mkdir(
+            parents=True, exist_ok=True
+        )
+        return Done()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    resolved, note = cli._prepare_plugin(None)
+
+    assert note is None
+    assert resolved == cli.PLUGIN_INSTALL_DIR
+    assert (resolved / "tui.tsx").is_file(), "the plugin source must be copied"
+    assert (resolved / "package.json").is_file()
+    assert calls and calls[0][0] == "bun" and calls[0][1] == "install"
+
+
+def test_a_bundled_copy_without_bun_says_so_and_registers_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin = _bundled_plugin(tmp_path)
+    monkeypatch.setattr(cli, "__file__", str(plugin.parent / "cli.py"))
+    monkeypatch.delenv("TAMIAS_PLUGIN_DIR", raising=False)
+    monkeypatch.setattr(cli, "PLUGIN_INSTALL_DIR", tmp_path / "data" / "plugin")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+
+    resolved, note = cli._prepare_plugin(None)
+
+    assert resolved is None
+    assert "Bun" in note
+    assert not cli.PLUGIN_INSTALL_DIR.exists(), "no half-installed plugin"
+
+
+def test_a_directory_that_already_has_peers_is_used_as_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin = _bundled_plugin(tmp_path)
+    (plugin / "node_modules" / cli.PLUGIN_RUNTIME_PEER).mkdir(parents=True)
+    monkeypatch.setattr(cli, "__file__", str(plugin.parent / "cli.py"))
+    monkeypatch.delenv("TAMIAS_PLUGIN_DIR", raising=False)
+
+    resolved, note = cli._prepare_plugin(None)
+
+    assert resolved == plugin
+    assert note is None
+
+
+def test_an_explicit_plugin_without_peers_is_still_registered_but_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chosen = tmp_path / "tamias-opencode-plugin"
+    chosen.mkdir()
+    (chosen / "tui.tsx").write_text("export default {}\n", encoding="utf-8")
+    monkeypatch.delenv("TAMIAS_PLUGIN_DIR", raising=False)
+
+    resolved, note = cli._prepare_plugin(str(chosen))
+
+    assert resolved == chosen, "the operator named it; honour it"
+    assert "bun install" in note
+
+
 def test_setup_registers_the_plugin_in_the_tui_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
