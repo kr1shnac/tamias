@@ -242,6 +242,18 @@ export function priceRow(raw: RawRow, sheet: PriceSheet | null): TamiasRow {
   };
 }
 
+/**
+ * The router mode recorded on the newest row.
+ *
+ * A log can span a mode change, so the header names the mode in force now
+ * instead of claiming one for the whole window.  `null` means the newest row
+ * carries no recognised mode (an old schema, an empty log, or `off`).
+ */
+export function windowMode(rows: readonly TamiasRow[]): "active" | "shadow" | null {
+  const mode = rows[0]?.router_mode;
+  return mode === "active" || mode === "shadow" ? mode : null;
+}
+
 export function summarizeRows(rows: readonly TamiasRow[]): TamiasSummary {
   const priced = rows.filter((row) => row.priced);
   const actual_total = priced.reduce((sum, row) => sum + (row.actual ?? 0), 0);

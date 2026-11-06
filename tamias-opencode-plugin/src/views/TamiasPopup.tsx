@@ -25,7 +25,12 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { KpiStrip, Notice, SavingsBar } from "../components/Summary";
 import { useLimits } from "../hooks/useLimits";
-import { summarizeRows, useTamiasData, type TamiasRow } from "../hooks/useTamiasData";
+import {
+  summarizeRows,
+  useTamiasData,
+  windowMode,
+  type TamiasRow,
+} from "../hooks/useTamiasData";
 import { useRendererSize, type RendererLike } from "../hooks/useRendererSize";
 import { ThemeProvider, usePalette } from "../ui/theme";
 import { clip, count, duration, shortModel } from "../utils/format";
@@ -64,6 +69,12 @@ function PopupBody(props: Pick<TamiasPopupProps, "renderer">) {
   const width = createMemo(() => Math.max(36, Math.min(76, size.width() - 12)));
 
   const headerRight = () => (limits.live() ? "● live" : "○ log only");
+  // Shadow mode rewrites nothing, so a zero savings bar is the honest answer,
+  // not a failure.  Naming the mode beside "all recent" explains the zero
+  // without pretending the counterfactual was earned.
+  const modeLabel = createMemo(() =>
+    windowMode(data.rows()) === "shadow" ? " · shadow" : "",
+  );
 
   const latestLine = createMemo(() => {
     const row = latest();
@@ -162,7 +173,7 @@ function PopupBody(props: Pick<TamiasPopupProps, "renderer">) {
     >
       <box flexDirection="row" width="100%">
         <text wrapMode="none" fg={palette().accent}>tamias</text>
-        <text wrapMode="none" fg={palette().muted}> · all recent</text>
+        <text wrapMode="none" fg={palette().muted}> · all recent{modeLabel()}</text>
         <box flexGrow={1} minWidth={0} />
         <text wrapMode="none" fg={limits.live() ? palette().good : palette().faint}>
           {headerRight()}

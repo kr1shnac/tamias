@@ -313,10 +313,13 @@ not carry it; a source checkout does.
 `/tamias` opens a `large`, centred dialog over the conversation. It shows eight
 lines: the live/log-only indicator, one savings bar, the request/switch/free
 counts, the latest route and its reason, the eligible pool with refused gates,
-any cooling model, and a footer. `esc` closes it; the first open in a process
-shows a one-line hint. It is not a full-screen route, and it needs no session
-context — the same pop-up works before the first chat turn. The plugin is
-TUI-only: the report command works without it.
+any cooling model, and a footer. The savings bar is **realised**: it counts
+only rows the proxy actually rewrote. In shadow mode nothing is rewritten, so
+the bar stays at zero and the header says `· shadow`; the hypothetical estimate
+lives in `/tamias-report`. `esc` closes it; the first open in a process shows a
+one-line hint. It is not a full-screen route, and it needs no session context —
+the same pop-up works before the first chat turn. The plugin is TUI-only: the
+report command works without it.
 
 ## 6. Run it in the background
 

@@ -70,9 +70,12 @@ export function SavingsBar(props: SavingsBarProps) {
     if (value === null) return "savings unknown";
     const estimate = summary.estimated ? " (est.)" : "";
     if (value < 0) {
-      return `cost ${money(-summary.saved_total)} over baseline · ${percent(Math.abs(value))}${estimate}`;
+      return `realised cost ${money(-summary.saved_total)} over baseline · ${percent(Math.abs(value))}${estimate}`;
     }
-    return `${percent(value)} saved · ${money(summary.saved_total)} of ${money(summary.baseline_total)} baseline${estimate}`;
+    // "realised", not "saved": this bar counts rows the proxy actually
+    // rewrote.  `tamias report` also prices shadow/declined decisions, and
+    // those hypothetical savings must not look like money already kept.
+    return `${percent(value)} realised · ${money(summary.saved_total)} of ${money(summary.baseline_total)} baseline${estimate}`;
   };
 
   const empty = () => props.summary.n_priced === 0 || props.summary.n_requests === 0;

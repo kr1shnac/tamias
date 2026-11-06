@@ -675,7 +675,14 @@ try {
   step("the latest route names both requested and used models", frame.includes("latest") && frame.includes("paid-two") && frame.includes("free-one"));
   step("the latest route says what the router decided", frame.includes("SWITCH") && frame.includes("cheaper capable model"));
   step("the latest route marks a free model", frame.includes("● free"));
-  step("the savings bar prices the switch as an estimate", frame.includes("$2.10") && frame.includes("baseline") && frame.includes("(est.)"));
+  step(
+    "the savings bar reports realised savings as an estimate",
+    frame.includes("realised") &&
+      frame.includes("$2.10") &&
+      frame.includes("baseline") &&
+      frame.includes("(est.)"),
+  );
+  step("an active window is not labelled shadow", !frame.includes("all recent · shadow"));
   step("the KPI line counts requests and switches", frame.includes("6 req") && frame.includes("switched"));
   step("the pool line shows capable models and refused gates", frame.includes("3/5 capable") && frame.includes("2 health"));
   step("the pool line names a provider without a key", frame.includes("no key: nvidia"));
@@ -733,6 +740,36 @@ const sheet = parsePriceSheet(readFileSync(PRICES_PATH, "utf-8"));
 step("a zero-rated model is free", tierFor("acme/free-one", sheet) === "free");
 step("a positive-rated model is paid", tierFor("acme/paid-two", sheet) === "paid");
 step("an unquoted model is unknown, not free", tierFor("acme/missing", sheet) === "unknown");
+
+const { priceRow, windowMode } = await import("../src/hooks/useTamiasData");
+const shadowRow = priceRow(
+  {
+    id: 1,
+    ts: "2026-11-03T10:04:00+00:00",
+    session_id: "auto-dddddddddddd",
+    model_requested: "acme/paid-two",
+    model_used: "acme/paid-two",
+    input_tokens: 1_000_000,
+    output_tokens: 0,
+    cached_input_tokens: 0,
+    cache_write_tokens: 0,
+    status: "200",
+    decision_action: "SWITCH",
+    decision_target_model: "acme/free-one",
+    router_mode: "shadow",
+  },
+  sheet,
+);
+step(
+  "a shadow decision is not counted as an applied switch",
+  shadowRow.shadow && !shadowRow.switched && shadowRow.saved === 0,
+  `shadow=${shadowRow.shadow} switched=${shadowRow.switched} saved=${shadowRow.saved}`,
+);
+step(
+  "a shadow-only window is labelled shadow",
+  windowMode([shadowRow]) === "shadow",
+  String(windowMode([shadowRow])),
+);
 
 const overlayPath = path.join(TEMP, "unit.local.toml");
 writeFileSync(overlayPath, `["acme/overlay-only"]\ninput = 0.0\noutput = 0.0\n`);

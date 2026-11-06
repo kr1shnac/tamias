@@ -17,8 +17,8 @@ for one glance, and the log is still available through `tamias report` and
 
 | Line | What it answers |
 | --- | --- |
-| header | `● live` when `/limits` answered; `○ log only` when it did not |
-| savings bar | percent saved, dollars saved, baseline, and `(est.)` when any arm is an estimate |
+| header | `● live` when `/limits` answered, `○ log only` when it did not; `· shadow` when the newest row ran in shadow mode |
+| savings bar | percent **realised**, dollars realised, baseline, and `(est.)` when any arm is an estimate |
 | KPI line | requests, spent, applied switches, free share, failures, unpriced rows |
 | latest route | requested model → used model, free/paid/unknown glyph, decision |
 | reason | the router's own reason for that decision |
@@ -45,6 +45,12 @@ Free and paid stay visibly different: `●` is free, `$` is paid, `?` is unknown
 A model the price sheet does not quote is unknown, never free by assumption. A
 baseline for a model that was not run is marked `(est.)`; it is arithmetic over
 list prices, not a provider invoice.
+
+The bar counts only rows the proxy actually rewrote, which is why it says
+*realised*. In shadow mode nothing is rewritten, so it stays at zero and the
+header says `· shadow`; `tamias report` (and `/tamias-report`) is where the
+hypothetical `estimated saving` for shadow decisions is printed. The two
+numbers answer different questions and are labelled accordingly.
 
 ## Install
 
