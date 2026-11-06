@@ -75,6 +75,7 @@ from tamias.pricing_fetch import (
 from tamias.providers import (
     ProviderError,
     catalogue_from_registry,
+    default_providers_path,
     load_providers,
 )
 from tamias.registry import Registry, default_registry_path, load_registry
@@ -2118,6 +2119,54 @@ def render_service_unit(
     )
 
 
+def _service_env_warning(catalogue_path: str | None) -> str | None:
+    """One note about the provider keys the unit will need, or ``None``.
+
+    A ``systemd --user`` unit does not inherit a shell's environment, so a
+    provider that reads ``api_key_env`` is *unconfigured* under the unit even
+    though the same command works in a terminal -- the variable never arrives.
+    ``api_key_command`` is fine: the unit runs it at start-up, exactly as
+    ``serve`` does.  Naming the variables at install time turns that silent
+    gap into a one-line instruction instead of an empty pool at 3am.
+
+    The document is read rather than resolved: ``load_providers`` only reports
+    providers whose key it *found*, and it is precisely the env-var ones it
+    finds here and would not find in the unit.
+    """
+    path = Path(catalogue_path) if catalogue_path else default_providers_path()
+    if not path or not path.is_file():
+        return None
+    try:
+        import tomllib
+
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    entries = document.get("providers") if isinstance(document, dict) else None
+    if not isinstance(entries, list):
+        return None
+    notes: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("api_key_command"):
+            continue  # the unit runs the command itself
+        variable = entry.get("api_key_env")
+        if not isinstance(variable, str) or not variable.strip():
+            continue
+        name = entry.get("name", "?")
+        notes.append(f"{name} reads {variable.strip()} from the environment")
+    if not notes:
+        return None
+    joined = "; ".join(sorted(notes))
+    return (
+        f"note: the unit does not inherit your shell's environment, so {joined}. "
+        "Either export it in the unit (systemctl --user edit tamias, then add "
+        "Environment=NAME=...), or route that provider by api_key_command so "
+        "the service resolves the key itself"
+    )
+
+
 def _systemctl_user(*command: str) -> int:
     """Run ``systemctl --user`` and report failure without raising."""
     try:
@@ -2237,6 +2286,9 @@ def service_install(args: argparse.Namespace) -> int:
         print(f"tamias service install: {exc}", file=sys.stderr)
         return 2
     target = _systemd_user_dir() / SERVICE_UNIT_NAME
+    note = _service_env_warning(args.providers or None)
+    if note:
+        print(note, file=sys.stderr)
     if args.dry_run:
         print(f"# {target}")
         print(unit, end="")

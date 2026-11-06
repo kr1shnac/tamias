@@ -350,6 +350,13 @@ directory. Every input file must already exist, and active mode refuses to
 install without a target and a registry, so a unit that would crash-loop is
 rejected before anything is written.
 
+A user unit also does not inherit your shell's environment, so a provider that
+reads its key from `api_key_env` is unconfigured under the unit — the same
+command works in a terminal only because your shell exported it. Route those
+providers by `api_key_command`, or put the variable in the unit with
+`systemctl --user edit tamias` (`[Service] Environment=NAME=...`).
+`service install` names any such provider when it writes.
+
 No secret goes in the unit: OpenCode sends the provider key to tamias, and
 tamias forwards it untouched. Use a free target and no paid key is required.
 

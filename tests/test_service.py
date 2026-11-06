@@ -193,6 +193,73 @@ def test_missing_input_files_are_a_usage_error(
     assert "price sheet does not exist" in capsys.readouterr().err
 
 
+def test_an_environment_only_key_is_named_at_install_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `systemd --user` unit inherits no shell environment.
+
+    The catalogue is the one that is silently configured here, so the install
+    must name the variable instead of leaving the operator to discover an empty
+    pool from the journal at 3am.  Isolated from the operator's real unit by
+    pointing ``XDG_CONFIG_HOME`` into ``tmp_path``.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    catalogue = tmp_path / "providers.toml"
+    catalogue.write_text(
+        '[[providers]]\nname = "openrouter"\napi_key_env = "OPENROUTER_API_KEY"\n'
+        '\n[[providers]]\nname = "local"\nbase_url = "http://127.0.0.1:11434/v1"\n'
+        'api_key_command = "echo key"\n',
+        encoding="utf-8",
+    )
+    args = [
+        "service",
+        "install",
+        "--db",
+        str(tmp_path / "requests.db"),
+        "--prices",
+        str(tmp_path / "prices.toml"),
+        "--registry",
+        str(tmp_path / "models.toml"),
+        "--cheap-model",
+        "free-a",
+        "--exec",
+        "/opt/tamias",
+        "--providers",
+        str(catalogue),
+    ]
+    tmp_path.joinpath("prices.toml").write_text(
+        'date = "2026-01-01"\n\n[free-a]\ninput = 0.0\noutput = 0.0\n',
+        encoding="utf-8",
+    )
+    tmp_path.joinpath("models.toml").write_text(
+        '[[models]]\nid = "free-a"\nprovider = "openrouter"\n'
+        "context_window = 100000\ntools = true\n",
+        encoding="utf-8",
+    )
+    assert main(args) == 0
+
+    err = capsys.readouterr().err
+    assert "does not inherit your shell" in err
+    assert "OPENROUTER_API_KEY" in err
+    # The command-backed provider resolves its own key inside the unit, so it
+    # must not be named.
+    assert "local" not in err
+
+
+def test_a_key_resolved_by_a_command_needs_no_warning(
+    paths: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    catalogue = paths["tmp"] / "command.toml"
+    catalogue.write_text(
+        '[[providers]]\nname = "openrouter"\napi_key_command = "echo key"\n',
+        encoding="utf-8",
+    )
+    args = install_args(paths, "--providers", str(catalogue))
+    assert main(args) == 0
+
+    assert "does not inherit your shell" not in capsys.readouterr().err
+
+
 def test_paths_with_spaces_are_quoted_for_systemd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

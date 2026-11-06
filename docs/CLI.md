@@ -276,6 +276,25 @@ then runs `systemctl --user daemon-reload` and `enable --now tamias.service`.
 catalogue entry rather than a single upstream preset. The fallback remains
 `--provider opencode` for an older single-provider setup.
 
+A `systemd --user` unit does not inherit your shell's environment, so a provider
+whose key comes from `api_key_env` is **unconfigured** under the unit even where
+the same command works in a terminal. Either route it by `api_key_command` (the
+unit runs the command itself, as `tamias serve` does), or supply the variable in
+the unit:
+
+```sh
+systemctl --user edit tamias
+```
+
+```ini
+[Service]
+Environment=OPENROUTER_API_KEY=...
+```
+
+`service install` reads the catalogue and names any `api_key_env`-only provider
+on stderr, so the gap is a line at install time rather than an empty pool from
+the journal later.
+
 In `active` mode (the default) a target and a registry are required, mirroring
 `tamias serve`'s fail-closed check. `--dry-run` prints the unit without writing
 it; `--force` replaces an existing file. Exit codes: `0` written, `2` a usage
