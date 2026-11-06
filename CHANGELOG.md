@@ -33,6 +33,17 @@ bar says what it actually measured, and CI now fails when the TUI breaks.
   was replaced with `bun.lock`; `npm ci` could not install it.
 - **Packaged plugin imports and renders.** A clean-venv wheel install now
   passes the full harness from `site-packages/tamias/plugin`.
+- **`service install` names the provider environment the unit will not have.**
+  A `systemd --user` unit inherits no shell, so an `api_key_env` provider is
+  silently unconfigured under it. The command now reads the catalogue and prints
+  the variables (and the `api_key_command` alternative) on stderr.
+
+### Docs
+
+- **The credential-bridge contract is written down.** What a helper must print
+  (the key and nothing else), what it must do on failure (nothing, non-zero),
+  and a read-only OpenCode-store example. `providers.toml` and the systemd unit
+  both link to it.
 
 ## [1.0.1] - 2026-11-05
 
