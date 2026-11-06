@@ -74,6 +74,58 @@ skipped by routing. It is never tried with the wrong credential. `GET /limits`
 lists unconfigured providers (names and URLs only, never the env var or the
 command's output).
 
+### Bridging a credential another tool already owns
+
+A command can also read a secret some other tool stores, so the machine holds
+exactly one copy. OpenCode keeps provider keys in its own SQLite credential
+store, so a bridge is a short script:
+
+```sh
+api_key_command = "python3 ~/.tamias/key-from-opencode.py openrouter"
+```
+
+```python
+#!/usr/bin/env python3
+"""Print one provider key from OpenCode's credential store, read-only."""
+import json, sqlite3, sys
+from pathlib import Path
+
+db = Path.home() / ".local/share/opencode/opencode.db"
+row = None
+if db.exists():
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as connection:
+        row = connection.execute(
+            "SELECT value FROM credential "
+            "WHERE integration_id = ? AND active = 1 "
+            "ORDER BY time_updated DESC LIMIT 1",
+            (sys.argv[1],),
+        ).fetchone()
+if row is None:
+    sys.exit(f"no active credential for {sys.argv[1]!r}")
+payload = json.loads(row[0])
+key = payload.get("key")
+if not isinstance(key, str) or not key.strip():
+    sys.exit("credential carries no key")
+print(key.strip())
+```
+
+Tamias takes the command's **entire stdout** as the key, so the contract a
+helper must honour is small and absolute:
+
+- stdout is the key and nothing else — no banner, no progress line, no
+  `Copied to clipboard`. Everything you print is sent as the credential.
+- nothing on stdout and a non-zero exit when the key cannot be read. Tamias then
+  reports the provider as **unconfigured** and skips it, which is the honest
+  outcome; a wrong-but-present key is the one it refuses.
+- it must not prompt. A helper that waits for input fails the 10-second timeout
+  and yields `""`, so the provider is unconfigured.
+- it must not need a shell to have exported anything. A `systemd --user` unit
+  has a minimal environment; a bridge that reads a file under `$HOME` works
+  there, and one that reads a keyring needs a D-Bus session in the unit.
+
+Prefer `api_key_env` once the key is exported in your shell: that needs no
+shared store at all, and it wins over the command when both are given.
+
 ## Which provider serves a model
 
 Resolution is **explicit, never guessed from the id**. `nvidia/nemotron` names
