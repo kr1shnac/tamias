@@ -201,6 +201,63 @@ served from one `tamias serve` process.
   invoice. Long agent sessions, Claude Code and Codex traffic, and every other
   provider remain unverified.
 
+## Verified against direct NVIDIA with capabilities and prices
+
+Observed **2026-11-06** on Linux (Python 3.14, opencode 2.2.5) on the same
+`tamias serve --providers` process, after registering the direct-NIM ids in
+`~/.tamias/models.toml` with capabilities and `0` rates in
+`~/.tamias/prices.local.toml`.
+
+- **Capability facts were probed, not assumed.** Every id in the catalogue's
+  `discover = "listed"` list was sent one small chat completion. Seven of eight
+  answered; tool support was decided by a forced `tool_choice` returning
+  `finish_reason: tool_calls`, not by a model card. Two recorded findings:
+  `nvidia/nemotron-3.5-bolt-e4b` emits `<|tool_call>{}` inside `content` and is
+  registered `tools = false`; `z-ai/glm-5.3-flash` timed out twice at 5+ minutes
+  and is deliberately absent from the registry.
+- **A request ran on a direct model.** `POST /v1/chat/completions` naming
+  `nvidia/nemotron-3-ultra-550b-a55b` returned HTTP 200 and was logged
+  `decision=STAY`, `computed_list_cost_usd=0.0`, `cost_source=computed`, with
+  `price_sheet = …/prices.toml + …/prices.local.toml` — so the operator overlay
+  was in force for that row, not just the generated sheet.
+- **The gates admit what was registered.** With the seven ids plus the three
+  OpenRouter free models in an allowlist, a tools-bearing need admits 8
+  candidates and refuses one
+  (`nvidia/nemotron-3.5-bolt-e4b [capability: no tool calls]`); a plain chat need
+  admits all 9. The allowlist is honoured by design, so the running service's
+  `/limits` pool stays the three models its `--cheap-model` names until the
+  operator widens it.
+
+## Verified inside a real OpenCode TUI
+
+The plugin's `scripts/verify.ts` harness reproduces the host contract, but it
+cannot prove host module resolution. So the pop-up was also driven inside **the
+real OpenCode 2.2.5 TUI**, in a pty, against an isolated `HOME`/`XDG_CONFIG_HOME`
+so no operator config was touched:
+
+- **`pip install tamias` alone used to fail.** With a clean venv and no source
+  checkout reachable, `setup` registered `site-packages/tamias/plugin`, the host
+  logged `plugin operation failed … error="Cannot find package 'solid-js' imported
+  from …/tamias/plugin/src/hooks/useLimits.ts"`, and the status bar showed
+  `1 plugin failed`. OpenCode resolves a plugin's imports beside the plugin
+  directory, and `~/.opencode/node_modules` carries no `solid-js`/`@opentui`
+  (they are compiled into its binary), so the wheel's TypeScript could not load.
+- **After the fix it loads.** `setup` stages the bundle at `~/.tamias/plugin`,
+  runs `bun install` there and registers that path. Same clean-venv run, real
+  TUI: **zero** `plugin operation failed` entries, the palette shows
+  `/tamias Open the tamias routing pop-up`, and the command opens the pop-up —
+  header `tamias · all recent`, `○ log only`, `no request log`, and the
+  `esc close · log 2s · live 5s` footer, i.e. the real component rendered, not a
+  stub.
+- **Reproduce it.** Isolate a HOME, run setup with `--config`/`--db`/`--prices`
+  pointed into that HOME, then start `opencode --standalone` with
+  `HOME`/`XDG_CONFIG_HOME`/`XDG_DATA_HOME` set to it, type `/tamias`, press
+  Enter. `opencode.log` under `$XDG_DATA_HOME/opencode/log/` is where a plugin
+  load failure appears; `1 plugin failed` in the status bar is the symptom.
+- **What this does not prove.** Bun is on `PATH` for the install step. Windows
+  and macOS were not exercised, and 2.2.5 is the only host version tested —
+  plugin resolution is undocumented host behaviour.
+
 
 
 A provider-ledger measurement is the one number that does not come from a price
@@ -433,13 +490,13 @@ is `0.1.0a3`.
 | Listener hardening | Implemented | Body cap (413) and concurrency limit; optional TLS via `--tls-cert`/`--tls-key` |
 | Signed policy manifest | Opt-in | `serve --manifest` verifies an Ed25519-signed policy at startup and serves it at `GET /policy`; expired/altered/mis-pinned manifests are refused (404/401/403/503). Needs `tamias[manifest]`; agent-side application is not enforced |
 | Configuration | Implemented | `~/.tamias/config.toml` (or `$TAMIAS_CONFIG`); provider presets; `tamias config` |
-| OpenCode integration | Implemented, live | `opencode setup` writes the provider block, `opencode models` lists it on 2.2.5; the TUI pop-up ships in the wheel (`tamias/plugin`) and setup registers it; `--plugin` overrides |
+| OpenCode integration | Implemented, live | `opencode setup` writes the provider block, `opencode models` lists it on 2.2.5; the pop-up loads in the real 2.2.5 TUI from a clean venv after `setup` installs its peers with Bun (see the TUI section above); without Bun it registers nothing and says so |
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
 | Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`); no live ledger measurement has been taken |
-| Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, and OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key) |
-| Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions |
+| Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, direct NVIDIA capabilities and a 200 request on 2026-11-06, and OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key) |
+| Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions; the wheel carries `tamias/plugin` and CI fails if it does not |
 | Publish | Tag-triggered | `v1.0.2` publishes through Trusted Publishing (OIDC); `0.1.0a8` was the last artifact on PyPI |
 
 This page describes implemented repository behaviour and the runs recorded above.
