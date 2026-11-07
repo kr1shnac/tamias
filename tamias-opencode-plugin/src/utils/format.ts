@@ -7,16 +7,24 @@
  * read as a free request.
  */
 
-/** Full precision where it matters, never more than a cell can show. */
+/**
+ * Full precision where it matters, never more than a cell can show.
+ *
+ * The rules are shared with `tamias report`'s `_money` and asserted against it
+ * by `tests/test_accuracy_precision.py`, because a user reads the two side by
+ * side and the same number rendered two ways reads as two numbers.  Six
+ * decimals under a dollar and four above are deliberate: these are estimates,
+ * and `$4.9000` is not the same claim as `$4.90`.  Keep the two in step --
+ * change one, change the other, and let that test tell you.
+ */
 export function money(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
   if (value === 0) return "$0.00";
   const sign = value < 0 ? "-$" : "$";
   const abs = Math.abs(value);
-  if (abs < 0.0001) return "<$0.0001";
-  if (abs < 0.01) return sign + abs.toPrecision(2);
-  if (abs < 1) return sign + abs.toFixed(4);
-  return sign + abs.toFixed(2);
+  if (abs < 0.0001) return sign === "-$" ? "-<$0.0001" : "<$0.0001";
+  if (abs < 1) return sign + abs.toFixed(6);
+  return sign + abs.toFixed(4);
 }
 
 /** A table cell: short enough for 9 columns, still exact for tiny costs. */

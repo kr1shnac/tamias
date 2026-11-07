@@ -158,11 +158,23 @@ def _warn_if_exposed(host: str, *, authenticated: bool = False) -> None:
 
 
 def _money(value: float) -> str:
+    """One amount, formatted the way the OpenCode pop-up formats it.
+
+    The report and ``/tamias`` are read side by side, so they must render the
+    same number identically.  The rules are shared by both: an exact zero, a
+    floor that says "less than" rather than inventing digits below it, six
+    decimals under a dollar, four above -- ``$4.9000`` and ``$4.90`` are
+    different claims when the figure is an estimate.
+    """
     if value == 0:
         return "$0.00"
     sign = "-" if value < 0 else ""
     magnitude = abs(value)
-    return f"{sign}${magnitude:.6f}" if magnitude < 1 else f"{sign}${magnitude:.4f}"
+    if magnitude < 0.0001:
+        return f"{sign}<$0.0001"
+    if magnitude < 1:
+        return f"{sign}${magnitude:.6f}"
+    return f"{sign}${magnitude:.4f}"
 
 
 def _money_inr(value: float, rate: float) -> str:

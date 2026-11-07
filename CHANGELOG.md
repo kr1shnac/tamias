@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.2] - 2026-11-06
 
-A packaging and honesty pass: the pop-up travels with the wheel, its savings
-bar says what it actually measured, and CI now fails when the TUI breaks.
+A packaging, routing and honesty pass: the pop-up travels with the wheel and
+actually loads, its savings bar says what it measured, the two surfaces agree
+on every number they both print, and CI now fails when the TUI breaks.
 
 ### Changed
 
@@ -70,6 +71,33 @@ bar says what it actually measured, and CI now fails when the TUI breaks.
   (the key and nothing else), what it must do on failure (nothing, non-zero),
   and a read-only OpenCode-store example. `providers.toml` and the systemd unit
   both link to it.
+
+### Fixed
+
+- **The pop-up invented a price where the proxy reports UNKNOWN.** Cached
+  tokens against a model that never quoted a cached rate were charged at the
+  input rate, so `/tamias` showed a number `tamias report` refuses to print.
+  A bucket with tokens in it and no quoted rate is unknown there too.
+- **An uncounted cache-write bucket was priced as zero.** A model that quotes a
+  nonzero cache-write rate, and a request that never reported how much was
+  written, is UNKNOWN rather than free -- the rule the proxy already applied.
+- **The two surfaces rendered the same amount differently.** `report` and
+  `/tamias` are read side by side, but one printed six decimals under a dollar
+  and two above while the other printed four and two, so `$4.9000` and `$4.90`
+  both appeared for one saving. Both now share one rule set, with a test that
+  renders a table of amounts through both formatters and asserts equality.
+
+### Added
+
+- **An accuracy and precision suite, checked three ways.**
+  `tests/test_accuracy_precision.py` runs the same rows through the proxy's
+  arithmetic, the pop-up's TypeScript (via Bun) and an independent Decimal
+  model written from the documented rules, and asserts agreement to 1e-15.
+  Cases cover the boundaries: an unquoted bucket, writes that overrun the
+  prompt, a model the sheet never quoted, micro rates, no counts at all, and a
+  switch whose baseline is dearer than what ran. A seeded fuzz over the same
+  boundaries runs every time, and the seed is fixed so a failure repeats. The
+  suite found all three fixes above.
 
 ## [1.0.1] - 2026-11-05
 

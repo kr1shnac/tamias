@@ -165,6 +165,11 @@ export function tierFor(
  * the whole prompt, so cached and write buckets are carved out of it rather
  * than added on top. Missing rates and inconsistent counts return null instead
  * of inventing a number.
+ *
+ * The order is the proxy's, and it matters: a bucket the sheet never quoted is
+ * unknown *before* the free-model shortcut, so a free model with tokens in an
+ * unquoted bucket is UNKNOWN rather than $0.00.  Only a bucket with no tokens
+ * in it may fall back to the input rate.
  */
 export function listCost(
   model: string | null | undefined,
@@ -176,6 +181,24 @@ export function listCost(
   if (!rates || rates.tiers?.length) return null;
   if (rates.input === undefined || rates.output === undefined) return null;
 
+  const input = usage.input_tokens;
+  const output = usage.output_tokens;
+  const cached = usage.cached_input_tokens;
+  const writes = usage.cache_write_tokens ?? 0;
+  const cachedTokens = cached ?? 0;
+
+  // Rule 1b, before the free shortcut: a bucket with tokens in it and no
+  // quoted rate cannot be priced.
+  if (cachedTokens > 0 && rates.cached_input === undefined) return null;
+  if (writes > 0 && rates.cache_write === undefined) return null;
+  // Rule 2: a bucket the sheet *does* price cannot be left uncounted.  A model
+  // that quotes a nonzero cache-write rate and a request that never says how
+  // much was written is unknown, not zero writes.
+  const quotedWrites = [rates.cache_write, rates.cache_write_1h].filter(
+    (value): value is number => value !== undefined && value !== 0,
+  );
+  if (quotedWrites.length > 0 && usage.cache_write_tokens === undefined) return null;
+
   const quoted = [
     rates.input,
     rates.output,
@@ -183,28 +206,30 @@ export function listCost(
     rates.cache_write,
     rates.cache_write_1h,
   ].filter((value): value is number => value !== undefined);
-  // A model whose quoted rates are all zero is exactly free, even when the
-  // upstream omitted usage. No invented number is involved.
-  if (quoted.every((value) => value === 0)) return 0;
+  // Rule 1, before any count is required: every quoted rate is zero and no
+  // unquoted bucket was used, so the model is exactly free even with no usage
+  // block at all.
+  if (quoted.length > 0 && quoted.every((value) => value === 0)) return 0;
 
-  const input = usage.input_tokens;
   if (input === null || input < 0) return null;
-  const output = usage.output_tokens;
   if (output === null && rates.output > 0) return null;
   if (output !== null && output < 0) return null;
-
-  const cached = usage.cached_input_tokens;
-  const cachedRate = rates.cached_input ?? rates.input;
-  if (cached === null && cachedRate !== rates.input) return null;
   if (cached !== null && cached < 0) return null;
-
-  const writes = usage.cache_write_tokens ?? 0;
   if (writes < 0) return null;
-  if (writes > 0 && rates.cache_write === undefined) return null;
-
-  const cachedTokens = cached ?? 0;
+  if (
+    cached === null &&
+    rates.cached_input !== undefined &&
+    rates.cached_input !== rates.input &&
+    rates.cached_input !== 0 &&
+    rates.input !== 0
+  ) {
+    return null;
+  }
   if (cachedTokens + writes > input) return null;
 
+  // A bucket with no tokens in it costs nothing, so an unquoted rate there
+  // falls back to the input rate only because it multiplies zero.
+  const cachedRate = rates.cached_input ?? rates.input;
   const writeRate = rates.cache_write ?? rates.input;
   const uncached = input - cachedTokens - writes;
   const cost =
