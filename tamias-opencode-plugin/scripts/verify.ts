@@ -190,7 +190,10 @@ function makeLog() {
       used: "acme/free-one",
       input: 1_000_000,
       output: 1_000_000,
-      cached: 0,
+      // The newest row is a real switch, and it is also where the prompt came
+      // back warm: the cache share is what makes a cache-aware switch legible,
+      // so the fixture must show a non-trivial one rather than an accidental 0.
+      cached: 800_000,
       ms: 1200,
       status: "200",
       action: "SWITCH",
@@ -374,6 +377,11 @@ const server = Bun.serve({
         },
       ],
       unconfigured: ["nvidia"],
+      // Only openrouter publishes a quota; nvidia sends nothing, so it must
+      // not appear in the line at all rather than appear as "?".
+      quota: [
+        { provider: "openrouter", remaining_requests: 41, resets_in: 120 },
+      ],
       cooling_down: [
         {
           provider: "openrouter",
@@ -684,9 +692,18 @@ try {
   );
   step("an active window is not labelled shadow", !frame.includes("all recent · shadow"));
   step("the KPI line counts requests and switches", frame.includes("6 req") && frame.includes("switched"));
+  step(
+    "the KPI line reports the cache share from the log",
+    frame.includes("cache") && /\bcache\s+\d+%/.test(frame),
+    frame.match(/\bcache\s+\S+/)?.join("") ?? "absent",
+  );
   step("the pool line shows capable models and refused gates", frame.includes("3/5 capable") && frame.includes("2 health"));
   step("the pool line names a provider without a key", frame.includes("no key: nvidia"));
   step("the cooling line names the model and the wait", frame.includes("cooling") && frame.includes("back in 45s") && frame.includes("429"));
+  step(
+    "the quota line shows only what the provider published",
+    frame.includes("quota") && frame.includes("openrouter 41") && frame.includes("resets 2m") && !frame.includes("nvidia ?"),
+  );
   step("the footer makes Escape and the two refresh clocks discoverable", frame.includes("esc close") && frame.includes("log 2s") && frame.includes("live 5s"));
   step("the pop-up does not leak the older session's model", !frame.includes("old-three"));
 
@@ -769,6 +786,26 @@ step(
   "a shadow-only window is labelled shadow",
   windowMode([shadowRow]) === "shadow",
   String(windowMode([shadowRow])),
+);
+
+const { cacheShare } = await import("../src/hooks/useTamiasData");
+function cacheRow(input: number | null, cached: number | null) {
+  return { ...shadowRow, input_tokens: input, cached_input_tokens: cached };
+}
+step(
+  "the cache share is the cached tokens over the input tokens",
+  cacheShare([cacheRow(1000, 250), cacheRow(1000, 0)]) === 0.125,
+  String(cacheShare([cacheRow(1000, 250), cacheRow(1000, 0)])),
+);
+step(
+  "a window with no input tokens has an unknown share, not a warm zero",
+  cacheShare([cacheRow(0, 0), cacheRow(null, null)]) === null,
+  String(cacheShare([cacheRow(0, 0), cacheRow(null, null)])),
+);
+step(
+  "a share is capped at fully warm however the provider counts cache",
+  cacheShare([cacheRow(1000, 4000)]) === 1,
+  String(cacheShare([cacheRow(1000, 4000)])),
 );
 
 const overlayPath = path.join(TEMP, "unit.local.toml");

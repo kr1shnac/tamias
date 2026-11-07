@@ -1405,6 +1405,21 @@ def create_app(
                     for provider in catalogue.all()
                 ],
                 "unconfigured": list(catalogue.unconfigured()),
+                # Provider-published request quota.  Only a provider that names
+                # its own remaining count appears here; tamias never estimates
+                # one, so an empty list means "no provider said", not "no limit".
+                "quota": [
+                    {
+                        "provider": quota.provider,
+                        "remaining_requests": quota.remaining,
+                        "resets_in": (
+                            None
+                            if quota.resets_in is None
+                            else int(quota.resets_in)
+                        ),
+                    }
+                    for quota in limit_ledger.quotas()
+                ],
                 "cooling_down": [
                     {
                         "provider": limit.provider,
@@ -1521,6 +1536,9 @@ def create_app(
         if response.status_code < 400:
             if provider or model:
                 limit_ledger.clear(provider, model)
+            # A provider's own quota headers arrive on a *successful* response
+            # too, and that is the only moment its remaining count is truthful.
+            limit_ledger.record_quota(limits_mod.quota_from_headers(provider, response.headers))
             return
         retry_after = limits_mod.parse_retry_after(response.headers.get("retry-after"))
         if retry_after is None:

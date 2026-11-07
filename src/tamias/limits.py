@@ -15,13 +15,22 @@ it asks for longer than the ladder would.
 
 Nothing here holds a credential, a request body or a provider response body: a
 row is ``(provider, model, until, status, reason, strikes)``.
+
+The second table is *quota*: the requests-remaining number a provider publishes
+in its own response headers.  It is not a cooldown -- a cooldown says "this
+model is refused right now", a quota says "this provider has N left before it
+starts refusing".  Tamias records only what a provider actually sent and never
+interpolates: no header means no quota line, which is why most providers show
+none.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -53,6 +62,110 @@ TRANSPORT_FAILURE = 0
 #: whole provider is skipped until the operator fixes the key.
 PROVIDER_STATUSES = frozenset({401})
 
+#: Header names that report a *requests* quota.  Different providers use
+#: different conventions, and a few send both styles; tamias reads them all
+#: rather than guessing one house style.  Anything absent is simply absent --
+#: no default, no "probably 1000 left".
+QUOTA_REMAINING_HEADERS = (
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining",
+    "ratelimit-remaining",
+)
+QUOTA_RESET_HEADERS = (
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset",
+    "ratelimit-reset",
+)
+
+#: A quota older than this is not worth showing: a provider that has not
+#: answered since the window started has told us nothing new.
+QUOTA_TTL_SECONDS = 600.0
+
+
+@dataclass(frozen=True)
+class Quota:
+    """What one provider published about its own request quota."""
+
+    provider: str
+    remaining: int | None
+    resets_in: float | None
+    seen: float
+
+
+def _first_int(headers: Mapping[str, str], names: Iterable[str]) -> int | None:
+    for name in names:
+        value = headers.get(name)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            return int(float(text))
+        except ValueError:
+            continue
+    return None
+
+
+def _duration_seconds(text: str) -> float | None:
+    """``"1m30s"`` -> 90.  A plain number is not a duration and returns ``None``.
+
+    Several providers send a human duration rather than seconds; parsing it
+    keeps their window readable without inventing one for the ones that send a
+    number (those take the float path first).
+    """
+    units = {"h": 3600.0, "m": 60.0, "s": 1.0}
+    stripped = text.strip()
+    matches = re.findall(r"(\d+(?:\.\d+)?)\s*([hms])", stripped)
+    if not matches:
+        return None
+    # The whole value must be the duration; "1m30s extra" is not one.
+    consumed = "".join(f"{value}{unit}" for value, unit in matches)
+    if stripped.replace(" ", "") != consumed:
+        return None
+    return sum(float(value) * units[unit] for value, unit in matches)
+
+
+def _first_seconds(headers: Mapping[str, str], names: Iterable[str]) -> float | None:
+    for name in names:
+        value = headers.get(name)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        # Most send seconds; some send a duration string like "1m30s"; a few
+        # send an HTTP-date, which parse_retry_after already understands.
+        try:
+            seconds: float | None = float(text)
+        except ValueError:
+            seconds = _duration_seconds(text)
+        if seconds is None:
+            seconds = parse_retry_after(text)
+        if seconds is None:
+            continue
+        return max(0.0, seconds)
+    return None
+
+
+def quota_from_headers(provider: str, headers: Mapping[str, str]) -> Quota | None:
+    """Read a provider's published quota, or ``None`` when it published none.
+
+    A provider that names no window and no remaining count has said nothing,
+    and inventing a remaining number would put a percentage on screen that no
+    provider stands behind.
+    """
+    remaining = _first_int(headers, QUOTA_REMAINING_HEADERS)
+    resets = _first_seconds(headers, QUOTA_RESET_HEADERS)
+    if remaining is None and resets is None:
+        return None
+    return Quota(
+        provider=provider,
+        remaining=remaining,
+        resets_in=resets,
+        seen=time.time(),
+    )
+
 
 def retryable(status: int) -> bool:
     """Whether ``status`` says a different model could serve the same request.
@@ -66,6 +179,7 @@ def retryable(status: int) -> bool:
 BACKOFF_SECONDS = (60, 300, 900, 3600)
 
 _TABLE = "model_limits"
+_QUOTA_TABLE = "provider_quota"
 
 
 @dataclass(frozen=True)
@@ -137,6 +251,13 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
     strikes INTEGER NOT NULL,
     updated REAL NOT NULL,
     PRIMARY KEY (provider, model)
+);
+
+CREATE TABLE IF NOT EXISTS {_QUOTA_TABLE} (
+    provider TEXT PRIMARY KEY,
+    remaining INTEGER,
+    resets_at REAL,
+    updated REAL NOT NULL
 );
 """
             )
@@ -278,13 +399,58 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
             self._conn.commit()
         return cursor.rowcount
 
+    def quotas(self, now: float | None = None) -> tuple[Quota, ...]:
+        """What each provider last published about its request quota.
+
+        Nothing is invented: a provider that sends no quota headers has no row,
+        and a row older than :data:`QUOTA_TTL_SECONDS` is dropped rather than
+        shown, because a window that has since reset would make a stale count
+        look like the truth.
+        """
+        current = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT provider, remaining, resets_at, updated FROM {_QUOTA_TABLE} "
+                "WHERE updated > ? ORDER BY provider",
+                (current - QUOTA_TTL_SECONDS,),
+            ).fetchall()
+        return tuple(
+            Quota(
+                provider=str(row["provider"]),
+                remaining=None if row["remaining"] is None else int(row["remaining"]),
+                resets_in=(
+                    None if row["resets_at"] is None else max(0.0, row["resets_at"] - current)
+                ),
+                seen=float(row["updated"]),
+            )
+            for row in rows
+        )
+
+    def record_quota(self, quota: Quota | None, now: float | None = None) -> None:
+        """Remember what a provider published, or forget it if it said nothing."""
+        if quota is None:
+            return
+        current = time.time() if now is None else now
+        resets_at = None if quota.resets_in is None else current + quota.resets_in
+        with self._lock:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO {_QUOTA_TABLE} "
+                "(provider, remaining, resets_at, updated) VALUES (?, ?, ?, ?)",
+                (quota.provider, quota.remaining, resets_at, current),
+            )
+            self._conn.commit()
+
     def prune(self, now: float | None = None) -> int:
         """Drop expired rows so the table does not grow without bound."""
         current = time.time() if now is None else now
         with self._lock:
             cursor = self._conn.execute(f"DELETE FROM {_TABLE} WHERE until <= ?", (current,))
+            stale = self._conn.execute(
+                f"DELETE FROM {_QUOTA_TABLE} WHERE updated <= ?",
+                (current - QUOTA_TTL_SECONDS,),
+            )
             self._conn.commit()
-        return cursor.rowcount
+        return cursor.rowcount + stale.rowcount
 
     def close(self) -> None:
         with self._lock:

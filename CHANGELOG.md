@@ -31,6 +31,18 @@ bar says what it actually measured, and CI now fails when the TUI breaks.
   `pinned by client: kept <model>`, in every mode. Unrecognised values are
   ignored, so a stray header cannot disable routing by accident, and the header
   is dropped before the upstream request is sent.
+- **The cache share is on the KPI line.** The pop-up now reports what share of
+  input tokens the provider served from cache, because that is the number that
+  makes a switch legible: a warm conversation is exactly the one where moving
+  re-ingests context. It is context for the savings bar, not a saving, and it is
+  `null` — shown as nothing, never as `0%` — when no row reported input tokens.
+- **Provider quota reaches `/limits` and the pop-up.** A provider that publishes
+  its own remaining requests (`x-ratelimit-remaining-requests` or
+  `ratelimit-remaining`, resets in seconds, a duration like `1m30s`, or an
+  HTTP-date) is recorded on a *successful* answer and shown as one `quota`
+  line. Nothing is invented: no headers means no row, not "unlimited", and a row
+  older than 10 minutes is dropped. A quota is never a cooldown and never
+  changes a routing decision.
 
 - **The plugin gate is real.** CI runs `bun install --frozen-lockfile`,
   `tsc --noEmit`, and the 48-check host harness. The stale `package-lock.json`

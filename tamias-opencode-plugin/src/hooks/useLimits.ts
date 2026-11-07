@@ -35,6 +35,13 @@ export interface LimitsCooling {
   strikes: number;
 }
 
+/** What one provider published about its own request quota, verbatim. */
+export interface LimitsQuota {
+  provider: string;
+  remaining_requests: number | null;
+  resets_in: number | null;
+}
+
 export interface LimitsPool {
   considered: number;
   candidates: number;
@@ -63,6 +70,8 @@ export interface LimitsRefusal {
 export interface LimitsSnapshot {
   providers: LimitsProvider[];
   unconfigured: string[];
+  /** Empty means no provider published one, never "unlimited". */
+  quota: LimitsQuota[];
   cooling_down: LimitsCooling[];
   pool: LimitsPool;
   candidates: LimitsCandidate[];
@@ -113,6 +122,21 @@ function parseSnapshot(value: unknown): LimitsSnapshot {
             base_url: stringOr(row.base_url, ""),
             configured: row.configured === true,
             key_source: stringOr(row.key_source, "none"),
+          },
+        ];
+      })
+    : [];
+
+  const quota = Array.isArray(data.quota)
+    ? data.quota.flatMap((item): LimitsQuota[] => {
+        if (!item || typeof item !== "object") return [];
+        const row = item as Record<string, unknown>;
+        if (typeof row.provider !== "string") return [];
+        return [
+          {
+            provider: row.provider,
+            remaining_requests: numberOrNull(row.remaining_requests),
+            resets_in: numberOrNull(row.resets_in),
           },
         ];
       })
@@ -197,6 +221,7 @@ function parseSnapshot(value: unknown): LimitsSnapshot {
     unconfigured: Array.isArray(data.unconfigured)
       ? data.unconfigured.filter((item): item is string => typeof item === "string")
       : [],
+    quota,
     cooling_down: cooling,
     pool,
     candidates,

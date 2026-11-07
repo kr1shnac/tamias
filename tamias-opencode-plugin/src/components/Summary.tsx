@@ -38,6 +38,10 @@ export function KpiStrip(props: KpiStripProps) {
     const parts = [count(summary.n_requests) + " req", spent()];
     if (summary.n_switched > 0) parts.push(`${count(summary.n_switched)} switched`);
     if (freeShare() !== null) parts.push(`● ${percent(freeShare())} free`);
+    // The cache share is context for the savings bar, not a saving: a high
+    // share is the case where a switch re-ingests the prompt and can cost more
+    // than it keeps, which is why `report` prices the stay arm cache-warm.
+    if (summary.cache_share !== null) parts.push(`cache ${percent(summary.cache_share)} warm`);
     if (summary.n_unpriced > 0) parts.push(`${count(summary.n_unpriced)} unpriced`);
     if (summary.n_failed > 0) parts.push(`${count(summary.n_failed)} failed`);
     return clip(parts.join(" · "), props.width);

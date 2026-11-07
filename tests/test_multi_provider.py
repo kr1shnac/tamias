@@ -127,9 +127,14 @@ def completion(model: str) -> dict[str, Any]:
 class Recorder:
     """Remembers every upstream request, and answers per host."""
 
-    def __init__(self, fail: dict[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        fail: dict[str, int] | None = None,
+        quota: dict[str, str] | None = None,
+    ) -> None:
         self.requests: list[httpx.Request] = []
         self.fail = fail or {}
+        self.quota = quota or {}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -142,7 +147,13 @@ class Recorder:
                 headers={"retry-after": "600"} if status == 429 else {},
             )
         body = json.loads(request.content)
-        return httpx.Response(200, json=completion(body.get("model", "")))
+        return httpx.Response(
+            200,
+            json=completion(body.get("model", "")),
+            headers={"x-ratelimit-remaining-requests": self.quota[host]}
+            if host in self.quota
+            else {},
+        )
 
     @property
     def last(self) -> httpx.Request:
@@ -312,6 +323,39 @@ async def test_the_limits_endpoint_reports_providers_and_cooldowns_without_secre
     assert document["cooling_down"][0]["model"] == MODEL_A
     assert document["cooling_down"][0]["remaining_seconds"] > 0
     assert "openrouter-secret" not in json.dumps(document)
+
+
+async def test_a_published_request_quota_reaches_the_limits_endpoint():
+    """A quota a provider publishes on a *successful* answer is the only one
+    tamias reports; a provider that publishes nothing contributes no row, so
+    the endpoint never shows an invented remaining count.
+    """
+    recorder = Recorder(quota={"openrouter.ai": "41"})
+    ledger = LimitLedger(":memory:")
+    app = build(recorder, FakeStore(), limits=ledger)
+    await post(app, MODEL_A)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://tamias.local") as client:
+        response = await client.get("/limits")
+
+    quota = response.json()["quota"]
+    assert quota == [{"provider": "openrouter", "remaining_requests": 41, "resets_in": None}]
+    # NVIDIA answered too (or did not publish), so it is absent, not zero.
+    assert all(entry["provider"] == "openrouter" for entry in quota)
+
+
+async def test_no_quota_headers_means_no_quota_rows():
+    recorder = Recorder()
+    ledger = LimitLedger(":memory:")
+    app = build(recorder, FakeStore(), limits=ledger)
+    await post(app, MODEL_A)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://tamias.local") as client:
+        response = await client.get("/limits")
+
+    assert response.json()["quota"] == []
 
 
 def test_provider_routing_does_not_change_a_single_upstream_deployment():

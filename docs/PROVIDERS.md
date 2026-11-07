@@ -208,6 +208,36 @@ The candidate and rejection lists are capped (`?models=N`, default 25, maximum
 500) because the endpoint is polled; the `pool` block always carries the exact
 totals, the truncation flag and per-gate rejection counts.
 
+## What a provider says about its own quota
+
+A `quota` block lists what each provider **published** about its own request
+quota, read from the response headers of the last successful answer:
+
+```json
+"quota": [{"provider": "openrouter", "remaining_requests": 41, "resets_in": 120}]
+```
+
+Three rules keep it honest:
+
+- **Nothing is invented.** A provider that sends no quota headers has no row.
+  An empty `quota` list means "no provider told us", never "unlimited" — a
+  provider with no remaining count is not assumed to have plenty.
+- **It is recorded on success, not on failure.** A `429` means the window is
+  already gone, and the headers that arrive with it describe a limit that has
+  bitten. The same headers on a `200` describe a budget that still exists.
+- **It is not a cooldown.** A cooldown (`cooling_down`) says *this model is
+  refused right now* and shapes routing. A quota says *this provider has N
+  requests left* and changes no decision — which is why it is displayed and
+  never ranked on.
+
+Both house styles are read: `x-ratelimit-remaining-requests` /
+`x-ratelimit-reset-requests`, and the shorter `ratelimit-remaining` /
+`ratelimit-reset`. Resets may arrive in seconds, as a duration such as
+`1m30s`, or as an HTTP-date. A row older than 10 minutes is dropped rather
+than shown, because a window that has since reset would make a stale count
+look like the truth. The `/tamias` pop-up prints it as one `quota` line, and
+`tamias report` does not quote it — it is operational state, not a saving.
+
 ## When a provider says "no"
 
 A `429`, `402` (out of credits), a gated `403`, a `503` or a transport failure

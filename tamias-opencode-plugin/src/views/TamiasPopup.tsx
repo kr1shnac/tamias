@@ -137,6 +137,20 @@ function PopupBody(props: Pick<TamiasPopupProps, "renderer">) {
     );
   });
 
+  const quotaLine = createMemo(() => {
+    const snapshot = limits.snapshot();
+    if (!limits.live() || !snapshot || snapshot.quota.length === 0) return "";
+    // Only what the provider itself published.  A missing remaining count is
+    // shown as such rather than dropped, so the line never implies a number
+    // the provider did not send.
+    const parts = snapshot.quota.map((entry) => {
+      const left = entry.remaining_requests === null ? "?" : String(entry.remaining_requests);
+      const reset = entry.resets_in === null ? "" : ` · resets ${duration(entry.resets_in)}`;
+      return `${entry.provider} ${left}${reset}`;
+    });
+    return clip(`quota  ${parts.join(" · ")}`, width());
+  });
+
   const notices = createMemo(() => {
     const lines: string[] = [];
     if (data.dbState() === "missing") {
@@ -191,6 +205,9 @@ function PopupBody(props: Pick<TamiasPopupProps, "renderer">) {
       <text wrapMode="none" fg={palette().muted}>{poolLine()}</text>
       <Show when={(limits.snapshot()?.cooling_down.length ?? 0) > 0}>
         <text wrapMode="none" fg={palette().warn}>{coolingLine()}</text>
+      </Show>
+      <Show when={quotaLine()}>
+        <text wrapMode="none" fg={palette().muted}>{quotaLine()}</text>
       </Show>
 
       {notices().map((line) => (

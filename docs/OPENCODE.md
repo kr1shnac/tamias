@@ -321,10 +321,11 @@ registers nothing rather than leaving a broken entry behind. A source checkout
 that already has `node_modules` (from `bun install`) is registered as-is and
 rewritten by nothing.
 
-`/tamias` opens a `large`, centred dialog over the conversation. It shows eight
+`/tamias` opens a `large`, centred dialog over the conversation. It shows nine
 lines: the live/log-only indicator, one savings bar, the request/switch/free
-counts, the latest route and its reason, the eligible pool with refused gates,
-any cooling model, and a footer. The savings bar is **realised**: it counts
+counts with the cache share, the latest route and its reason, the eligible pool
+with refused gates, any provider quota the provider itself published, any
+cooling model, and a footer. The savings bar is **realised**: it counts
 only rows the proxy actually rewrote. In shadow mode nothing is rewritten, so
 the bar stays at zero and the header says `· shadow`; the hypothetical estimate
 lives in `/tamias-report`. `esc` closes it; the first open in a process shows a

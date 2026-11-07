@@ -19,7 +19,7 @@ for one glance, and the log is still available through `tamias report` and
 | --- | --- |
 | header | `● live` when `/limits` answered, `○ log only` when it did not; `· shadow` when the newest row ran in shadow mode |
 | savings bar | percent **realised**, dollars realised, baseline, and `(est.)` when any arm is an estimate |
-| KPI line | requests, spent, applied switches, free share, failures, unpriced rows |
+| KPI line | requests, spent, applied switches, free share, **cache share**, failures, unpriced rows |
 | latest route | requested model → used model, free/paid/unknown glyph, decision |
 | reason | the router's own reason for that decision |
 | pool | capable/considered candidates, refused gates, capped, providers with no key |

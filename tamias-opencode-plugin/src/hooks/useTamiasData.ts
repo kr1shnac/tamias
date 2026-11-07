@@ -91,6 +91,8 @@ export interface TamiasSummary {
   saving_pct: number | null;
   estimated: boolean;
   latency_avg: number | null;
+  /** Share of input tokens served from cache, or null when unknown. */
+  cache_share: number | null;
 }
 
 export interface TamiasSnapshot {
@@ -296,7 +298,29 @@ export function summarizeRows(rows: readonly TamiasRow[]): TamiasSummary {
       latencies.length > 0
         ? latencies.reduce((sum, value) => sum + value, 0) / latencies.length
         : null,
+    cache_share: cacheShare(rows),
   };
+}
+
+/**
+ * The share of input tokens the provider served from cache.
+ *
+ * This is the number that makes a cache-aware switch legible: staying is priced
+ * against a *warm* prompt, so a conversation with a high share is exactly the
+ * one where switching away re-ingests context and can cost more than it saves.
+ * `null` when no row in the window reported any input tokens, because a share
+ * of an empty denominator is not 0% -- it is unknown.
+ */
+export function cacheShare(rows: readonly TamiasRow[]): number | null {
+  let input = 0;
+  let cached = 0;
+  for (const row of rows) {
+    if (row.input_tokens === null || row.input_tokens === 0) continue;
+    input += row.input_tokens;
+    cached += row.cached_input_tokens ?? 0;
+  }
+  if (input === 0) return null;
+  return Math.min(1, cached / input);
 }
 
 function emptySnapshot(): TamiasSnapshot {

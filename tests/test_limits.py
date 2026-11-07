@@ -14,14 +14,70 @@ import pytest
 
 from tamias.limits import (
     BACKOFF_SECONDS,
+    QUOTA_TTL_SECONDS,
     RETRYABLE_STATUSES,
     UNAVAILABLE_SECONDS,
     LimitLedger,
+    Quota,
     parse_retry_after,
+    quota_from_headers,
     retryable,
 )
 
 NOW = 1_800_000_000.0
+
+
+# ------------------------------------------------------------------- the quota ---
+
+
+def test_quota_headers_are_read_in_either_house_style():
+    openai_style = quota_from_headers(
+        "openrouter",
+        {"x-ratelimit-remaining-requests": "42", "x-ratelimit-reset-requests": "120"},
+    )
+    draft_style = quota_from_headers("openrouter", {"ratelimit-remaining": "42"})
+
+    assert openai_style is not None
+    assert openai_style.remaining == 42
+    assert openai_style.resets_in == 120
+    assert draft_style is not None and draft_style.remaining == 42
+    assert draft_style.resets_in is None, "no reset header means no reset to report"
+
+
+def test_no_quota_headers_means_no_quota_to_show():
+    """An invented remaining count is a number no provider stands behind."""
+    assert quota_from_headers("nvidia", {"content-type": "application/json"}) is None
+    assert quota_from_headers("nvidia", {"x-ratelimit-remaining": ""}) is None
+
+
+def test_a_duration_string_reset_is_understood():
+    quota = quota_from_headers("openrouter", {"x-ratelimit-reset-requests": "1m30s"})
+    assert quota is not None and quota.resets_in == 90
+
+
+def test_a_recorded_quota_round_trips_and_expires():
+    ledger = LimitLedger(":memory:")
+    ledger.record_quota(
+        Quota(provider="openrouter", remaining=17, resets_in=90, seen=NOW), now=NOW
+    )
+
+    (quota,) = ledger.quotas(now=NOW + 5)
+    assert quota.provider == "openrouter" and quota.remaining == 17
+    assert quota.resets_in == pytest.approx(85, abs=1)
+
+    assert ledger.quotas(now=NOW + QUOTA_TTL_SECONDS + 1) == ()
+
+
+def test_a_stale_quota_is_pruned_with_the_cooldowns():
+    ledger = LimitLedger(":memory:")
+    ledger.record_quota(
+        Quota(provider="openrouter", remaining=5, resets_in=None, seen=NOW), now=NOW
+    )
+    ledger.record("nvidia", "some/model", 429, now=NOW)
+
+    assert ledger.prune(now=NOW + QUOTA_TTL_SECONDS + 1) == 2
+    assert ledger.quotas(now=NOW + QUOTA_TTL_SECONDS + 1) == ()
+    assert ledger.get("nvidia", "some/model", now=NOW + QUOTA_TTL_SECONDS + 1) is None
 
 
 def test_a_429_locks_the_model_out_and_the_lock_expires():
