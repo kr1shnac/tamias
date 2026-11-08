@@ -45,7 +45,10 @@ describing an arithmetic estimate as a realised saving.
   cannot be read, and refuses to call a delta a saving when the off arm rewrote
   something or the active arm routed nothing (that difference is noise, not
   routing). A negative result exits 0 with the loss printed: a measured loss is
-  a finding, not a failure to hide.
+  a finding, not a failure to hide. `--max-spend USD` is a hard ceiling enforced
+  against the provider's own ledger, not an estimate: the run stops before
+  sending the next request once that key's usage has moved by that much. No live
+  run is authorised yet, and none has been made.
 - **The pop-up's savings bar says `est. X% below list` instead of
   `realised`.** Its baseline is the requested model re-priced from the price
   sheet — a counterfactual no provider ever billed. The percentage carries one

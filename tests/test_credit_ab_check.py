@@ -487,3 +487,88 @@ def test_the_live_ab_stops_when_the_ledger_cannot_be_read(monkeypatch, capsys) -
     assert "ledger unreadable before the first arm" in out
     assert "nothing was sent" in out
     assert ran == []
+
+
+# --- the spend ceiling, enforced against the provider's own ledger -----------
+
+
+def test_a_negative_ceiling_is_a_usage_error(monkeypatch, capsys) -> None:
+    module = _module()
+    touched: list[int] = []
+    monkeypatch.setattr(module, "read_key", lambda *a, **k: touched.append(1))
+    monkeypatch.setattr(module, "run_arm", lambda *a, **k: touched.append(1))
+
+    code = module.main(_ab_argv(module) + ["--max-spend", "-1"])
+
+    assert code == 2
+    assert "--max-spend must be zero or greater" in capsys.readouterr().out
+    assert touched == []
+
+
+def test_the_ceiling_stops_the_run_before_the_active_arm(monkeypatch, capsys) -> None:
+    module = _module()
+    sent: list[str] = []
+    readings = iter([module.Ledger(usage=10.0), module.Ledger(usage=10.4)])
+    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+    monkeypatch.setattr(module, "read_key", lambda *a, **k: next(readings))
+
+    def runner(args: argparse.Namespace, arm, db_path: Path) -> object:
+        sent.append(arm.mode)
+        return module.ArmOutcome(requests_sent=2, rows=2, rewritten=0 if arm.mode == "off" else 1)
+
+    monkeypatch.setattr(module, "run_arm", runner)
+
+    code = module.main(_ab_argv(module) + ["--max-spend", "0.25"])
+
+    assert code == 1
+    out = capsys.readouterr().out
+    # The off arm ran, the ledger was read, and the active arm never happened:
+    # a ceiling that is enforced only after the fact is not a ceiling.
+    assert sent == ["off"], sent
+    assert "ceiling reached" in out
+    assert "the active arm was not sent" in out
+    assert "no more than the ceiling" in out
+
+
+def test_a_ceiling_that_is_not_reached_does_not_interfere(monkeypatch, capsys) -> None:
+    module = _module()
+    _patch_live(
+        module, monkeypatch, usage=(10.00, 10.06, 10.08), requests=(2, 2), rewritten=(0, 1)
+    )
+
+    assert module.main(_ab_argv(module) + ["--max-spend", "5"]) == 0
+
+    out = capsys.readouterr().out
+    assert "spend ceiling   $5.0000" in out
+    assert "ceiling reached" not in out
+    assert "MEASURED SAVING: $0.040000" in out
+
+
+def test_the_sweep_also_stops_at_the_ceiling(monkeypatch, capsys) -> None:
+    module = _module()
+    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+
+    # Two readings per arm: before and after, and the second arm is never run
+    # because the first run's cost already hits the ceiling.
+    readings = iter([module.Ledger(usage=10.0), module.Ledger(usage=10.50)])
+    monkeypatch.setattr(module, "read_key", lambda *a, **k: next(readings))
+    arms_run: list[str] = []
+    monkeypatch.setattr(module, "run_oracle", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(
+        module,
+        "run_arm",
+        lambda args, arm, db_path: arms_run.append(arm.name)
+        or module.ArmOutcome(requests_sent=2, rows=2, rewritten=1),
+    )
+
+    code = module.main([
+        "--candidates", "a,b", "--repeats", "1", "--oracle", "true",
+        "--upstream", "https://upstream.example/api", "--prices", "/nope.toml",
+        "--strong-model", "strong/model", "--max-spend", "0.25", "--allow-spend",
+    ])
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert arms_run == ["off"], arms_run
+    assert "stopped at the ceiling" in out
+    assert "INCONCLUSIVE" in out

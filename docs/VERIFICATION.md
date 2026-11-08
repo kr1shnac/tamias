@@ -378,6 +378,13 @@ the provider's own record of what was spent. Routing is the only variable.
   saving), and an off arm that rewrote something (not a baseline). A positive
   saving exits 0, and a **negative** saving exits 0 too — a loss is a
   measurement, so it is reported rather than hidden.
+- **A live run cannot run past its ceiling.** `--max-spend USD` is enforced
+  against the provider's own ledger: after each arm the script reads
+  `GET /api/v1/key` and compares that key's usage with the value at the start of
+  the run, so the cap is on money actually spent rather than on an estimate. The
+  refusals are covered offline with stubs — a negative ceiling is a usage error,
+  and a run whose first arm breaches it stops before the active arm is sent. No
+  live run has been authorised or made, so no ceiling has been exercised live.
 - **How much it costs.** The live A/B sends two identical tasks on paid models:
   roughly **$0.05-$0.30 for both arms** on a strong model, or under 10 cents on a
   cheap *paid* pair.
@@ -554,6 +561,24 @@ no money saving can be read — only the free-model request quota. A saving belo
 `--min-detectable` is reported as below the instrument floor, never as a
 measurement. A **negative** result exits 0 with the loss printed, because a
 measured loss is a real finding.
+
+**Spend ceiling.** Every live run should set `--max-spend USD`. It is a hard cap
+enforced against the provider's own ledger, not an estimate: after each arm the
+script reads `GET /api/v1/key` and compares that key's usage against the value at
+the start of the run, then stops before sending anything else once the ceiling is
+reached. A sweep stopped mid-way ranks nothing, so it reports **INCONCLUSIVE**;
+the A/B that reaches the ceiling between its arms does not send the active arm at
+all. A negative `--max-spend` is a usage error, and the ceiling is echoed before
+the first request so the operator can see the limit they set.
+
+**Spend ceiling.** Every live run should set `--max-spend USD`. It is a hard cap
+enforced against the provider's own ledger: after each arm the script reads
+`GET /api/v1/key` and compares that key's usage against the value at the start
+of the run, and stops before sending anything else once the ceiling is reached.
+A sweep stopped mid-way ranks nothing, so it reports **INCONCLUSIVE**; the A/B
+that reaches the ceiling between its arms does not send the active arm at all. A
+negative `--max-spend` is a usage error, and the ceiling is also printed before
+the first request so the operator can see the limit they set.
 
 **Candidate sweep — "which cheap model saves the most?"** The router is binary
 (strong vs *one* cheap target), so comparing several candidates is a comparison

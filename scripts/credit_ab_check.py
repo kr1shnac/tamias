@@ -337,6 +337,42 @@ def compare_arms(
     return ok, lines
 
 
+_INVALID = object()  # sentinel: the ceiling was malformed and is a usage error
+
+
+def _ceiling(args: argparse.Namespace) -> float | None:
+    """The operator's spend ceiling, or None when they chose not to set one.
+
+    A ceiling is a hard limit, not a hint, so a malformed one is a usage error
+    rather than something to round off and spend against anyway.
+    """
+    value = getattr(args, "max_spend", None)
+    if value is None:
+        return None
+    if value < 0:
+        say(f"--max-spend must be zero or greater, not {value}")
+        return _INVALID
+    return float(value)
+
+
+def _over_ceiling(before: Ledger, ledger: Ledger, ceiling: float | None) -> bool:
+    """Whether this key has spent at least the ceiling since ``before``.
+
+    Reads the provider's own ledger, so the ceiling is enforced against the
+    money actually spent rather than against an estimate.  An unreadable ledger
+    cannot prove the ceiling was crossed and is not treated as proof that it
+    was not.
+    """
+    if ceiling is None or before.usage is None or ledger.usage is None:
+        return False
+    spent = ledger.usage - before.usage
+    if spent >= ceiling:
+        say(f"  ceiling reached: {_usd(spent)} spent on this key is at or above "
+            f"--max-spend {_usd(ceiling)}")
+        return True
+    return False
+
+
 def _row_summary(db: Path) -> tuple[int, int, float | None]:
     """(rows, rewritten rows, summed stored computed cost) for a database."""
     import sqlite3
@@ -915,10 +951,15 @@ def run_live_sweep(args: argparse.Namespace, token: str) -> int:
         return 2
 
     arms = build_arms(candidates)
+    ceiling = _ceiling(args)
+    if ceiling is _INVALID:
+        return 2
     runs: list[RunResult] = []
     say(f"live sweep: {len(arms)} arms x {args.repeats} repeats = "
         f"{len(arms) * args.repeats} runs")
     say("this spends real money; Ctrl-C now to stop")
+    if ceiling is not None:
+        say(f"spend ceiling: {_usd(ceiling)} measured on this key")
     say()
 
     workdir = Path(tempfile.mkdtemp(prefix="tamias-credit-ab-live-"))
@@ -948,6 +989,24 @@ def run_live_sweep(args: argparse.Namespace, token: str) -> int:
             say(f"  {arm.name:<24} cost={_usd(cost):>12} "
                 f"task={'pass' if passed else 'FAIL' if passed is False else '?'}"
                 + (f"  {reason}" if reason else ""))
+            if _over_ceiling(before, after, ceiling):
+                say(f"  stopped at the ceiling; {len(runs)} of "
+                    f"{len(arms) * args.repeats} planned runs were made")
+                say()
+                summaries = summarise_runs(runs)
+                show_sweep(summaries)
+                say()
+                winner, lines = choose_cheapest(
+                    summaries, min_runs=args.repeats, min_detectable=args.min_detectable
+                )
+                for line in lines:
+                    say(line)
+                say()
+                say("RESULT: INCONCLUSIVE (stopped at the spend ceiling)")
+                say("A partial sweep cannot rank candidates; re-run with a higher")
+                say("--max-spend, or fewer candidates at fewer repeats.")
+                shutil.rmtree(workdir, ignore_errors=True)
+                return 1
 
     say()
     summaries = summarise_runs(runs)
@@ -993,6 +1052,9 @@ def run_live_ab(args: argparse.Namespace, token: str) -> int:
     if not args.cheap_model:
         say("a live A/B needs --cheap-model: the active arm routes to it.")
         return 2
+    ceiling = _ceiling(args)
+    if ceiling is _INVALID:
+        return 2
 
     workdir = Path(tempfile.mkdtemp(prefix="tamias-credit-ab-live-"))
     try:
@@ -1002,12 +1064,17 @@ def run_live_ab(args: argparse.Namespace, token: str) -> int:
             say("nothing was sent: with no ledger there is no measurement.")
             return 1
         say(f"ledger before   usage {_usd(before.usage)}")
+        if ceiling is not None:
+            say(f"spend ceiling   {_usd(ceiling)} measured on this key")
 
         off_db = workdir / "off.db"
         off_out = run_arm(args, ArmSpec(name="off", mode="off", cheap_model=""), off_db)
         _off_rows, _off_rewritten, off_cost = _row_summary(off_db)
         between = read_key(token)
         say(f"ledger between  usage {_usd(between.usage)}")
+        if _over_ceiling(before, between, ceiling):
+            say("the active arm was not sent, so this run cost no more than the ceiling.")
+            return 1
 
         active_db = workdir / "active.db"
         active_out = run_arm(
@@ -1074,6 +1141,9 @@ def run_live_ab(args: argparse.Namespace, token: str) -> int:
             say("A free or below-floor result is not a zero saving: it is no")
             say("measurement.  Repeat, use a paid model pair, or increase --repeats.")
             return 1
+        if _over_ceiling(before, after, ceiling):
+            say("NOTE: the ceiling was reached; both arms already ran, and nothing")
+            say("will be sent again.  Re-run under the same ceiling to measure again.")
         say("RESULT: PASS (measured against the provider's own ledger)")
         say("The counterfactual side of any realised saving is still a list-price")
         say("estimate; only this ledger delta is a measurement.")
@@ -1086,6 +1156,12 @@ def main(argv: list[str] | None = None) -> int:
     global _SECRET
     args = _parser().parse_args(argv)
     _SECRET = os.environ.get(args.api_key_env, "").strip()
+
+    # The ceiling is validated after parsing and before anything else, so a
+    # malformed one is a usage error rather than a run that spends against a
+    # ceiling nobody could read.
+    if _ceiling(args) is _INVALID:
+        return 2
 
     if args.dry_run:
         with tempfile.TemporaryDirectory(prefix="tamias-credit-ab-") as name:
@@ -1171,6 +1247,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-detectable", type=float, default=DEFAULT_MIN_DETECTABLE,
                         help="savings below this are reported as below the floor "
                              f"(default: {DEFAULT_MIN_DETECTABLE})")
+    parser.add_argument("--max-spend", type=float, default=None, metavar="USD",
+                        help="hard ceiling on dollars this key spends during the "
+                             "run; the arms stop when the provider's ledger "
+                             "reaches it. Never send a paid run without one")
     parser.add_argument("--candidates", default="",
                         help="comma-separated cheap models to sweep, e.g. a,b,c")
     parser.add_argument("--repeats", type=int, default=3,
