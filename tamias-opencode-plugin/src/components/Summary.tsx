@@ -21,33 +21,56 @@ export interface KpiStripProps {
 export function KpiStrip(props: KpiStripProps) {
   const palette = usePalette();
 
+  const rated = () => props.summary.n_free + props.summary.n_paid;
   const freeShare = () => {
-    const known = props.summary.n_free + props.summary.n_paid;
+    const known = rated();
     return known > 0 ? props.summary.n_free / known : null;
   };
 
   const spent = () => {
     if (props.summary.n_requests === 0) return "no requests yet";
     if (props.summary.n_priced === 0) return "cost unknown";
-    const prefix = props.summary.estimated ? "~" : "";
+    // The tilde belongs to the amount that is estimated, not to every number
+    // in the window.  A billed actual spend is not "~" just because a baseline
+    // elsewhere came from the sheet.
+    const prefix = props.summary.actual_estimated ? "~" : "";
     return `${prefix}${money(props.summary.actual_total)} spent`;
   };
 
-  const line = () => {
+  // Two lines, not one clipped line: a narrow terminal used to cut off
+  // "failed" and "unpriced" first, which are the two facts a user must see.
+  const primary = () => {
     const summary = props.summary;
     const parts = [count(summary.n_requests) + " req", spent()];
     if (summary.n_switched > 0) parts.push(`${count(summary.n_switched)} switched`);
-    if (freeShare() !== null) parts.push(`● ${percent(freeShare())} free`);
-    // The cache share is context for the savings bar, not a saving: a high
-    // share is the case where a switch re-ingests the prompt and can cost more
-    // than it keeps, which is why `report` prices the stay arm cache-warm.
-    if (summary.cache_share !== null) parts.push(`cache ${percent(summary.cache_share)} warm`);
-    if (summary.n_unpriced > 0) parts.push(`${count(summary.n_unpriced)} unpriced`);
     if (summary.n_failed > 0) parts.push(`${count(summary.n_failed)} failed`);
     return clip(parts.join(" · "), props.width);
   };
 
-  return <text wrapMode="none" fg={palette().muted}>{line()}</text>;
+  const secondary = () => {
+    const summary = props.summary;
+    const parts: string[] = [];
+    if (freeShare() !== null) {
+      parts.push(
+        `● ${percent(freeShare())} free (${count(summary.n_free)}/${count(rated())} rated)`,
+      );
+    }
+    // The cache share is context for the savings bar, not a saving: a high
+    // share is the case where a switch re-ingests the prompt and can cost more
+    // than it keeps, which is why `report` prices the stay arm cache-warm.
+    if (summary.cache_share !== null) {
+      parts.push(`cache ${percent(summary.cache_share)} warm`);
+    }
+    if (summary.n_unpriced > 0) parts.push(`${count(summary.n_unpriced)} unpriced`);
+    return clip(parts.join(" · "), props.width);
+  };
+
+  return (
+    <box flexDirection="column" flexShrink={0}>
+      <text wrapMode="none" fg={palette().muted}>{primary()}</text>
+      <text wrapMode="none" fg={palette().muted}>{secondary()}</text>
+    </box>
+  );
 }
 
 export interface SavingsBarProps {
@@ -70,16 +93,18 @@ export function SavingsBar(props: SavingsBarProps) {
     if (summary.n_requests === 0) return "no requests in this scope yet";
     if (summary.n_priced === 0) return "savings unknown · no request carried a usable baseline";
     if (summary.baseline_total <= 0) return "requested models were free · nothing to save";
+    if (summary.saved_total === 0) return "no list-price gap in this window";
     const value = ratio();
     if (value === null) return "savings unknown";
-    const estimate = summary.estimated ? " (est.)" : "";
+    // The baseline is what the requested model would have cost at list price.
+    // It is a counterfactual, never a provider invoice, so this is "est." even
+    // when the actual side is billed.  An invoice-proven number belongs to
+    // `tamias reconcile --invoice`, not to this arithmetic.
+    // One decimal so 99.75% does not round to a misleading "100%".
     if (value < 0) {
-      return `realised cost ${money(-summary.saved_total)} over baseline · ${percent(Math.abs(value))}${estimate}`;
+      return `est. ${percent(Math.abs(value), 1)} above list · ${money(-summary.saved_total)} more than baseline`;
     }
-    // "realised", not "saved": this bar counts rows the proxy actually
-    // rewrote.  `tamias report` also prices shadow/declined decisions, and
-    // those hypothetical savings must not look like money already kept.
-    return `${percent(value)} realised · ${money(summary.saved_total)} of ${money(summary.baseline_total)} baseline${estimate}`;
+    return `est. ${percent(value, 1)} below list · ${money(summary.saved_total)} of ${money(summary.baseline_total)} baseline`;
   };
 
   const empty = () => props.summary.n_priced === 0 || props.summary.n_requests === 0;

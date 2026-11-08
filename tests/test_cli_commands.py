@@ -259,6 +259,8 @@ def test_run_prices_default_falls_back_to_the_home_sheet(monkeypatch, tmp_path: 
     home_sheet.parent.mkdir(parents=True)
     _write_prices(home_sheet.parent)
     monkeypatch.setenv("HOME", str(home))
+    # Path.home() reads USERPROFILE on Windows and HOME on POSIX.
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("TAMIAS_UPSTREAM", raising=False)
     command = _capture_serve_command(monkeypatch)
@@ -273,6 +275,7 @@ def test_run_falls_back_to_the_sheet_bundled_with_the_package(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "no-home-sheet"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "no-home-sheet"))
     monkeypatch.delenv("TAMIAS_UPSTREAM", raising=False)
     command = _capture_serve_command(monkeypatch)
 

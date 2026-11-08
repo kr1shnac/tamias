@@ -368,6 +368,16 @@ the provider's own record of what was spent. Routing is the only variable.
 - **The live path cannot spend by accident.** It is refusal-gated behind
   `--allow-spend`; without it the script prints the procedure and exits; without a
   key `--read-key` exits 2.
+- **The two-arm A/B described by the docs exists and refuses properly.** The
+  documented no-`--candidates` A/B runs the off arm, reads the ledger, runs the
+  active arm and reads it again, so `saving = X - Y` is one measurement. Its
+  refusals are covered offline with stubbed ledger and arms: no ledger movement
+  ("below the instrument floor", never `MEASURED SAVING`), a ledger that cannot
+  be read before the first arm (which sends nothing at all), unequal request
+  counts, an active arm that routed nothing (the delta would be noise, not a
+  saving), and an off arm that rewrote something (not a baseline). A positive
+  saving exits 0, and a **negative** saving exits 0 too — a loss is a
+  measurement, so it is reported rather than hidden.
 - **How much it costs.** The live A/B sends two identical tasks on paid models:
   roughly **$0.05-$0.30 for both arms** on a strong model, or under 10 cents on a
   cheap *paid* pair.
@@ -393,10 +403,20 @@ smaller than the floor is reported as below the floor, not as a measurement.
   including the negative case) and the *measurement across two arms* is verified
   end to end offline (`scripts/credit_ab_check.py`, above); what remains
   unverified is that the rates are real and that any cheap model is genuinely
-  cheaper per task. `tamias reconcile` now makes the comparison possible
-  row by row, offline from stored provider costs or online from the provider's
-  generation record; a live generation lookup has been run, but no provider
-  invoice has been compared.
+  cheaper per task. `tamias reconcile` makes the comparison possible row by row,
+  offline from stored provider costs, online from the provider's generation
+  record, or from a provider invoice via `--invoice` (row-level or day-level, so
+  any provider that exports billing can prove the billed side). A live generation
+  lookup has been run; **no invoice file has been reconciled**, and no live A/B
+  has been authorised, so no realised saving is claimed anywhere.
+- **The pop-up's saving line is an estimate by construction.** Its baseline is
+  the requested model re-priced from the sheet, which is a counterfactual, not
+  a bill. The pop-up now says `est. X% below list` (one decimal, so 99.75% never
+  renders as 100%), shows the free-share denominator (`2/6 rated`), counts only
+  *applied* switches, renders a STAY row whose model changed through failover as
+  `served by` rather than an arrow, and reports a missing cache count as unknown
+  rather than 0%. An invoice-proven number can only come from
+  `tamias reconcile --invoice`.
 - **A provider invoice.** `tamias reconcile --online` has read real generation
   records (12 ids, 0 failed), but no invoice from any provider has been compared
   with the log.
@@ -520,10 +540,20 @@ to also read `GET /api/v1/credits`, which its docs say needs a *management* key.
 
 **The live A/B** is refusal-gated behind `--allow-spend`; without it the script
 prints the procedure and exits. It sends two paid completions and costs roughly
-**$0.05–$0.30 for both arms** on a strong model. A `:free` model bills `0`, so on
-free models the ledger does not move and no money saving can be read — only the
-free-model request quota. A saving below `--min-detectable` is reported as below
-the instrument floor, never as a measurement.
+**$0.05–$0.30 for both arms** on a strong model. The A/B is the documented
+no-`--candidates` form: the off arm runs, the ledger is read, the active arm runs
+with `--cheap-model`, the ledger is read again, and `saving = X - Y` is computed
+from those three reads. It runs both arms through their own in-process proxy
+with the router mode pinned at construction, so routing is the only variable. It
+refuses before spending anything when `--upstream`, `--prices`,
+`--strong-model` or `--cheap-model` is missing, and it stops before the first
+request if the ledger cannot be read. An active arm that routed nothing, or an
+off arm that rewrote something, is reported as a non-comparison rather than as a
+saving. A `:free` model bills `0`, so on free models the ledger does not move and
+no money saving can be read — only the free-model request quota. A saving below
+`--min-detectable` is reported as below the instrument floor, never as a
+measurement. A **negative** result exits 0 with the loss printed, because a
+measured loss is a real finding.
 
 **Candidate sweep — "which cheap model saves the most?"** The router is binary
 (strong vs *one* cheap target), so comparing several candidates is a comparison
@@ -588,7 +618,8 @@ is `0.1.0a3`.
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
-| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. `tamias reconcile` compares stored computed cost with stored or looked-up provider cost per row; the live generation lookup succeeded (12 ids, 0 failed), but no invoice has been reconciled. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`) |
+| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. `tamias reconcile` compares stored computed cost with stored or looked-up provider cost per row, or with a provider invoice supplied as a CSV (`--invoice`, row-level or day-level); the live generation lookup succeeded (12 ids, 0 failed), but no invoice file has been reconciled. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`) |
+| Platform coverage | CI-gated | Linux (Python 3.11–3.14) is the full gate and passes here (1217 tests); macOS and Windows run the same suite on Python 3.12 in CI. Windows/macOS runs have not been executed on this machine: no result is claimed for them yet |
 | Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, direct NVIDIA capabilities and a 200 request on 2026-11-06, and OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key) |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions; the wheel carries `tamias/plugin` and CI fails if it does not |
 | Publish | Verified | `v1.0.2` published through Trusted Publishing (OIDC) on 2026-11-08. The PyPI wheel and sdist are byte-identical to the local build (matching SHA-256), and a clean Python 3.14 venv installed the wheel and ran `tamias 1.0.2`; `0.1.0a8` was the prior artifact |

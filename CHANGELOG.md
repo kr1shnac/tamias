@@ -5,6 +5,85 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A cross-platform and provider-agnostic proof pass: the Windows quoting holes are
+closed, the same gate runs on macOS and Windows, any provider's billing export
+can be reconciled, the documented live A/B actually exists, and the pop-up stops
+describing an arithmetic estimate as a realised saving.
+
+### Added
+
+- **`tamias reconcile --invoice` reconciles a provider's billing export.** A CSV
+  with one identity column and one USD amount column is joined to the log by row
+  id (`--invoice-join request_id`) or by the provider's generation id
+  (`generation_id`), so a provider with no per-request billing API — OpenAI,
+  Anthropic, Google, NVIDIA — can prove the billed side. `--invoice-scope day`
+  sums the computed cost of each UTC calendar day and compares it with the
+  invoice's daily line, for providers that publish only daily totals. The
+  invoice is the **only** billed side: a selected row it does not cover stays
+  `UNKNOWN` rather than being backfilled from the response-reported cost.
+  Amounts may carry `$` and thousands separators; a blank cell, a negative
+  amount, a missing column, or an invoice with no line items is a runtime error
+  (exit 1), never a skipped line. Duplicate identity keys are summed (one request
+  can be split across SKUs). The JSON summary gains an `invoice` object and the
+  artifact an `invoice_cost` field. `--invoice` and `--online` are alternative
+  billed sources and cannot be combined.
+- **CI runs the Python suite on macOS and Windows.** The `platform` job runs
+  `pytest -q` and `ruff check` on `macos-latest` and `windows-latest` on Python
+  3.12, alongside the existing Ubuntu matrix (3.11–3.14), so portability is
+  checked rather than asserted.
+
+### Changed
+
+- **The documented live A/B in `scripts/credit_ab_check.py` exists.** The
+  no-`--candidates` path behind `--allow-spend` now runs the off arm, reads the
+  ledger, runs the active arm with `--cheap-model`, reads the ledger again, and
+  reports `MEASURED SAVING: X - Y` from the provider's own numbers. It refuses
+  before spending when `--upstream`, `--prices`, `--strong-model` or
+  `--cheap-model` is missing, stops before the first request when the ledger
+  cannot be read, and refuses to call a delta a saving when the off arm rewrote
+  something or the active arm routed nothing (that difference is noise, not
+  routing). A negative result exits 0 with the loss printed: a measured loss is
+  a finding, not a failure to hide.
+- **The pop-up's savings bar says `est. X% below list` instead of
+  `realised`.** Its baseline is the requested model re-priced from the price
+  sheet — a counterfactual no provider ever billed. The percentage carries one
+  decimal so 99.75% no longer renders as `100%`.
+- **The pop-up KPI line is two lines, and they are ordered by what matters.**
+  `requests · spent · switched · failed` first, then `free (n/m rated) · cache
+  … warm · unpriced`, so a narrow terminal can no longer clip `failed` and
+  `unpriced` off the end. The free share now shows its denominator, and rows the
+  sheet cannot rate are excluded from it rather than counted as not-free.
+- **The pop-up counts only applied switches.** A row whose used model differs
+  because of a *failover* is not a routing switch, so `n_switched` now requires
+  `decision_action = SWITCH` with a changed model and a 200 status.
+- **The pop-up's latest-route line no longer shows an arrow for a stay.** A
+  STAY row whose model changed through failover renders `model (served by
+  other)`; only an applied SWITCH gets `a → b`. A failed latest row says
+  `failed <status>`.
+- **A missing cache count is unknown, not zero.** `cache_share` is computed only
+  over rows that reported both input and cached counts, so a provider that omits
+  cache fields no longer turns a cold prompt into `cache 0% warm`.
+- **`live=false` before the first `/limits` response is `○ connecting`, not
+  `○ log only`.** The poll exposes `attempted()`, and the pool line says
+  `live connecting… · showing the log meanwhile` until the first response lands.
+- **Windows-safe command quoting.** A provider's `api_key_command` is split with
+  POSIX rules on Linux/macOS and handed to `cmd.exe` as written on Windows
+  (`shlex` mangles quoted paths such as `"C:\Program Files\op.exe"` and would
+  report every provider as unconfigured). Commands `tamias` prints for the user
+  are quoted with `subprocess.list2cmdline` on Windows and `shlex.join`
+  elsewhere. Tests that assert POSIX file modes and the systemd installer are
+  skipped where those concepts do not exist.
+
+### Fixed
+
+- `scripts/credit_ab_check.py` printed a two-arm A/B procedure it could not run:
+  `--allow-spend` without `--candidates` exited 2. The docs and the code now
+  describe the same path.
+- `_opencode_serve_command` emitted `--cheap-model <free-model>` unquoted, where
+  the shell would read `<free-model>` as a redirect.
+
 ## [1.0.2] - 2026-11-08
 
 A packaging, routing and honesty pass: the pop-up travels with the wheel and

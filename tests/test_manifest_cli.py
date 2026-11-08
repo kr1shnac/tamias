@@ -79,6 +79,7 @@ def sign(tmp_path: Path, private: Path, *, project: str = "acme") -> Path:
     return out
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_keygen_writes_a_locked_down_private_key(tmp_path: Path) -> None:
     private, public = keygen(tmp_path)
     assert private.exists() and public.exists()

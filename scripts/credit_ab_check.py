@@ -57,6 +57,7 @@ import argparse
 import asyncio
 import hashlib
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -340,6 +341,8 @@ def _row_summary(db: Path) -> tuple[int, int, float | None]:
     """(rows, rewritten rows, summed stored computed cost) for a database."""
     import sqlite3
 
+    if not db.is_file():
+        return 0, 0, None
     uri = f"{db.resolve().as_uri()}?mode=ro"
     with sqlite3.connect(uri, uri=True) as conn:
         conn.row_factory = sqlite3.Row
@@ -686,11 +689,16 @@ def print_live_procedure(args: argparse.Namespace) -> None:
         say("A/B procedure (no --candidates):")
         say()
         say("  1. read the ledger:   GET /api/v1/key  (usage before)")
-        say("  2. run the task with --router-mode off     -> X dollars")
-        say("  3. read the ledger again                   (usage between)")
-        say("  4. run the SAME task with --router-mode active -> Y dollars")
-        say("  5. read the ledger once more               (usage after)")
+        say("  2. run the off arm:   the task, through the proxy, router off")
+        say("  3. read the ledger again                   (usage between) -> X")
+        say("  4. run the active arm: the SAME task, --cheap-model as target")
+        say("  5. read the ledger once more               (usage after)  -> Y")
         say("  6. saving = X - Y  (the provider's own numbers)")
+        say()
+        say("Both arms send the same task through the same proxy and differ only")
+        say("in the router mode, so the ledger delta is attributable to routing.")
+        say("If the off arm rewrote anything, or the active arm routed nothing,")
+        say("the run is not a comparison and the script says so.")
         say()
     say(f"  strong model: {args.strong_model or '<not set>'}")
     say(f"  cheap model:  {args.cheap_model or '<not set>'}")
@@ -962,6 +970,118 @@ def run_live_sweep(args: argparse.Namespace, token: str) -> int:
     return 0
 
 
+def run_live_ab(args: argparse.Namespace, token: str) -> int:
+    """The real, spending two-arm A/B: router off, then router active.
+
+    The comparison is only valid because routing is the only variable.  Both
+    arms send the *same* two-turn task to the *same* provider through the
+    *same* proxy, with the router mode pinned at construction, so any
+    difference in cost is attributable to the decision the router made.
+
+    The cost of each arm comes from the provider's ledger, not from a price
+    sheet: ``X`` is the usage delta across the off arm and ``Y`` the delta
+    across the active arm, read before, between and after.  A non-moving
+    ledger is reported as such and never as "$0.00 saved".
+    """
+    if not args.upstream or not args.prices:
+        say("a live A/B needs --upstream and --prices: the arms run their own")
+        say("proxy, so it needs to know where the provider is and what it costs.")
+        return 2
+    if not args.strong_model:
+        say("a live A/B needs --strong-model: that is the model both arms ask for.")
+        return 2
+    if not args.cheap_model:
+        say("a live A/B needs --cheap-model: the active arm routes to it.")
+        return 2
+
+    workdir = Path(tempfile.mkdtemp(prefix="tamias-credit-ab-live-"))
+    try:
+        before = read_key(token)
+        if not before.readable:
+            say(f"ledger unreadable before the first arm ({before.error})")
+            say("nothing was sent: with no ledger there is no measurement.")
+            return 1
+        say(f"ledger before   usage {_usd(before.usage)}")
+
+        off_db = workdir / "off.db"
+        off_out = run_arm(args, ArmSpec(name="off", mode="off", cheap_model=""), off_db)
+        _off_rows, _off_rewritten, off_cost = _row_summary(off_db)
+        between = read_key(token)
+        say(f"ledger between  usage {_usd(between.usage)}")
+
+        active_db = workdir / "active.db"
+        active_out = run_arm(
+            args,
+            ArmSpec(name="active", mode="active", cheap_model=args.cheap_model),
+            active_db,
+        )
+        _on_rows, _on_rewritten, on_cost = _row_summary(active_db)
+        after = read_key(token)
+        say(f"ledger after    usage {_usd(after.usage)}")
+        say()
+
+        off = ArmResult(
+            name="off",
+            mode="off",
+            rows=off_out.rows,
+            rewritten=off_out.rewritten,
+            logged_cost=off_cost,
+            error=off_out.error,
+            requests_sent=off_out.requests_sent,
+        )
+        active = ArmResult(
+            name="active",
+            mode="active",
+            rows=active_out.rows,
+            rewritten=active_out.rewritten,
+            logged_cost=on_cost,
+            error=active_out.error,
+            requests_sent=active_out.requests_sent,
+        )
+        for arm in (off, active):
+            say(f"  arm {arm.name:<6} mode={arm.mode:<6} rows={arm.rows} "
+                f"rewritten={arm.rewritten} stored-cost={_usd(arm.logged_cost)}"
+                + (f"  ERROR {arm.error}" if arm.error else ""))
+        say()
+
+        # Attribution before comparison.  If the active arm routed nothing, or
+        # the off arm rewrote something, then the arms did not differ *by
+        # routing* and any ledger delta is run-to-run noise.  A measurement
+        # that cannot be attributed to the router is not a savings measurement.
+        if off.rewritten != 0:
+            say("RESULT: FAIL (the 'off' arm rewrote a request)")
+            say("The baseline arm is not a baseline: the router was not off.")
+            return 1
+        if active.rewritten == 0:
+            say("RESULT: INCONCLUSIVE (the active arm routed nothing)")
+            say("Both arms asked for the same model, so any ledger difference is")
+            say("noise rather than a saving.  Check --cheap-model and --min-gap.")
+            return 1
+
+        ok, lines = compare_arms(
+            Arms(off=off, active=active, before=before, between=between, after=after),
+            min_detectable=args.min_detectable,
+        )
+        for line in lines:
+            say(f"  {line}")
+        say()
+        if not ok:
+            say("RESULT: FAIL (the arms are not comparable; not a measurement)")
+            return 1
+        measured = any("MEASURED SAVING" in line for line in lines)
+        if not measured:
+            say("RESULT: INCONCLUSIVE (no money moved above the instrument floor)")
+            say("A free or below-floor result is not a zero saving: it is no")
+            say("measurement.  Repeat, use a paid model pair, or increase --repeats.")
+            return 1
+        say("RESULT: PASS (measured against the provider's own ledger)")
+        say("The counterfactual side of any realised saving is still a list-price")
+        say("estimate; only this ledger delta is a measurement.")
+        return 0
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     global _SECRET
     args = _parser().parse_args(argv)
@@ -1000,9 +1120,12 @@ def main(argv: list[str] | None = None) -> int:
             return run_live_sweep(args, _SECRET)
         say("tamias credit A/B check  (live)")
         say()
-        say("a non-sweep live run needs a --candidates list and --oracle;")
-        say("use --candidates a,b,c --oracle '<command>' --allow-spend")
-        return 2
+        say("This is the documented two-arm A/B: the same task with the router")
+        say("off, then active, with the provider's ledger read between the arms.")
+        say("Only the router mode changes, so the ledger delta is attributable")
+        say("to the routing decision.  It spends real money.")
+        say()
+        return run_live_ab(args, _SECRET)
 
     say("tamias credit A/B check")
     say()

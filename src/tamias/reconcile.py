@@ -13,9 +13,11 @@ never ``$0.00``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import csv
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -35,6 +37,9 @@ PASS = "PASS"
 FAIL = "FAIL"
 INCOMPLETE = "INCOMPLETE"
 EMPTY = "EMPTY"
+
+INVOICE_JOINS = ("request_id", "generation_id")
+INVOICE_SCOPES = ("row", "day")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +61,7 @@ class ComparedRow:
     billed_source: str | None
     logged_billed: float | None
     lookup_billed: float | None
+    invoice_billed: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,14 +131,18 @@ def _computed(row: dict[str, Any]) -> float | None:
 
 
 def compare_rows(
-    rows: Sequence[dict[str, Any]], tolerance: float = DEFAULT_TOLERANCE
+    rows: Sequence[dict[str, Any]],
+    tolerance: float = DEFAULT_TOLERANCE,
+    *,
+    invoice_only: bool = False,
 ) -> list[ComparedRow]:
     """Compare billed against computed for each row without inventing values.
 
-    ``lookup_cost_usd`` wins over the stored ``provider_cost_usd`` when present:
-    the lookup is the provider's own record, while the stored value came from
-    the response Tamias handled.  Both are kept on the result so an artifact can
-    show the two sources separately.
+    ``invoice_cost_usd`` wins over the lookup and the stored
+    ``provider_cost_usd`` when present: an invoice is the provider's final
+    record.  With ``invoice_only`` the invoice is the *only* billed side, so a
+    row the invoice does not cover stays UNKNOWN instead of falling back to a
+    response-reported number.  That keeps an invoice proof from mixing sources.
     """
     if tolerance < 0:
         raise ValueError("tolerance must be zero or greater")
@@ -141,7 +151,14 @@ def compare_rows(
         computed = _computed(row)
         logged = _number(row.get("provider_cost_usd"))
         lookup = _number(row.get("lookup_cost_usd"))
-        if lookup is not None:
+        invoice = _number(row.get("invoice_cost_usd"))
+        if invoice_only:
+            billed = invoice
+            source = "invoice" if invoice is not None else None
+        elif invoice is not None:
+            billed = invoice
+            source = "invoice"
+        elif lookup is not None:
             billed = lookup
             source = "lookup"
         elif logged is not None:
@@ -168,6 +185,7 @@ def compare_rows(
                 billed_source=source,
                 logged_billed=logged,
                 lookup_billed=lookup,
+                invoice_billed=invoice,
             )
         )
     return compared
@@ -301,3 +319,183 @@ def lookup_generation_costs(
             continue
         costs[generation_id] = cost
     return costs, errors
+
+
+@dataclass(frozen=True, slots=True)
+class Invoice:
+    """A provider invoice read as ``key -> USD`` plus its line count."""
+
+    costs: Mapping[str, float]
+    lines: int
+    duplicates: int
+
+
+def _invoice_amount(value: Any) -> float | None:
+    """A non-negative USD amount from a CSV cell, or None.
+
+    Export files commonly carry ``$`` and thousands separators.  Anything else
+    -- a blank cell, a currency code, a negative credit, NaN -- is refused so a
+    malformed invoice cannot quietly become a smaller bill.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        number = float(value)
+    elif isinstance(value, str):
+        text = value.strip().replace("$", "").replace(",", "")
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if number != number or number in (float("inf"), float("-inf")) or number < 0:
+        return None
+    return number
+
+
+def load_invoice(
+    path: str | Path,
+    *,
+    key_column: str = "request_id",
+    cost_column: str = "cost_usd",
+) -> Invoice:
+    """Read a line-item CSV from any provider's billing export.
+
+    The file must carry one identity column and one USD amount column.  The
+    identity is matched by the caller against Tamias's row id or the provider's
+    generation id; this function does not guess which one it is.  Duplicate keys
+    are summed because one request can be split across several SKUs (input,
+    output, cache).  A missing header, an empty key, or an unreadable amount is
+    an error, never a skipped line.
+    """
+    source = Path(path)
+    with source.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = [name.strip() for name in (reader.fieldnames or []) if name]
+        reader.fieldnames = fields
+        missing = [name for name in (key_column, cost_column) if name not in fields]
+        if missing:
+            raise ValueError(
+                f"{source}: missing column(s) {', '.join(missing)}; "
+                f"found {', '.join(fields) or '<none>'}"
+            )
+
+        costs: dict[str, float] = {}
+        lines = 0
+        duplicates = 0
+        for number, row in enumerate(reader, start=2):
+            raw_key = row.get(key_column)
+            key = raw_key.strip() if isinstance(raw_key, str) else ""
+            if not key:
+                raise ValueError(f"{source}:{number}: empty {key_column}")
+            cost = _invoice_amount(row.get(cost_column))
+            if cost is None:
+                raise ValueError(
+                    f"{source}:{number}: {cost_column} is not a "
+                    "non-negative USD amount"
+                )
+            lines += 1
+            if key in costs:
+                duplicates += 1
+                costs[key] += cost
+            else:
+                costs[key] = cost
+
+    if lines == 0:
+        raise ValueError(f"{source}: no invoice line items")
+    return Invoice(costs=costs, lines=lines, duplicates=duplicates)
+
+
+def apply_invoice(
+    rows: Sequence[dict[str, Any]],
+    costs: Mapping[str, float],
+    *,
+    key: str = "request_id",
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    """Attach invoice amounts to rows by row id or provider generation id.
+
+    Returns the enriched rows, the number of matched keys, and the invoice keys
+    that matched no selected row.  An unmatched key is not silently dropped: the
+    caller decides whether it is an out-of-window line or a real coverage gap.
+    """
+    if key not in INVOICE_JOINS:
+        raise ValueError(f"invoice join must be one of: {', '.join(INVOICE_JOINS)}")
+
+    matched: set[str] = set()
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        if key == "request_id":
+            raw = row.get("id")
+            row_key = (
+                str(raw)
+                if isinstance(raw, int) and not isinstance(raw, bool)
+                else None
+            )
+        else:
+            row_key = _text(row.get("generation_id"))
+        if row_key is not None and row_key in costs:
+            enriched.append({**row, "invoice_cost_usd": costs[row_key]})
+            matched.add(row_key)
+        else:
+            enriched.append(row)
+
+    unmatched = sorted(key_ for key_ in costs if key_ not in matched)
+    return enriched, len(matched), unmatched
+
+
+def aggregate_invoice_days(
+    rows: Sequence[dict[str, Any]], costs: Mapping[str, float]
+) -> tuple[list[dict[str, Any]], list[str], int, int]:
+    """Collapse rows and invoice lines to one comparison per UTC calendar day.
+
+    Providers that publish only a daily cost total cannot be joined per request.
+    For those, the strongest honest claim is the day total: sum Tamias's
+    computed cost for the day and compare it with the invoice's line for that
+    day.  A day with an unpriced row keeps its total unknown, so the comparison
+    is INCOMPLETE rather than a partial sum.
+
+    Returns ``(rows, unmatched_days, matched_days, undated_rows)``.
+    """
+    for key in costs:
+        try:
+            date.fromisoformat(key)
+        except ValueError as exc:
+            raise ValueError(
+                f"invoice day {key!r} is not a YYYY-MM-DD date"
+            ) from exc
+
+    totals: dict[str, float | None] = {}
+    undated = 0
+    for row in rows:
+        stamp = _row_date(row)
+        if stamp is None:
+            undated += 1
+            continue
+        day = stamp.isoformat()
+        value = _computed(row)
+        if day not in totals:
+            totals[day] = value
+        else:
+            prior = totals[day]
+            totals[day] = None if prior is None or value is None else prior + value
+
+    aggregated: list[dict[str, Any]] = []
+    matched = 0
+    for day in sorted(set(totals) | set(costs)):
+        invoice_cost = costs.get(day)
+        if invoice_cost is not None:
+            matched += 1
+        aggregated.append(
+            {
+                "id": None,
+                "ts": f"{day}T00:00:00Z",
+                "computed_list_cost_usd": totals.get(day),
+                "invoice_cost_usd": invoice_cost,
+            }
+        )
+
+    unmatched = sorted(set(costs) - set(totals))
+    return aggregated, unmatched, matched, undated

@@ -8,12 +8,17 @@ prerequisites, and the refusal to remove a unit tamias did not write.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from tamias import cli
 from tamias.cli import SERVICE_MARKER, main, render_service_unit
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="systemd user units are Linux-only"
+)
 
 UNIT = Path("systemd") / "user" / "tamias.service"
 

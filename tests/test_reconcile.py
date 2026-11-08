@@ -27,7 +27,10 @@ from tamias.reconcile import (  # noqa: E402
     FAIL,
     INCOMPLETE,
     PASS,
+    aggregate_invoice_days,
+    apply_invoice,
     compare_rows,
+    load_invoice,
     lookup_generation_costs,
     summarize,
 )
@@ -390,3 +393,193 @@ def test_a_failed_lookup_stays_unknown_and_never_prints_the_key(
     assert "1 generation lookup(s) failed" in err
     assert FAKE_KEY not in out
     assert FAKE_KEY not in err
+
+
+# --- provider invoices, the provider-agnostic proof path --------------------
+
+
+def invoice(path: Path, body: str) -> Path:
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_an_invoice_line_overrides_the_stored_bill(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, computed=0.10, billed=0.10)
+    csv = invoice(
+        tmp_path / "invoice.csv", "request_id,cost_usd\n1,0.12\n"
+    )
+
+    code, out, _err = run(capsys, db, "--invoice", str(csv))
+
+    assert code == 3
+    assert "FAIL" in out
+    assert "invoice: 1 line(s) by request_id (row scope); 1 matched" in out
+    assert "$0.020000" in out
+
+
+def test_a_row_missing_from_the_invoice_is_incomplete_not_backfilled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, computed=0.10, billed=0.10)
+    log(db, computed=0.20, billed=0.20)
+    csv = invoice(tmp_path / "invoice.csv", "request_id,cost_usd\n1,0.10\n")
+
+    code, out, _err = run(capsys, db, "--invoice", str(csv))
+
+    assert code == 2
+    assert "INCOMPLETE" in out
+    # The stored bill on row 2 is visible in the log but is not used to fill
+    # the invoice gap: a proof may not mix two billed sources.
+    assert "1 without a billed cost" in out
+
+
+def test_an_invoice_can_join_on_the_provider_generation_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, computed=0.10, billed=None, generation="chatcmpl-abc")
+    csv = invoice(
+        tmp_path / "invoice.csv", "generation_id,cost_usd\nchatcmpl-abc,0.10\n"
+    )
+
+    code, out, _err = run(
+        capsys, db, "--invoice", str(csv), "--invoice-join", "generation_id"
+    )
+
+    assert code == 0
+    assert "PASS" in out
+
+
+def test_invoice_duplicate_keys_are_summed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, computed=0.10, billed=None)
+    csv = invoice(
+        tmp_path / "invoice.csv",
+        "request_id,cost_usd\n1,0.04\n1,$0.06\n",
+    )
+
+    code, out, _err = run(capsys, db, "--invoice", str(csv))
+
+    assert code == 0
+    assert "PASS" in out
+    assert "duplicate keys summed: 1" in out
+
+
+def test_an_unmatched_invoice_line_blocks_pass_unless_allowed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, computed=0.10, billed=None)
+    csv = invoice(
+        tmp_path / "invoice.csv", "request_id,cost_usd\n1,0.10\n2,0.99\n"
+    )
+
+    code, out, _err = run(capsys, db, "--invoice", str(csv))
+    assert code == 2
+    assert "INCOMPLETE" in out
+    assert "invoice lines matching no selected row: 1" in out
+
+    code, out, _err = run(
+        capsys, db, "--invoice", str(csv), "--invoice-allow-unmatched"
+    )
+    assert code == 0
+    assert "PASS" in out
+
+
+def test_a_malformed_invoice_is_a_runtime_error_not_a_smaller_bill(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, computed=0.10, billed=None)
+
+    for body in (
+        "request_id,amount\n1,0.10\n",
+        "request_id,cost_usd\n1,-0.10\n",
+        "request_id,cost_usd\n1,\n",
+        "request_id,cost_usd\n",
+    ):
+        csv = invoice(tmp_path / "invoice.csv", body)
+        code, out, err = run(capsys, db, "--invoice", str(csv))
+        assert code == 1, body
+        assert out == ""
+        assert "tamias reconcile:" in err
+
+
+def test_invoice_and_online_are_alternative_billed_sources(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, computed=0.10, billed=None, generation="gen-abc")
+    csv = invoice(tmp_path / "invoice.csv", "request_id,cost_usd\n1,0.10\n")
+
+    code, _out, err = run(capsys, db, "--invoice", str(csv), "--online")
+
+    assert code == 1
+    assert "alternative billed sources" in err
+
+
+def test_day_scope_compares_daily_totals(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, ts="2026-01-05T01:00:00Z", computed=0.10, billed=None)
+    log(db, ts="2026-01-05T02:00:00Z", computed=0.10, billed=None)
+    csv = invoice(tmp_path / "invoice.csv", "date,cost_usd\n2026-01-05,0.20\n")
+
+    code, out, _err = run(capsys, db, "--invoice", str(csv), "--invoice-scope", "day")
+
+    assert code == 0
+    assert "PASS" in out
+    assert "invoice: 1 line(s) by date (day scope); 1 matched" in out
+
+
+def test_day_scope_keeps_an_unpriced_row_unknown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = tmp_path / "requests.db"
+    log(db, ts="2026-01-05T01:00:00Z", computed=0.10, billed=None)
+    log(db, ts="2026-01-05T02:00:00Z", computed=None, billed=None)
+    csv = invoice(tmp_path / "invoice.csv", "date,cost_usd\n2026-01-05,0.20\n")
+
+    code, out, _err = run(capsys, db, "--invoice", str(csv), "--invoice-scope", "day")
+
+    assert code == 2
+    assert "INCOMPLETE" in out
+
+
+def test_day_scope_rejects_a_non_date_key(tmp_path: Path):
+    cargo = invoice(tmp_path / "invoice.csv", "date,cost_usd\nnot-a-date,0.20\n")
+    loaded = load_invoice(cargo, key_column="date")
+
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        aggregate_invoice_days([], loaded.costs)
+
+
+def test_apply_invoice_reports_keys_that_matched_no_row():
+    rows = [{"id": 1, "generation_id": "gen-a"}]
+    enriched, matched, unmatched = apply_invoice(rows, {"1": 0.1, "2": 0.2})
+
+    assert matched == 1
+    assert unmatched == ["2"]
+    assert enriched[0]["invoice_cost_usd"] == pytest.approx(0.1)
+
+
+def test_day_aggregation_counts_rows_it_cannot_date():
+    rows = [
+        {"id": 1, "ts": "not-a-date", "computed_list_cost_usd": 0.1},
+        {"id": 2, "ts": "2026-01-05T00:00:00Z", "computed_list_cost_usd": 0.1},
+    ]
+    aggregated, unmatched, matched, undated = aggregate_invoice_days(
+        rows, {"2026-01-05": 0.1}
+    )
+
+    assert matched == 1
+    assert unmatched == []
+    assert undated == 1
+    assert len(aggregated) == 1

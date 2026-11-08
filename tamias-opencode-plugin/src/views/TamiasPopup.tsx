@@ -68,7 +68,11 @@ function PopupBody(props: Pick<TamiasPopupProps, "renderer">) {
   const latest = createMemo<TamiasRow | undefined>(() => data.rows()[0]);
   const width = createMemo(() => Math.max(36, Math.min(76, size.width() - 12)));
 
-  const headerRight = () => (limits.live() ? "● live" : "○ log only");
+  // `live=false` before the first response is not the same as "the proxy is
+  // down".  The tri-state keeps the header honest while the first fetch is in
+  // flight, instead of claiming the live view is unavailable.
+  const headerRight = () =>
+    limits.live() ? "● live" : limits.attempted() ? "○ log only" : "○ connecting";
   // Shadow mode rewrites nothing, so a zero savings bar is the honest answer,
   // not a failure.  Naming the mode beside "all recent" explains the zero
   // without pretending the counterfactual was earned.
@@ -80,13 +84,19 @@ function PopupBody(props: Pick<TamiasPopupProps, "renderer">) {
     const row = latest();
     if (!row) return "latest  no metered request yet";
     const tier = row.tier === "free" ? "● free" : row.tier === "paid" ? "$ paid" : "? price";
-    return clip(
-      `latest  ${shortModel(row.model_requested, 22)} → ${shortModel(
-        row.model_used,
-        22,
-      )}  ${tier}  ${row.decision}`,
-      width(),
-    );
+    // Only an applied SWITCH gets an arrow.  A STAY row whose used model
+    // differs because of a failover is named as "served by", never as a
+    // routing decision the router did not make.
+    const requested = shortModel(row.model_requested, 22);
+    const used = shortModel(row.model_used, 22);
+    const applied = row.decision === "SWITCH" && row.switched && !row.failed;
+    const modelPart = applied
+      ? `${requested} → ${used}`
+      : row.model_requested === row.model_used
+        ? requested
+        : `${requested} (served by ${used})`;
+    const failure = row.failed ? `  failed ${row.status}` : "";
+    return clip(`latest  ${modelPart}  ${tier}  ${row.decision}${failure}`, width());
   });
 
   const latestReason = createMemo(() => {
@@ -96,7 +106,10 @@ function PopupBody(props: Pick<TamiasPopupProps, "renderer">) {
   });
 
   const poolLine = createMemo(() => {
-    if (!limits.live() || !limits.snapshot()) {
+    if (!limits.live()) {
+      if (!limits.attempted()) {
+        return clip("live  connecting… · showing the log meanwhile", width());
+      }
       const detail = limits.error();
       // Put the user-facing claim before the raw transport error: at a narrow
       // width the clip must never cut off "showing the log alone".
@@ -107,7 +120,8 @@ function PopupBody(props: Pick<TamiasPopupProps, "renderer">) {
         width(),
       );
     }
-    const snapshot = limits.snapshot()!;
+    const snapshot = limits.snapshot();
+    if (!snapshot) return clip("live  connected · loading the pool", width());
     const parts = [
       `pool  ${count(snapshot.pool.candidates)}/${count(snapshot.pool.considered)} capable`,
     ];

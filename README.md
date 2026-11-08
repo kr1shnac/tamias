@@ -192,7 +192,10 @@ tamias run --prices prices.toml -- your-agent
 
 To compare what Tamias computed against what your provider actually billed, run
 `tamias reconcile` — offline by default, or with `--online` to read the
-provider's generation record for OpenRouter `gen-` ids (see
+provider's generation record for OpenRouter `gen-` ids. Any provider that can
+export its billing as CSV is covered the same way: pass the export with
+`--invoice`, either joined per request or, when the provider only publishes
+daily cost totals, with `--invoice-scope day` (see
 [`docs/RECONCILE.md`](docs/RECONCILE.md)).
 
 ## How it works
@@ -252,10 +255,15 @@ gates are the stable surface. Treat every figure it prints with care:
   authority. `tamias report` prints both when both exist, and the realised
   saving line covers only rows the proxy actually rewrote; where a row carries
   the provider's billed cost, that measured cost is the actual side rather than
-  list-price arithmetic. `tamias reconcile` compares the two row by row. The
-  first live offline run found 10 of 19 metered rows comparable and two priced
+  list-price arithmetic. `tamias reconcile` compares the two row by row, and
+  `--invoice` imports a provider's CSV billing export (row-level or day-level) so
+  a provider with no per-request billing API can still prove the billed side.
+  The first live offline run found 10 of 19 metered rows comparable and two priced
   rows billed above the computed list price; the online lookup confirmed both
-  stored bills exactly, so no savings claim is proven yet.
+  stored bills exactly. **No invoice has been reconciled and no paid run has been
+  authorised, so no savings figure anywhere in the repository is proven.** The
+  OpenCode pop-up labels its saving line `est. … below list`, because its
+  baseline is a list-price counterfactual, not a bill.
 - **Live routing is verified against two providers, not every provider.** On
   2026-11-04, direct NVIDIA and OpenRouter were served side by side: a planning
   turn stayed on the requested paid model, an easy tool turn switched to a free

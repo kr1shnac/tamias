@@ -229,6 +229,28 @@ def default_providers_path(env: Mapping[str, str] | None = None) -> Path:
     return Path.home() / ".tamias" / "providers.toml"
 
 
+def _credential_invocation(
+    command: str, *, windows: bool | None = None
+) -> tuple[str | list[str], bool]:
+    """Return ``(argv, shell)`` for a credential helper on this platform.
+
+    POSIX parses the operator's command with :mod:`shlex` and executes it
+    without a shell.  Windows has no equivalent of shlex's POSIX rules: quotes
+    and backslashes in paths are interpreted by ``cmd.exe``, so the command is
+    handed to ``cmd.exe`` exactly as written instead of being split with the
+    wrong grammar.  The command is operator-authored configuration, the same
+    trust boundary as the config file itself.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        return command, True
+    try:
+        return shlex.split(command), False
+    except ValueError:
+        return [], False
+
+
 def _run_command(command: str, *, timeout: float = 10.0) -> str:
     """Run a credential helper and return its stdout, stripped.
 
@@ -236,9 +258,13 @@ def _run_command(command: str, *, timeout: float = 10.0) -> str:
     provider is treated as unconfigured.  Called once at start-up, never per
     request: a secret manager round-trip does not belong on the request path.
     """
+    argv, shell = _credential_invocation(command)
+    if not argv:
+        return ""
     try:
-        completed = subprocess.run(  # noqa: S603 - the operator wrote the command
-            shlex.split(command),
+        completed = subprocess.run(  # noqa: S602, S603 - the operator wrote the command
+            argv,
+            shell=shell,
             capture_output=True,
             text=True,
             timeout=timeout,

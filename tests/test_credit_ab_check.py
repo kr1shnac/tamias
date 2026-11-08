@@ -19,6 +19,7 @@ also asserted here.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
@@ -310,3 +311,179 @@ def test_sweep_live_refuses_without_an_oracle(monkeypatch) -> None:
 
     assert code == 2
     assert called == []
+
+
+# --- the documented two-arm live A/B (exercised with stubs, never live) ------
+#
+# The documented procedure described a simple two-arm A/B that the code did not
+# implement.  These tests pin the path that now exists: the flags it needs, the
+# arms it runs, the attribution it requires, and the refusals that keep a
+# ledger delta from being reported as a saving when it is not one.
+
+
+def _ab_argv(module) -> list[str]:
+    return [
+        "--upstream", "https://upstream.example/api",
+        "--prices", "/nonexistent-prices.toml",
+        "--strong-model", "strong/model",
+        "--cheap-model", "cheap/model",
+        "--allow-spend",
+    ]
+
+
+def _stub_arm(module, requests: tuple[int, int], rewritten: tuple[int, int]):
+    def runner(args: argparse.Namespace, arm, db_path: Path) -> object:
+        index = 0 if arm.mode == "off" else 1
+        return module.ArmOutcome(
+            requests_sent=requests[index],
+            rows=requests[index],
+            rewritten=rewritten[index],
+            identity=f"router_mode={arm.mode}",
+        )
+
+    return runner
+
+
+def _stub_ledger(module, usage: tuple[float, float, float]):
+    readings = iter([module.Ledger(usage=value) for value in usage])
+    return lambda *a, **k: next(readings)
+
+
+def _patch_live(module, monkeypatch, *, usage, requests, rewritten) -> list[str]:
+    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+    monkeypatch.setattr(module, "read_key", _stub_ledger(module, usage))
+    monkeypatch.setattr(module, "run_arm", _stub_arm(module, requests, rewritten))
+    sent: list[tuple[str, str]] = []
+
+    def runner(args: argparse.Namespace, arm, db_path: Path) -> object:
+        sent.append((arm.mode, Path(db_path).stem))
+        index = 0 if arm.mode == "off" else 1
+        return module.ArmOutcome(
+            requests_sent=requests[index],
+            rows=requests[index],
+            rewritten=rewritten[index],
+        )
+
+    monkeypatch.setattr(module, "run_arm", runner)
+    return sent
+
+
+def test_the_live_ab_needs_its_flags_before_it_spends(monkeypatch, capsys) -> None:
+    module = _module()
+    touched: list[int] = []
+    monkeypatch.setattr(module, "read_key", lambda *a, **k: touched.append(1))
+    monkeypatch.setattr(module, "run_arm", _stub_arm(module, (2, 2), (0, 1)))
+
+    for missing in (
+        ["--allow-spend", "--strong-model", "s", "--cheap-model", "c"],
+        ["--allow-spend", "--upstream", "https://u.example/api", "--prices", "p"],
+        ["--allow-spend", "--upstream", "https://u.example/api", "--prices", "p",
+         "--strong-model", "s"],
+    ):
+        assert module.main(missing) == 2, missing
+
+    # The refusal happens before the first ledger read, so no request is sent.
+    assert touched == []
+    assert capsys.readouterr().err == ""
+
+
+def test_the_live_ab_measures_from_the_provider_ledger(monkeypatch, capsys) -> None:
+    module = _module()
+    sent = _patch_live(
+        module, monkeypatch, usage=(10.00, 10.06, 10.08), requests=(2, 2), rewritten=(0, 1)
+    )
+
+    assert module.main(_ab_argv(module)) == 0
+
+    out = capsys.readouterr().out
+    assert "MEASURED SAVING: $0.040000" in out
+    assert "RESULT: PASS" in out
+    # Both arms ran, off first, each in its own database.
+    assert [mode for mode, _ in sent] == ["off", "active"]
+    assert sent[0][1] != sent[1][1]
+
+
+def test_the_live_ab_reports_a_non_moving_ledger_without_a_saving(
+    monkeypatch, capsys
+) -> None:
+    module = _module()
+    _patch_live(
+        module, monkeypatch, usage=(10.00, 10.00, 10.00), requests=(2, 2), rewritten=(0, 1)
+    )
+
+    assert module.main(_ab_argv(module)) == 1
+
+    out = capsys.readouterr().out
+    assert "below the instrument floor" in out
+    assert "MEASURED SAVING" not in out
+    assert "INCONCLUSIVE" in out
+
+
+def test_the_live_ab_refuses_a_negative_result_as_a_measurement_of_a_loss(
+    monkeypatch, capsys
+) -> None:
+    module = _module()
+    _patch_live(
+        module, monkeypatch, usage=(10.00, 10.05, 10.11), requests=(2, 2), rewritten=(0, 1)
+    )
+
+    # A loss is still a measurement, and the command reports it as one.
+    assert module.main(_ab_argv(module)) == 0
+
+    out = capsys.readouterr().out
+    assert "MEASURED SAVING: $-0.010000" in out
+
+
+def test_the_live_ab_needs_the_active_arm_to_have_routed(monkeypatch, capsys) -> None:
+    module = _module()
+    _patch_live(
+        module, monkeypatch, usage=(10.00, 10.06, 10.08), requests=(2, 2), rewritten=(0, 0)
+    )
+
+    assert module.main(_ab_argv(module)) == 1
+
+    out = capsys.readouterr().out
+    assert "the active arm routed nothing" in out
+    assert "MEASURED SAVING" not in out
+    assert "RESULT: INCONCLUSIVE" in out
+
+
+def test_the_live_ab_needs_the_off_arm_to_be_a_true_baseline(monkeypatch, capsys) -> None:
+    module = _module()
+    _patch_live(
+        module, monkeypatch, usage=(10.00, 10.06, 10.08), requests=(2, 2), rewritten=(2, 2)
+    )
+
+    assert module.main(_ab_argv(module)) == 1
+
+    out = capsys.readouterr().out
+    assert "the 'off' arm rewrote a request" in out
+    assert "RESULT: FAIL" in out
+
+
+def test_the_live_ab_invalidates_unequal_request_counts(monkeypatch, capsys) -> None:
+    module = _module()
+    _patch_live(
+        module, monkeypatch, usage=(10.00, 10.06, 10.08), requests=(2, 5), rewritten=(0, 1)
+    )
+
+    assert module.main(_ab_argv(module)) == 1
+
+    out = capsys.readouterr().out
+    assert "the work was not identical" in out
+    assert "RESULT: FAIL" in out
+
+
+def test_the_live_ab_stops_when_the_ledger_cannot_be_read(monkeypatch, capsys) -> None:
+    module = _module()
+    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+    monkeypatch.setattr(module, "read_key", lambda *a, **k: module.Ledger(error="HTTP 401"))
+    ran: list[object] = []
+    monkeypatch.setattr(module, "run_arm", lambda *a, **k: ran.append(a) or None)
+
+    assert module.main(_ab_argv(module)) == 1
+
+    out = capsys.readouterr().out
+    assert "ledger unreadable before the first arm" in out
+    assert "nothing was sent" in out
+    assert ran == []

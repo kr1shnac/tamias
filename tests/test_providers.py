@@ -14,6 +14,7 @@ from tamias.providers import (
     CLIENT_AUTH_HEADERS,
     Credential,
     ProviderError,
+    _credential_invocation,
     catalogue_from_registry,
     empty_catalogue,
     load_providers,
@@ -111,6 +112,30 @@ api_key_command = "false"
     )
 
     assert catalogue.unconfigured() == ("nvidia",)
+
+
+def test_a_posix_credential_command_is_split_without_a_shell():
+    argv, shell = _credential_invocation(
+        "op read 'op://vault/item' --no-newline", windows=False
+    )
+
+    assert argv == ["op", "read", "op://vault/item", "--no-newline"]
+    assert shell is False
+
+
+def test_a_windows_credential_command_keeps_windows_quoting():
+    command = '"C:\\Program Files\\1Password\\op.exe" read op://vault/item'
+
+    argv, shell = _credential_invocation(command, windows=True)
+
+    # cmd.exe owns the grammar; splitting it with POSIX rules would mangle the
+    # quoted path and mark every provider unconfigured.
+    assert argv == command
+    assert shell is True
+
+
+def test_an_unparseable_posix_command_is_treated_as_empty():
+    assert _credential_invocation("op read 'unterminated", windows=False) == ([], False)
 
 
 def test_the_environment_wins_over_the_command_when_both_are_given(tmp_path):

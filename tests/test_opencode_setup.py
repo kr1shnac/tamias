@@ -8,6 +8,7 @@ something (JSONC comments) or cannot find the plugin.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,7 @@ def test_setup_keeps_every_other_key_in_the_config(
     assert "tamias" in document["provider"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_setup_strips_jsonc_comments_but_keeps_a_backup(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -415,6 +417,8 @@ def test_without_a_catalogue_the_serve_command_falls_back_to_the_preset(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # Path.home() reads USERPROFILE on Windows and HOME on POSIX.
+    monkeypatch.setenv("USERPROFILE", str(home))
 
     assert main(setup_args(tmp_path / "opencode.json", write_prices(tmp_path))) == 0
 

@@ -367,8 +367,14 @@ This registry contains **capabilities only**. Prices stay in the price sheet.
 | `--since YYYY-MM-DD` | no | Lower bound on row timestamp (inclusive, calendar date). |
 | `--until YYYY-MM-DD` | no | Upper bound on row timestamp (inclusive, calendar date). |
 | `--tolerance USD` | no | Absolute USD tolerance for a match (default `0.000001`). |
-| `--online` | no | Read the provider's generation record and use its `total_cost` as the billed side. Requires `--api-key-env`. |
+| `--online` | no | Read the provider's generation record and use its `total_cost` as the billed side. Requires `--api-key-env`. Cannot be combined with `--invoice`. |
 | `--api-key-env NAME` | no | Environment variable holding the lookup key (default `OPENROUTER_API_KEY`). Only read with `--online`; the secret never enters argv. |
+| `--invoice PATH` | no | CSV export of provider invoice line items. The invoice becomes the **only** billed side, so a row it does not cover stays UNKNOWN. Cannot be combined with `--online`. |
+| `--invoice-join {request_id,generation_id}` | no | Match invoice lines to the Tamias row id or the provider's generation id (default `request_id`). |
+| `--invoice-scope {row,day}` | no | One line per request, or one line per UTC day for providers that publish only daily cost totals (default `row`). |
+| `--invoice-key-column NAME` | no | CSV identity column (default: the `--invoice-join` name, or `date` for `--invoice-scope day`). |
+| `--invoice-cost-column NAME` | no | CSV USD amount column (default `cost_usd`). |
+| `--invoice-allow-unmatched` | no | Invoice lines outside the selected window do not block a PASS. Selected rows missing from the invoice always stay INCOMPLETE. |
 | `--out PATH` | no | Write a text-free JSON artifact (one row per request) to this path. |
 | `--json` | no | Emit a compact JSON summary on stdout instead of the human-readable report. |
 

@@ -9,8 +9,10 @@ tuned facts.
 from __future__ import annotations
 
 import json
+import sys
 
 import httpx
+import pytest
 
 from tamias.discovery import (
     ASSUMED_CONTEXT_WINDOW,
@@ -175,6 +177,7 @@ def test_an_unreadable_cache_is_treated_as_empty(tmp_path):
     assert read_cache(tmp_path / "absent.json") == {}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_the_cache_file_is_private(tmp_path):
     path = tmp_path / "models.cache.json"
 

@@ -565,8 +565,15 @@ def test_the_popup_and_the_reference_agree_on_every_case(tmp_path: Path) -> None
         - Decimal(str(produced["summary"]["baseline_total"]))
     ) <= Decimal(TIED_TOTAL)
 
-    cached = sum(case["usage"].cached_input_tokens or 0 for case in CASES)
-    total_input = sum(case["usage"].input_tokens or 0 for case in CASES)
+    # A row that reports input tokens but no cache count is UNKNOWN, not zero:
+    # the share is computed only over rows where both numbers are known.
+    known = [
+        case
+        for case in CASES
+        if case["usage"].input_tokens and case["usage"].cached_input_tokens is not None
+    ]
+    cached = sum(case["usage"].cached_input_tokens or 0 for case in known)
+    total_input = sum(case["usage"].input_tokens or 0 for case in known)
     assert produced["summary"]["cache_share"] == pytest.approx(cached / total_input, rel=1e-12)
 
 

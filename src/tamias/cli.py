@@ -2149,6 +2149,19 @@ def opencode_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _shell_join(argv: Sequence[str]) -> str:
+    """Quote an argv for the shell the user will paste it into.
+
+    POSIX shells get :func:`shlex.join`; Windows gets the quoting
+    :mod:`subprocess` uses for ``CreateProcess``, which ``cmd.exe`` and
+    PowerShell both accept for ordinary paths and flags.  Using POSIX quoting
+    on Windows turns ``C:\\Program Files\\...`` into a command that cannot run.
+    """
+    if os.name == "nt":
+        return subprocess.list2cmdline(list(argv))
+    return shlex.join(argv)
+
+
 def _opencode_serve_command(args: argparse.Namespace) -> str:
     """The serve command that mirrors the config just written.
 
@@ -2163,25 +2176,31 @@ def _opencode_serve_command(args: argparse.Namespace) -> str:
     if providers is None:
         default = Path.home() / ".tamias" / "providers.toml"
         providers = str(default) if default.exists() else None
-    parts = ["tamias serve"]
+    argv = ["tamias", "serve"]
     if providers:
-        parts.append(f"--providers {shlex.quote(str(Path(providers).expanduser()))}")
+        argv.extend(["--providers", str(Path(providers).expanduser())])
     else:
-        parts.append("--provider opencode")
-    parts.extend(
+        argv.extend(["--provider", "opencode"])
+    argv.extend(
         [
-            f"--db {shlex.quote(db)}",
-            f"--prices {shlex.quote(prices)}",
-            f"--port {args.port}",
-            "--router-mode active",
-            "--min-gap 0",
-            f"--cheap-model {shlex.quote(cheap) if cheap else '<free-model>'}",
+            "--db",
+            db,
+            "--prices",
+            prices,
+            "--port",
+            str(args.port),
+            "--router-mode",
+            "active",
+            "--min-gap",
+            "0",
+            "--cheap-model",
+            cheap or "<free-model>",
         ]
     )
     registry = getattr(args, "registry", None)
     if registry:
-        parts.append(f"--registry {shlex.quote(str(Path(registry).expanduser()))}")
-    return " ".join(parts)
+        argv.extend(["--registry", str(Path(registry).expanduser())])
+    return _shell_join(argv)
 
 
 OPENCODE_COMMAND_FILENAME = "tamias.md"
@@ -2291,13 +2310,11 @@ def opencode_install(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    report_command = (
-        f"{shlex.quote(_tamias_executable())} report "
-        f"--db {shlex.quote(db)} --prices {shlex.quote(prices)}"
-    )
+    report_argv = [_tamias_executable(), "report", "--db", db, "--prices", prices]
     inr_rate = getattr(args, "inr_rate", None)
     if inr_rate is not None:
-        report_command += f" --inr-rate {inr_rate:g}"
+        report_argv.extend(["--inr-rate", f"{inr_rate:g}"])
+    report_command = _shell_join(report_argv)
     content = (
         "---\n"
         "description: Show tamias savings, tokens and routing status\n"
@@ -3787,6 +3804,43 @@ def build_parser() -> argparse.ArgumentParser:
         "billed cost (network; requires --api-key-env)",
     )
     reconcile_parser.add_argument(
+        "--invoice",
+        default=None,
+        help="CSV export of provider invoice line items; the invoice becomes "
+        "the only billed side",
+    )
+    reconcile_parser.add_argument(
+        "--invoice-join",
+        choices=reconcile_mod.INVOICE_JOINS,
+        default="request_id",
+        help="match invoice lines to the Tamias row id or the provider "
+        "generation id (default: request_id)",
+    )
+    reconcile_parser.add_argument(
+        "--invoice-scope",
+        choices=reconcile_mod.INVOICE_SCOPES,
+        default="row",
+        help="row-level lines, or one line per UTC day when the provider only "
+        "publishes daily totals (default: row)",
+    )
+    reconcile_parser.add_argument(
+        "--invoice-key-column",
+        default=None,
+        help="CSV identity column (default: the --invoice-join name, or 'date' "
+        "for --invoice-scope day)",
+    )
+    reconcile_parser.add_argument(
+        "--invoice-cost-column",
+        default="cost_usd",
+        help="CSV USD amount column (default: cost_usd)",
+    )
+    reconcile_parser.add_argument(
+        "--invoice-allow-unmatched",
+        action="store_true",
+        help="invoice lines outside the selected window do not block a PASS; "
+        "selected rows missing from the invoice always stay INCOMPLETE",
+    )
+    reconcile_parser.add_argument(
         "--out", default=None, help="write a text-free artifact to this path"
     )
     reconcile_parser.add_argument("--since", default=None, help="YYYY-MM-DD lower bound")
@@ -3964,10 +4018,38 @@ def reconcile_command(args: argparse.Namespace) -> int:
         else float(args.tolerance)
     )
 
+    invoice_path = getattr(args, "invoice", None)
+    invoice = None
+    invoice_scope = getattr(args, "invoice_scope", "row")
+    invoice_join = getattr(args, "invoice_join", "request_id")
+    invoice_matched = 0
+    invoice_unmatched: list[str] = []
+    invoice_undated = 0
+    online = bool(getattr(args, "online", False))
+    if invoice_path and online:
+        print(
+            "tamias reconcile: --online and --invoice are alternative billed "
+            "sources; pass one",
+            file=sys.stderr,
+        )
+        return 1
+    if invoice_path:
+        key_column = getattr(args, "invoice_key_column", None) or (
+            "date" if invoice_scope == "day" else invoice_join
+        )
+        try:
+            invoice = reconcile_mod.load_invoice(
+                invoice_path,
+                key_column=key_column,
+                cost_column=getattr(args, "invoice_cost_column", "cost_usd"),
+            )
+        except (OSError, ValueError) as exc:
+            print(f"tamias reconcile: {exc}", file=sys.stderr)
+            return 1
+
     lookups: dict[str, float] = {}
     lookup_errors = 0
     lookup_skipped = 0
-    online = bool(getattr(args, "online", False))
     if online:
         key_env = getattr(args, "api_key_env", reconcile_mod.DEFAULT_KEY_ENV)
         token = os.environ.get(key_env)
@@ -4006,8 +4088,24 @@ def reconcile_command(args: argparse.Namespace) -> int:
         else:
             enriched.append(row)
 
+    if invoice is not None:
+        if invoice_scope == "day":
+            enriched, invoice_unmatched, invoice_matched, invoice_undated = (
+                reconcile_mod.aggregate_invoice_days(selected, invoice.costs)
+            )
+        else:
+            enriched, invoice_matched, invoice_unmatched = (
+                reconcile_mod.apply_invoice(
+                    enriched, invoice.costs, key=invoice_join
+                )
+            )
+
     try:
-        compared = reconcile_mod.compare_rows(enriched, tolerance=tolerance)
+        compared = reconcile_mod.compare_rows(
+            enriched,
+            tolerance=tolerance,
+            invoice_only=invoice is not None,
+        )
     except ValueError as exc:
         print(f"tamias reconcile: {exc}", file=sys.stderr)
         return 1
@@ -4017,6 +4115,18 @@ def reconcile_command(args: argparse.Namespace) -> int:
     # a PASS: the verification did not happen for every row.
     if online and lookup_errors and summary.status == reconcile_mod.PASS:
         summary = replace(summary, status=reconcile_mod.INCOMPLETE)
+    # An invoice proof is complete only when every selected row is covered and
+    # every invoice line belongs to the selected window.  A stored number never
+    # fills a gap: that would mix a response-reported cost into a proof.
+    if invoice is not None:
+        allow_unmatched = bool(getattr(args, "invoice_allow_unmatched", False))
+        incomplete = (
+            invoice_matched == 0
+            or invoice_undated > 0
+            or (bool(invoice_unmatched) and not allow_unmatched)
+        )
+        if incomplete and summary.status == reconcile_mod.PASS:
+            summary = replace(summary, status=reconcile_mod.INCOMPLETE)
 
     out_path = getattr(args, "out", None)
     if out_path:
@@ -4041,6 +4151,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
                     "billed_source": row.billed_source,
                     "logged_billed_cost": row.logged_billed,
                     "lookup_cost": row.lookup_billed,
+                    "invoice_cost": row.invoice_billed,
                 }
             )
         destination = Path(out_path)
@@ -4059,6 +4170,16 @@ def reconcile_command(args: argparse.Namespace) -> int:
                 "failed": lookup_errors,
                 "skipped": lookup_skipped,
             }
+        if invoice is not None:
+            document["invoice"] = {
+                "scope": invoice_scope,
+                "join": invoice_join if invoice_scope == "row" else "date",
+                "lines": invoice.lines,
+                "duplicates": invoice.duplicates,
+                "matched": invoice_matched,
+                "unmatched": len(invoice_unmatched),
+                "undated_rows": invoice_undated,
+            }
         print(json.dumps(document, sort_keys=True))
     else:
         print(f"rows: {summary.rows} selected of {len(selected)} metered in log")
@@ -4067,6 +4188,21 @@ def reconcile_command(args: argparse.Namespace) -> int:
                 f"passthrough rows excluded: {passthrough_excluded} "
                 "(count-only, never priced)"
             )
+        if invoice is not None:
+            joined_by = invoice_join if invoice_scope == "row" else "date"
+            print(
+                f"invoice: {invoice.lines} line(s) by {joined_by} "
+                f"({invoice_scope} scope); {invoice_matched} matched"
+            )
+            if invoice.duplicates:
+                print(f"invoice duplicate keys summed: {invoice.duplicates}")
+            if invoice_unmatched:
+                print(
+                    f"invoice lines matching no selected row: "
+                    f"{len(invoice_unmatched)}"
+                )
+            if invoice_undated:
+                print(f"rows without a usable date: {invoice_undated}")
         print(f"compared: {summary.compared} of {summary.rows}")
         print(f"matched: {summary.matched}")
         print(f"mismatched: {summary.mismatched}")

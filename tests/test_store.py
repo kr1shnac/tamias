@@ -602,6 +602,7 @@ def test_sanitize_route_is_pure_and_type_tolerant() -> None:
     assert sanitize_route("chat") == "chat"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_a_new_database_and_any_sidecars_are_private_to_the_user(tmp_path: Path) -> None:
     """The log is per-session metering: the file, WAL, SHM and journal are 0600.
 

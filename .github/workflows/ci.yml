@@ -20,6 +20,26 @@ jobs:
       - run: python -m pytest -q
       - run: ruff check src tests scripts examples
 
+  platform:
+    # The package advertises "OS Independent".  A Linux-only suite cannot prove
+    # Windows quoting, path handling, SQLite sidecars or console behaviour, so
+    # the same gate runs on the two platforms that are not the maintainer's.
+    name: platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q
+      - run: ruff check src tests scripts examples
+
   plugin:
     # The TUI pop-up is TypeScript with its own host-contract harness.  Without
     # this job the Python gate stays green while /tamias stops rendering.

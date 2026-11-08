@@ -8,6 +8,7 @@ other provider, plugin and command exactly where it was.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,7 @@ def test_nothing_installed_is_not_an_error(
     }
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_jsonc_comments_are_backed_up_not_preserved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -9,6 +9,7 @@ means "no restriction" rather than "no access".
 from __future__ import annotations
 
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,7 @@ def test_keys_survive_a_reopen(tmp_path: Path) -> None:
         reopened.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_the_key_file_is_private(tmp_path: Path) -> None:
     path = tmp_path / "keys.db"
     store = KeyStore(path)

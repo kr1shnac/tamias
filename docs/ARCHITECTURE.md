@@ -139,8 +139,9 @@ matrix small: it only needs to run on the machine that runs your agent.
 
 - **Python 3.11 or newer.** The wheel is pure Python (`py3-none-any`), so there
   is nothing to compile.
-- Linux, macOS, WSL2 and (with caveats) Windows are supported; Linux is the
-  primary CI target and macOS uses the same code path.
+- Linux, macOS, WSL2 and (with caveats) Windows are supported. CI runs the full
+  suite on Ubuntu (Python 3.11–3.14) and the same suite on macOS and Windows
+  (Python 3.12), so portability is checked rather than asserted.
 
 ### Windows caveats
 
@@ -148,9 +149,20 @@ matrix small: it only needs to run on the machine that runs your agent.
   owner-only with `os.chmod(0o600)`, which is a no-op on Windows. To keep the
   database private on Windows, place it in a directory whose NTFS ACLs restrict
   other users, or on an encrypted volume.
+- **Credential helpers are parsed by the Windows shell.** A provider's
+  `api_key_command` is split with POSIX rules on Linux/macOS and handed to
+  `cmd.exe` as written on Windows: `shlex` would mangle quoted paths such as
+  `"C:\Program Files\op.exe" read op://vault/item` and report every provider as
+  unconfigured.
+- **`tamias service install` writes a `systemd --user` unit, so it is
+  Linux-only.** On macOS and Windows it says so and exits 2; run
+  `tamias serve` in the foreground, or under your own service manager, using the
+  command `tamias opencode setup` prints.
 - **Loopback binding requires no administrator rights.** Binding to a
   non-loopback host requires `--auth-token` on every platform.
-- Paths are handled with `pathlib`; no POSIX-only path logic is used.
+- Paths are handled with `pathlib`; no POSIX-only path logic is used. Commands
+  printed for the user are quoted with `subprocess.list2cmdline` on Windows and
+  `shlex.join` everywhere else.
 
 ### Networking
 

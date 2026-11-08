@@ -685,14 +685,20 @@ try {
   step("the latest route says what the router decided", frame.includes("SWITCH") && frame.includes("cheaper capable model"));
   step("the latest route marks a free model", frame.includes("● free"));
   step(
-    "the savings bar reports realised savings as an estimate",
-    frame.includes("realised") &&
+    "the savings bar labels the counterfactual as an estimate, not realised money",
+    frame.includes("est.") &&
+      frame.includes("below list") &&
       frame.includes("$2.10") &&
       frame.includes("baseline") &&
-      frame.includes("(est.)"),
+      !frame.includes("realised"),
   );
   step("an active window is not labelled shadow", !frame.includes("all recent · shadow"));
   step("the KPI line counts requests and switches", frame.includes("6 req") && frame.includes("switched"));
+  step(
+    "the KPI line shows the free-share denominator",
+    /free \(\d+\/\d+ rated\)/.test(frame),
+    frame.match(/free \(\S+\)/)?.[0] ?? "absent",
+  );
   step(
     "the KPI line reports the cache share from the log",
     frame.includes("cache") && /\bcache\s+\d+%/.test(frame),
@@ -759,7 +765,7 @@ step("a zero-rated model is free", tierFor("acme/free-one", sheet) === "free");
 step("a positive-rated model is paid", tierFor("acme/paid-two", sheet) === "paid");
 step("an unquoted model is unknown, not free", tierFor("acme/missing", sheet) === "unknown");
 
-const { priceRow, windowMode } = await import("../src/hooks/useTamiasData");
+const { priceRow, summarizeRows, windowMode } = await import("../src/hooks/useTamiasData");
 const shadowRow = priceRow(
   {
     id: 1,
@@ -780,8 +786,28 @@ const shadowRow = priceRow(
 );
 step(
   "a shadow decision is not counted as an applied switch",
-  shadowRow.shadow && !shadowRow.switched && shadowRow.saved === 0,
-  `shadow=${shadowRow.shadow} switched=${shadowRow.switched} saved=${shadowRow.saved}`,
+  shadowRow.shadow &&
+    !shadowRow.switched &&
+    !shadowRow.applied &&
+    shadowRow.saved === 0 &&
+    summarizeRows([shadowRow]).n_switched === 0,
+  `shadow=${shadowRow.shadow} switched=${shadowRow.switched} applied=${shadowRow.applied} saved=${shadowRow.saved}`,
+);
+const appliedRow = priceRow(
+  {
+    ...shadowRow,
+    model_used: "acme/free-one",
+    decision_action: "SWITCH",
+    router_mode: "active",
+  },
+  sheet,
+);
+step(
+  "an applied switch is counted once",
+  appliedRow.applied &&
+    appliedRow.switched &&
+    summarizeRows([appliedRow]).n_switched === 1,
+  `applied=${appliedRow.applied} switched=${appliedRow.switched}`,
 );
 step(
   "a shadow-only window is labelled shadow",
@@ -802,6 +828,11 @@ step(
   "a window with no input tokens has an unknown share, not a warm zero",
   cacheShare([cacheRow(0, 0), cacheRow(null, null)]) === null,
   String(cacheShare([cacheRow(0, 0), cacheRow(null, null)])),
+);
+step(
+  "a missing cache count is unknown, not a cold zero",
+  cacheShare([cacheRow(1000, null)]) === null,
+  String(cacheShare([cacheRow(1000, null)])),
 );
 step(
   "a share is capped at fully warm however the provider counts cache",

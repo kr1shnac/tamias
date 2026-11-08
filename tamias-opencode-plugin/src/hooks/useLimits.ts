@@ -89,6 +89,8 @@ export type LimitsTier = "free" | "paid" | "unknown";
 export interface UseLimits {
   snapshot: () => LimitsSnapshot | null;
   live: () => boolean;
+  /** True once the first fetch has finished, successfully or not. */
+  attempted: () => boolean;
   error: () => string | null;
   providerOf: (model: string) => string | null;
   tierOf: (model: string) => LimitsTier;
@@ -249,6 +251,7 @@ export function useLimits(
   const [snapshot, setSnapshot] = createSignal<LimitsSnapshot | null>(null);
   const [catalogue, setCatalogue] = createSignal<Map<string, CatalogueEntry>>(new Map());
   const [live, setLive] = createSignal(false);
+  const [attempted, setAttempted] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
   let lastFullAttempt = Date.now();
@@ -293,6 +296,7 @@ export function useLimits(
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       busy = false;
+      if (!disposed) setAttempted(true);
     }
   }
 
@@ -330,5 +334,5 @@ export function useLimits(
     return entry.cost === 0 ? "free" : "paid";
   };
 
-  return { snapshot, live, error, providerOf, tierOf, refresh };
+  return { snapshot, live, attempted, error, providerOf, tierOf, refresh };
 }

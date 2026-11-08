@@ -23,6 +23,12 @@ generation record.
 | `--tolerance USD` | no | Absolute USD tolerance for a match. Default `0.000001`. A negative value is a runtime error. |
 | `--online` | no | Read the provider's generation record for every selected row whose `generation_id` starts with `gen-` and use that `total_cost` as the billed side. Other providers' ids are skipped, not sent to OpenRouter. |
 | `--api-key-env NAME` | no | Environment variable holding the lookup key (default `OPENROUTER_API_KEY`). Only read with `--online`; the value is never printed, logged, or placed in argv. |
+| `--invoice PATH` | no | CSV export of provider invoice line items; the invoice becomes the only billed side. Cannot be combined with `--online`. |
+| `--invoice-join request_id\|generation_id` | no | Match invoice lines to the Tamias row `id` or the provider's `generation_id` (default `request_id`). |
+| `--invoice-scope row\|day` | no | One line per request, or one line per UTC calendar day for providers that publish only daily cost totals (default `row`). |
+| `--invoice-key-column NAME` | no | CSV identity column (default: the `--invoice-join` name, or `date` for `--invoice-scope day`). |
+| `--invoice-cost-column NAME` | no | CSV USD amount column (default `cost_usd`). |
+| `--invoice-allow-unmatched` | no | Invoice lines outside the selected window do not block a PASS. Selected rows the invoice does not cover always stay INCOMPLETE. |
 | `--out PATH` | no | Write a JSON artifact with one object per selected row. |
 | `--json` | no | Emit a JSON summary on stdout instead of the human-readable report. |
 
@@ -45,6 +51,58 @@ tokens against a newer sheet would change the claim being tested.
   provider's id is skipped rather than sent to an endpoint that cannot know it.
   A skipped id is not a failed lookup. The stored `provider_cost_usd` is retained
   in the artifact as `logged_billed_cost`, and the lookup value is `lookup_cost`.
+- **Billed, invoice** — `--invoice` reads a CSV export from the provider's own
+  billing system and joins it to the log. This is the provider-agnostic path:
+  OpenRouter's generation lookup is the only per-request billing API tamias has
+  documented, so every other provider proves its billed side from its invoice.
+
+### `--invoice`: the provider-agnostic billed side
+
+```sh
+# Per-request line items, joined on the provider's response id
+tamias reconcile --db requests.db \
+  --invoice openrouter-billing.csv \
+  --invoice-join generation_id
+
+# Daily cost totals only: OpenRouter and most providers publish these
+tamias reconcile --db requests.db \
+  --invoice daily-costs.csv \
+  --invoice-scope day
+```
+
+The CSV needs one identity column and one USD amount column; both are named with
+flags, so any provider's export can be read without a code change:
+
+```csv
+request_id,cost_usd
+7,0.0031
+8,0.0009
+```
+
+Amounts may carry `$` and thousands separators (`$1,234.56`); a blank cell, a
+negative amount, a non-numeric value, a missing column, or a file with no line
+items is a **runtime error (exit 1)**, never a skipped line and never a smaller
+bill. Duplicate identity keys are summed, because one request can be split
+across several SKUs (prompt, completion, cache).
+
+Three rules keep the invoice honest:
+
+1. **The invoice is the only billed side.** A selected row the invoice does not
+   cover is `UNKNOWN`, not backfilled from `provider_cost_usd`. Mixing a
+   response-reported cost into an invoice proof would hide which number is the
+   invoice.
+2. **Invoice lines outside the window are visible, not dropped.** They block a
+   `PASS` unless `--invoice-allow-unmatched` is passed — the usual case is a
+   wider invoice export than the `--since`/`--until` window.
+3. **`--invoice-scope day` compares totals, not rows.** Providers that publish
+   only a daily cost total cannot be joined per request, so the computed cost of
+   every row in that UTC day is summed and compared with the invoice's line. A
+   day containing an unpriced row keeps its total `UNKNOWN` rather than
+   comparing a partial sum.
+
+In day scope the invoice's identity column defaults to `date` and must hold
+`YYYY-MM-DD`. Rows whose timestamp cannot be parsed are counted on their own line
+and keep the run `INCOMPLETE`.
 
 A zero-price row compares `$0.00` with `$0.00` and is a match. That is
 arithmetic, not evidence of savings: a free row cannot prove that a paid
@@ -97,6 +155,12 @@ provider record where one can be fetched, it does not erase a number the
 provider already reported. Skipped ids are reported separately and do not by
 themselves prevent a `PASS`.
 
+With `--invoice`, the run cannot end in `PASS` unless every selected row is
+covered by an invoice line and every invoice line matched a selected row (or
+`--invoice-allow-unmatched` was passed). A run that used the invoice is
+`INCOMPLETE` — never `PASS` — if any line is unattributed or any selected row
+is not priced by it.
+
 ## Human-readable output
 
 ```text
@@ -119,6 +183,13 @@ excluded, the report says so:
 
 ```text
 passthrough rows excluded: 1440 (count-only, never priced)
+```
+
+With `--invoice`, two more lines name the coverage before the totals:
+
+```text
+invoice: 12 line(s) by generation_id (row scope); 12 matched
+invoice lines matching no selected row: 3
 ```
 
 `computed`, `billed`, and `difference` are sums over the compared rows only.
@@ -149,6 +220,24 @@ With `--online`, the object also carries
 selected rows whose `generation_id` is present but is not an OpenRouter `gen-`
 id. The exit code follows the table above.
 
+With `--invoice`, the object instead carries the invoice's coverage:
+
+```json
+"invoice": {
+  "scope": "row",
+  "join": "generation_id",
+  "lines": 12,
+  "duplicates": 0,
+  "matched": 12,
+  "unmatched": 3,
+  "undated_rows": 0
+}
+```
+
+`duplicates` counts invoice lines that were summed into another line under the
+same identity. `undated_rows` is zero except in `day` scope, where it counts
+rows the aggregate could not place on a UTC date.
+
 ## Artifact (`--out`)
 
 `--out` writes a JSON array, one object per selected row:
@@ -172,16 +261,22 @@ id. The exit code follows the table above.
 }
 ```
 
-`billed_source` is `"logged"`, `"lookup"`, or `null` when neither number exists.
-In online mode a row with a successful lookup shows `"lookup"`, with the stored
-number still visible as `logged_billed_cost`.
+`billed_source` is `"logged"`, `"lookup"`, `"invoice"`, or `null` when neither
+number exists. In online mode a row with a successful lookup shows `"lookup"`,
+with the stored number still visible as `logged_billed_cost`. With `--invoice`,
+a matched row shows `"invoice"` and carries the invoice amount under
+`"invoice_cost"`; a row the invoice does not cover shows `null` for both
+`billed_cost` and `billed_source`, with the stored number still visible under
+`logged_billed_cost` for inspection.
 
 ## Offline verification
 
 Without `--online`, everything is computed from the local log. No socket is
 opened, no provider is called, and no key variable is read. The arithmetic can
 be checked independently by re-pricing the logged tokens against the sheet named
-on the row.
+on the row. `--invoice` adds one local file read and still opens no socket and
+reads no credential: the amounts come from the provider's export, not from an
+API call tamias makes.
 
 ## Third-party check notes
 

@@ -64,6 +64,8 @@ export interface TamiasRow {
   // Derived for the table, so rendering never rebuilds a Date or a tier.
   time: string;
   switched: boolean;
+  /** A SWITCH decision that actually changed the model and did not fail. */
+  applied: boolean;
   shadow: boolean;
   failed: boolean;
   actual: number | null;
@@ -89,6 +91,10 @@ export interface TamiasSummary {
   baseline_total: number;
   saved_total: number;
   saving_pct: number | null;
+  /** Any priced row's actual cost came from something other than a bill. */
+  actual_estimated: boolean;
+  /** Any switched row's baseline came from the price sheet, not a bill. */
+  saving_estimated: boolean;
   estimated: boolean;
   latency_avg: number | null;
   /** Share of input tokens served from cache, or null when unknown. */
@@ -192,6 +198,11 @@ export function priceRow(raw: RawRow, sheet: PriceSheet | null): TamiasRow {
             : null;
 
   const switched = requested !== "-" && used !== "-" && requested !== used;
+  // `readSnapshot` aliases the column to `decision`; a caller passing a raw
+  // row (the unit harness does) still has `decision_action`.
+  const decision = strOrNull(row.decision) ?? strOrNull(row.decision_action) ?? "-";
+  const failed = (strOrNull(row.status) ?? "-") !== "200";
+  const applied = decision === "SWITCH" && switched && !failed;
   const baseline = switched ? warmBaselineCost(requested, usage, sheet) : actual;
   const baseline_source: TamiasRow["baseline_source"] = switched
     ? baseline !== null
@@ -211,7 +222,7 @@ export function priceRow(raw: RawRow, sheet: PriceSheet | null): TamiasRow {
     project: strOrNull(row.project),
     model_requested: requested,
     model_used: used,
-    decision: strOrNull(row.decision) ?? "-",
+    decision,
     decision_reason: strOrNull(row.decision_reason) ?? "",
     decision_target_model: strOrNull(row.decision_target_model),
     effort_requested: strOrNull(row.effort_requested),
@@ -232,8 +243,9 @@ export function priceRow(raw: RawRow, sheet: PriceSheet | null): TamiasRow {
     status: strOrNull(row.status) ?? "-",
     time: clock(strOrNull(row.ts)),
     switched,
+    applied,
     shadow: strOrNull(row.router_mode) === "shadow",
-    failed: strOrNull(row.status) !== "200",
+    failed,
     actual,
     actual_source,
     baseline,
@@ -279,7 +291,9 @@ export function summarizeRows(rows: readonly TamiasRow[]): TamiasSummary {
     n_requests: rows.length,
     n_priced: priced.length,
     n_unpriced: rows.length - priced.length,
-    n_switched: rows.filter((row) => row.switched).length,
+    // A row's used model can differ from the requested one because of a
+    // failover, not a router decision.  Only an applied SWITCH is a switch.
+    n_switched: rows.filter((row) => row.applied).length,
     n_ok: rows.filter((row) => !row.failed).length,
     n_failed: rows.filter((row) => row.failed).length,
     n_free,
@@ -289,6 +303,13 @@ export function summarizeRows(rows: readonly TamiasRow[]): TamiasSummary {
     baseline_total,
     saved_total,
     saving_pct: baseline_total > 0 ? saved_total / baseline_total : null,
+    actual_estimated: priced.some((row) => row.actual_source !== "billed"),
+    // The baseline for a switched row is the requested model re-priced from
+    // the sheet.  That counterfactual is always an estimate; it is not an
+    // invoice, and the pop-up must never call it a realised saving.
+    saving_estimated: priced.some(
+      (row) => row.switched && row.baseline_source === "sheet",
+    ),
     estimated: priced.some(
       (row) =>
         row.actual_source !== "billed" ||
@@ -316,8 +337,11 @@ export function cacheShare(rows: readonly TamiasRow[]): number | null {
   let cached = 0;
   for (const row of rows) {
     if (row.input_tokens === null || row.input_tokens === 0) continue;
+    // A missing cache count is unknown, not zero.  Counting it as zero would
+    // understate the share and make a cold prompt look warm.
+    if (row.cached_input_tokens === null) continue;
     input += row.input_tokens;
-    cached += row.cached_input_tokens ?? 0;
+    cached += row.cached_input_tokens;
   }
   if (input === 0) return null;
   return Math.min(1, cached / input);
