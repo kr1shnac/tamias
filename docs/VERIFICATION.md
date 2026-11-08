@@ -324,9 +324,13 @@ smaller than the floor is reported as below the floor, not as a measurement.
   priced at `0.0` in the operator's overlay because that is the account's
   development tier. No invoice confirms it, and the same weights cost money on
   OpenRouter.
-- **The systemd unit has not been started here.** Its text, paths, quoting and
-  guards are tested offline; `systemctl --user enable --now` and a real
-  post-login restart have not been run.
+- **The systemd unit runs, but only this session.** The generated unit is
+  `enabled`, `active (running)` and serving `/limits` on `127.0.0.1:8000`
+  (observed 2026-11-08), and it runs the code at `HEAD`. What has *not* been
+  observed is a cold `reboot`-style start — the unit starting from nothing at
+  login, with no shell environment and no `DISPLAY` — and the credential
+  bridge (`api_key_command`) being resolved inside that cold start rather than
+  inherited from a session that had already run it once.
 - **Anthropic, Codex and Claude Code live traffic.** The `/v1/messages` and
   `/v1/responses` routes are fixture-tested only; no live Anthropic, Codex or
   Claude Code traffic has been observed. Only `/v1/chat/completions` was
