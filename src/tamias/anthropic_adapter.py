@@ -198,6 +198,7 @@ class AnthropicStreamUsage:
     def __init__(self) -> None:
         self.fields: dict[str, Any] = {}
         self.model: str | None = None
+        self.generation_id: str | None = None
         self._buffer = b""
 
     def feed(self, data: bytes) -> None:
@@ -226,6 +227,7 @@ class AnthropicStreamUsage:
             msg = payload.get("message") or {}
             if isinstance(msg, dict):
                 self.model = msg.get("model") or payload.get("model")
+                self._remember_id(msg.get("id"), payload.get("id"))
                 usage = msg.get("usage") or {}
                 if isinstance(usage, dict):
                     self.fields = dict(usage)
@@ -257,6 +259,7 @@ class AnthropicStreamUsage:
             message = event.get("message")
             if isinstance(message, dict):
                 self._remember(message.get("model"))
+                self._remember_id(message.get("id"), event.get("id"))
                 self._merge(message.get("usage"))
         elif kind == "message_delta":
             self._merge(event.get("usage"))
@@ -278,6 +281,15 @@ class AnthropicStreamUsage:
         """Note the model the upstream said it used, the first time it says."""
         if self.model is None and isinstance(model, str) and model:
             self.model = model
+
+    def _remember_id(self, message_id: Any, event_id: Any) -> None:
+        """Note the response id carried by ``message_start``, if any."""
+        if self.generation_id is not None:
+            return
+        for value in (message_id, event_id):
+            if isinstance(value, str) and value:
+                self.generation_id = value
+                return
 
 
 def forward_headers(request: Request) -> dict[str, str]:
@@ -499,6 +511,7 @@ def register_routes(
         project: object = None,
         failure_stage: str | None = None,
         failure_type: str | None = None,
+        generation_id: object = None,
     ) -> None:
         cost = cost_for_anthropic(model_used, usage, sheet)
         store.log_request(
@@ -513,6 +526,7 @@ def register_routes(
             decision,
             price_sheet=sheet.source,
             price_simulated=sheet.simulated,
+            generation_id=generation_id,
             project=project,
             failure_stage=failure_stage,
             failure_type=failure_type,
@@ -562,6 +576,7 @@ def register_routes(
                 project,
                 failure_stage=failure.stage if failure is not None else None,
                 failure_type=failure.failure_type if failure is not None else None,
+                generation_id=collector.generation_id,
             )
             advance(session_id, model_used)
 
@@ -680,6 +695,7 @@ def register_routes(
                 upstream.status_code,
                 decision,
                 getattr(request.state, "project", None),
+                generation_id=details.get("id"),
             )
             advance(session_id, model_used)
             return Response(

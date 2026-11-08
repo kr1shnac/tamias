@@ -55,6 +55,21 @@ _VERSION_SUFFIXES = ("/v1", "/api/v1")
 # authenticates nothing.
 AUTH_STYLES = ("bearer", "none")
 
+#: Headers that carry the *caller's* credential to tamias.  They are never a
+#: credential for the downstream provider, so they are dropped before a
+#: provider's own credential is applied.  ``authorization`` is the
+#: OpenAI-compatible form; ``x-api-key`` is the Anthropic wire's form; the
+#: others are common provider-specific spellings.
+CLIENT_AUTH_HEADERS = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "x-goog-api-key",
+    }
+)
+
 # How much of a provider's ``/v1/models`` answer to trust.  ``all`` (the default)
 # takes every id the provider lists; ``listed`` takes only the ids the operator
 # wrote in ``models``, because a catalogue sometimes advertises far more than a
@@ -301,15 +316,18 @@ class ProviderCatalogue:
     def apply_auth(self, provider_name: str, headers: dict[str, str]) -> dict[str, str]:
         """Return ``headers`` with the provider's credential in place.
 
-        The caller's own ``authorization`` is always dropped first: whatever the
-        client used to reach tamias is not a credential for the downstream
-        provider, and forwarding it would leak the client's token to a third
-        party.
+        The caller's own credential is always dropped first.  That includes
+        ``authorization`` and the Anthropic wire's ``x-api-key`` (plus the
+        other common API-key spellings in :data:`CLIENT_AUTH_HEADERS`):
+        whatever the client used to reach tamias is not a credential for the
+        downstream provider, and forwarding it would leak the client's token
+        to a third party.  A provider with no credential still gets the client
+        credential stripped.
         """
         cleaned = {
             key: value
             for key, value in headers.items()
-            if key.lower() != "authorization"
+            if key.lower() not in CLIENT_AUTH_HEADERS
         }
         provider = self._providers.get(provider_name)
         if provider is None or provider.auth == "none":

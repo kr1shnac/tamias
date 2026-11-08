@@ -87,6 +87,12 @@ on every number they both print, CI now fails when the TUI breaks, and
   registers that path. Verified in a real OpenCode 2.2.5 TUI against a clean
   venv with no source checkout reachable. Bun must be on `PATH`; without it
   setup says so instead of writing a broken registration.
+- **`tamias opencode uninstall` undoes the wiring.** It removes only
+  `provider.tamias`, plugin entries that name this project's plugin, the
+  `tamias` / `tamias-report` command files and the staged `~/.tamias/plugin`
+  directory (`--keep-plugin` leaves it). Every other provider, plugin and
+  command is preserved; each rewritten config is backed up first, and
+  `--dry-run` reports without changing anything.
 
 ### Docs
 
@@ -97,6 +103,18 @@ on every number they both print, CI now fails when the TUI breaks, and
 
 ### Fixed
 
+- **A client credential can no longer follow a provider switch.** The provider
+  catalogue dropped only `authorization`; an Anthropic client sends `x-api-key`,
+  so that header reached whichever provider the model was routed to. Every
+  known client credential spelling (`authorization`, `proxy-authorization`,
+  `x-api-key`, `api-key`, `x-goog-api-key`) is now stripped before the
+  provider's own credential is applied. Covered on the chat route and on
+  `/v1/messages`.
+- **`/v1/messages` rows now carry the provider's response id.** The buffered
+  path reads the response `id`; the streaming path reads `message.id` from
+  `message_start`. Both are stored as `generation_id`, so
+  `tamias reconcile --online` can verify an Anthropic response the same way it
+  verifies a chat one.
 - **`tamias reconcile` was a stub that could not fail.** It listed rows with a
   `generation_id`, ignored `--since`/`--until`/`--tolerance`, never read a
   billed cost, and wrote `difference: null`. It now compares each selected

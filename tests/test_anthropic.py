@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from mock_anthropic_upstream import (
     FINAL_USAGE,
+    MESSAGE_ID,
     MODEL_CACHED,
     MODEL_ERROR,
     MODEL_NO_USAGE,
@@ -455,6 +456,7 @@ async def test_stream_usage_and_cost_are_logged(
     row = store.last
     assert row["usage"] == FULL_USAGE
     assert row["model_requested"] == row["model_used"] == MODEL_CACHED
+    assert row["generation_id"] == MESSAGE_ID
     assert row["status"] == "200"
     assert row["latency_ms"] >= 0
     assert row["cost"] == anthropic_adapter.cost_for_anthropic(MODEL_CACHED, FULL_USAGE, sheet)
@@ -471,6 +473,7 @@ async def test_buffered_usage_and_cost_are_logged(
     assert response.status_code == 200
     row = store.last
     assert row["usage"] == FULL_USAGE
+    assert row["generation_id"] == MESSAGE_ID
     assert row["status"] == "200"
     assert row["cost"] == pricing.compute_cost(MODEL_CACHED, FULL_USAGE, sheet)
 

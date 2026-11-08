@@ -220,10 +220,15 @@ async def test_the_clients_own_token_is_never_forwarded_to_a_provider():
         await client.post(
             "/v1/chat/completions",
             content=json.dumps({"model": MODEL_A, "messages": []}),
-            headers={**JSON_HEADERS, "authorization": "Bearer sk-client-placeholder"},
+            headers={
+                **JSON_HEADERS,
+                "authorization": "Bearer sk-client-placeholder",
+                "x-api-key": "sk-ant-client-placeholder",
+            },
         )
 
     assert recorder.last.headers["authorization"] == "Bearer openrouter-secret"
+    assert "x-api-key" not in recorder.last.headers
 
 
 async def test_a_model_no_provider_serves_is_refused_not_misrouted():

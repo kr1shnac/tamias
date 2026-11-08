@@ -1990,6 +1990,165 @@ def opencode_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_tamias_plugin_dir(path: Path) -> bool:
+    """Whether ``path`` is a directory this project staged as its plugin."""
+    try:
+        package = json.loads((path / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(package, dict) and package.get("name") == "tamias-opencode-plugin"
+
+
+def _is_tamias_plugin_entry(entry: object, explicit: Path | None) -> bool:
+    """Whether one ``cli.json`` plugin entry names a tamias plugin.
+
+    Exact matches are the staged install directory and an explicit ``--plugin``
+    path.  A checkout registered by path is recognised by its package name, so
+    an operator who used ``--plugin`` can uninstall without repeating it.
+    """
+    if not isinstance(entry, str) or not entry:
+        return False
+    path = Path(entry).expanduser()
+    if explicit is not None and path.resolve() == explicit.resolve():
+        return True
+    if path.resolve() == _plugin_install_dir().resolve():
+        return True
+    return _is_tamias_plugin_dir(path)
+
+
+def opencode_uninstall(args: argparse.Namespace) -> int:
+    """Remove the provider, plugin registrations and slash commands setup added.
+
+    Only tamias's own entries are touched: ``provider.tamias`` in the OpenCode
+    config, plugin entries that name this project's plugin, and the
+    ``tamias.md`` / ``tamias-report.md`` command files.  Every other provider,
+    plugin and command is left alone, and each rewritten config is backed up
+    first.  The staged plugin directory under the data dir is removed too,
+    unless ``--keep-plugin`` is given.
+    """
+    config_path = (
+        Path(args.config).expanduser() if args.config else _opencode_config_path()
+    )
+    explicit = Path(args.plugin).expanduser() if args.plugin else None
+    dry_run = bool(args.dry_run)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+    changed_config = False
+    had_comments = False
+    config_document: dict[str, Any] | None = None
+    if config_path.exists():
+        try:
+            raw = config_path.read_text(encoding="utf-8")
+            stripped, had_comments = _strip_jsonc(raw)
+            parsed = json.loads(stripped) if stripped.strip() else {}
+            if not isinstance(parsed, dict):
+                raise ValueError(f"{config_path}: expected a JSON object")
+            config_document = parsed
+        except (OSError, ValueError) as exc:
+            print(f"tamias opencode uninstall: {exc}", file=sys.stderr)
+            return 1
+        provider = config_document.get("provider")
+        if isinstance(provider, dict) and "tamias" in provider:
+            del provider["tamias"]
+            if not provider:
+                config_document.pop("provider", None)
+            changed_config = True
+
+    cli_path = _opencode_cli_path()
+    changed_cli = False
+    removed_plugins = 0
+    cli_document: dict[str, Any] | None = None
+    if cli_path.exists():
+        try:
+            cli_document = _read_json_file(cli_path)
+        except (OSError, ValueError) as exc:
+            print(f"tamias opencode uninstall: {exc}", file=sys.stderr)
+            return 1
+        plugins = cli_document.get("plugins")
+        if isinstance(plugins, list):
+            kept = [
+                entry
+                for entry in plugins
+                if not _is_tamias_plugin_entry(entry, explicit)
+            ]
+            removed_plugins = len(plugins) - len(kept)
+            if removed_plugins:
+                changed_cli = True
+                if kept:
+                    cli_document["plugins"] = kept
+                else:
+                    cli_document.pop("plugins", None)
+
+    commands = []
+    command_dirs = [_opencode_commands_dir(None)]
+    project = getattr(args, "project", None)
+    if project:
+        command_dirs.append(_opencode_commands_dir(project))
+    for directory in command_dirs:
+        for name in ("tamias.md", "tamias-report.md"):
+            path = directory / name
+            if path.is_file():
+                commands.append(path)
+
+    staged = _plugin_install_dir()
+    remove_staged = (
+        not args.keep_plugin
+        and staged.is_dir()
+        and _is_tamias_plugin_dir(staged)
+    )
+
+    if not (changed_config or changed_cli or commands or remove_staged):
+        print("tamias opencode uninstall: nothing from tamias is registered; nothing to remove")
+        return 0
+
+    verb = "would remove" if dry_run else "removed"
+    backups: list[Path] = []
+    try:
+        if changed_config and config_document is not None:
+            print(f"{verb} provider tamias from {config_path}")
+            if not dry_run:
+                backups.append(_backup(config_path, stamp))
+                config_path.write_text(
+                    json.dumps(config_document, indent=2) + "\n", encoding="utf-8"
+                )
+        if changed_cli and cli_document is not None:
+            print(
+                f"{verb} {removed_plugins} tamias plugin registration(s) from {cli_path}"
+            )
+            if not dry_run:
+                backups.append(_backup(cli_path, stamp))
+                cli_path.write_text(
+                    json.dumps(cli_document, indent=2) + "\n", encoding="utf-8"
+                )
+        for path in commands:
+            print(f"{verb} {path}")
+            if not dry_run:
+                path.unlink()
+        if remove_staged:
+            print(f"{verb} staged plugin {staged}")
+            if not dry_run:
+                shutil.rmtree(staged)
+    except OSError as exc:
+        print(f"tamias opencode uninstall: {exc}", file=sys.stderr)
+        return 1
+
+    if not dry_run:
+        for backup in backups:
+            print(
+                f"backup: {backup} (mode 600; it may contain provider "
+                "credentials -- delete it once you are satisfied)",
+                file=sys.stderr,
+            )
+        if had_comments:
+            print(
+                "note: OpenCode's JSONC comments were not preserved; the "
+                "original text is in the backup",
+                file=sys.stderr,
+            )
+    print("restart OpenCode to unload the provider and plugin")
+    return 0
+
+
 def _opencode_serve_command(args: argparse.Namespace) -> str:
     """The serve command that mirrors the config just written.
 
@@ -3373,6 +3532,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print the result without writing"
     )
 
+    opencode_uninstall_parser = opencode_sub.add_parser(
+        "uninstall",
+        help="remove tamias's provider block, plugin registration and slash commands",
+    )
+    opencode_uninstall_parser.add_argument(
+        "--config",
+        default=None,
+        help="OpenCode config to edit (default: ~/.config/opencode/opencode.jsonc)",
+    )
+    opencode_uninstall_parser.add_argument(
+        "--plugin",
+        default=None,
+        help="explicit plugin path to unregister; also read from TAMIAS_PLUGIN_DIR",
+    )
+    opencode_uninstall_parser.add_argument(
+        "--project",
+        default=None,
+        help="also remove the command files under <project>/.opencode/commands",
+    )
+    opencode_uninstall_parser.add_argument(
+        "--keep-plugin",
+        action="store_true",
+        help="unregister the plugin but leave ~/.tamias/plugin on disk",
+    )
+    opencode_uninstall_parser.add_argument(
+        "--dry-run", action="store_true", help="print what would change without writing"
+    )
+
     service_parser = sub.add_parser(
         "service", help="install tamias as a systemd user service (Linux)"
     )
@@ -3954,6 +4141,8 @@ def main(argv: list[str] | None = None) -> int:
         return opencode_install(args)
     if args.command == "opencode" and args.opencode_command == "setup":
         return opencode_setup(args)
+    if args.command == "opencode" and args.opencode_command == "uninstall":
+        return opencode_uninstall(args)
     if args.command == "service" and args.service_command == "install":
         return service_install(args)
     if args.command == "service" and args.service_command == "uninstall":

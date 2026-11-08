@@ -208,10 +208,19 @@ def build(
     )
 
 
-async def post(app: Any, path: str, payload: dict[str, Any]) -> httpx.Response:
+async def post(
+    app: Any,
+    path: str,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://tamias.local") as client:
-        return await client.post(path, content=json.dumps(payload), headers=JSON_HEADERS)
+        return await client.post(
+            path,
+            content=json.dumps(payload),
+            headers={**JSON_HEADERS, **(headers or {})},
+        )
 
 
 def message_body(model: str, **extra: Any) -> dict[str, Any]:
@@ -240,6 +249,24 @@ async def test_a_limit_moves_a_messages_request_to_another_provider():
     assert MODEL_B in store.last["decision"].reason
     assert store.last["model_used"] == MODEL_B
     assert response.json()["content"][0]["text"] == "ok"
+
+
+async def test_the_anthropic_client_key_is_not_forwarded_to_a_provider():
+    """The front door's ``x-api-key`` is not a credential for the chosen provider."""
+    recorder = Recorder()
+    app = build(recorder, FakeStore())
+
+    response = await post(
+        app,
+        "/v1/messages",
+        message_body(MODEL_B),
+        headers={"x-api-key": "sk-ant-client-placeholder"},
+    )
+
+    assert response.status_code == 200
+    forwarded = recorder.requests[-1]
+    assert forwarded.headers["authorization"] == "Bearer nvidia-secret"
+    assert "x-api-key" not in forwarded.headers
 
 
 async def test_a_messages_stream_is_retried_before_the_first_byte():

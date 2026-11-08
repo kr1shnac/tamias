@@ -65,9 +65,11 @@ fallback: one file serves a laptop and a service manager.
 
 The key is read **once at start-up**. It is held in a `Credential` whose `repr`
 and `str` are opaque, so a secret cannot reach a log line, an error body or a
-decision reason by accident. Client-supplied `Authorization` headers are always
-dropped before the provider's own credential is applied: whatever the client
-used to reach tamias is not a credential for the downstream provider.
+decision reason by accident. Client-supplied credential headers are always
+dropped before the provider's own credential is applied — `Authorization`, the
+Anthropic wire's `x-api-key`, and the other common API-key spellings
+(`proxy-authorization`, `api-key`, `x-goog-api-key`). Whatever the client used
+to reach tamias is not a credential for the downstream provider.
 
 A provider whose secret cannot be read is reported as **unconfigured** and is
 skipped by routing. It is never tried with the wrong credential. `GET /limits`

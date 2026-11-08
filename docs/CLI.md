@@ -16,6 +16,7 @@ Every command runs as `tamias <command>`. `tamias --help` lists them:
 | `agent-config` | Print an agent configuration snippet. |
 | `opencode install` | Write the report slash command OpenCode loads at startup (`/tamias`, or `/tamias-report` when the pop-up owns the name). |
 | `opencode setup` | Merge the `tamias` provider into OpenCode's config (backup first) and register the TUI pop-up. |
+| `opencode uninstall` | Remove the `tamias` provider, plugin registration and slash commands, leaving every other OpenCode entry alone. |
 | `service install` | Write a systemd user unit that runs `tamias serve` in the background (Linux). |
 | `service uninstall` | Stop and remove the unit tamias wrote. |
 | `doctor` | Check local tamias readiness. |
@@ -262,6 +263,28 @@ without a catalogue it falls back to `--provider opencode`.
 
 Exit codes: `0` written, `2` no model to offer or a usage error, `1` the config
 could not be read or written.
+
+## `tamias opencode uninstall`
+
+```text
+tamias opencode uninstall [--config PATH] [--plugin DIR] [--project DIR]
+                          [--keep-plugin] [--dry-run]
+```
+
+Removes only what tamias registered:
+
+- `provider.tamias` from OpenCode's config, backing the file up first;
+- plugin entries in `cli.json` that name this project's plugin — the staged
+  `~/.tamias/plugin`, an explicit `--plugin` path, or a checkout whose
+  `package.json` names `tamias-opencode-plugin`;
+- `tamias.md` and `tamias-report.md` from the global commands directory, and
+  from `<project>/.opencode/commands` when `--project` is given;
+- the staged plugin directory `~/.tamias/plugin`, unless `--keep-plugin`.
+
+Every other provider, plugin and command is left alone. `--dry-run` prints what
+would change without writing or deleting. Exit `0` even when nothing was
+installed; `1` when a config could not be read or written, or a file could not
+be removed. Restart OpenCode afterwards to unload the provider and plugin.
 
 ## `tamias service install`
 

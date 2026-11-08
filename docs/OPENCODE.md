@@ -182,6 +182,13 @@ It prints the matching `tamias serve` command, names `--providers` when a
 catalogue exists, and warns when JSONC comments had to be dropped. `--dry-run`
 shows both documents without writing.
 
+To undo the provider and pop-up wiring later, run `tamias opencode uninstall`.
+It removes `provider.tamias`, the plugin entry, the `tamias` / `tamias-report`
+slash commands, and the staged plugin under `~/.tamias/plugin` (`--keep-plugin`
+leaves the directory), while leaving every other provider and command alone. It
+backs up each config it rewrites and honours `--dry-run`; see
+[`docs/CLI.md`](CLI.md#tamias-opencode-uninstall).
+
 The `apiKey` it writes is the literal `tamias-local`: a placeholder, not a
 secret. OpenCode hides a custom provider that carries no credential, while
 tamias replaces whatever the client sends with the provider's own key. A real

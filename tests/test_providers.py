@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from tamias.providers import (
+    CLIENT_AUTH_HEADERS,
     Credential,
     ProviderError,
     catalogue_from_registry,
@@ -208,6 +209,40 @@ def test_apply_auth_without_a_credential_still_drops_the_client_token(tmp_path):
     headers = catalogue.apply_auth("nvidia", {"authorization": "Bearer sk-client"})
 
     assert "authorization" not in headers
+
+
+def test_apply_auth_drops_the_anthropic_client_key(tmp_path):
+    """``x-api-key`` is a credential for tamias, not for the provider it routes to."""
+    catalogue = load_providers(
+        write(tmp_path, TWO_PROVIDERS),
+        env={"OPENROUTER_API_KEY": "or-secret", "NVIDIA_API_KEY": "nv-secret"},
+    )
+
+    headers = catalogue.apply_auth(
+        "nvidia",
+        {
+            "x-api-key": "sk-ant-client",
+            "X-Api-Key": "sk-ant-client-again",
+            "anthropic-version": "2023-06-01",
+        },
+    )
+
+    assert "x-api-key" not in headers
+    assert "X-Api-Key" not in headers
+    assert headers["anthropic-version"] == "2023-06-01"
+    assert headers["authorization"] == "Bearer nv-secret"
+
+
+def test_apply_auth_drops_every_client_credential_spelling(tmp_path):
+    catalogue = load_providers(write(tmp_path, TWO_PROVIDERS), env={})
+
+    headers = {name: "sk-client" for name in CLIENT_AUTH_HEADERS}
+    headers["accept"] = "application/json"
+
+    cleaned = catalogue.apply_auth("nvidia", headers)
+
+    assert not any(key.lower() in CLIENT_AUTH_HEADERS for key in cleaned)
+    assert cleaned["accept"] == "application/json"
 
 
 def test_provider_for_falls_back_to_the_only_configured_provider(tmp_path):

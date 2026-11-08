@@ -29,6 +29,18 @@ or an in-process mock. What it pins down:
 - **The three adapter routes.** `/v1/chat/completions`, `/v1/messages` and
   `/v1/responses` are exercised against fixtures (buffered, completed-stream and
   truncated-stream cases), including Anthropic and Responses usage merging.
+  `/v1/messages` stores the response id as `generation_id` on both the buffered
+  and streaming paths.
+- **A provider switch does not forward the client's credential.** The
+  catalogue strips `authorization`, `proxy-authorization`, `x-api-key`,
+  `api-key` and `x-goog-api-key` before applying the provider's own key; the
+  chat route and `/v1/messages` are both tested with a client `x-api-key`
+  (`tests/test_providers.py`, `tests/test_multi_provider.py`,
+  `tests/test_adapter_failover.py`, `tests/test_anthropic.py`).
+- **`tamias opencode uninstall` removes only its own wiring.** A setup followed
+  by uninstall restores the other providers, plugins and commands, removes the
+  `tamias` / `tamias-report` command files and the staged plugin, and keeps a
+  mode-`0600` backup of each rewritten config (`tests/test_opencode_uninstall.py`).
 - **Adapter failover is the chat route's failover.** `/v1/messages` retries a
   refused model (429/404) on the next gated model before the first streamed
   byte, remembers the refusal for later requests, and refuses a model no
