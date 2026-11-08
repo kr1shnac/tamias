@@ -25,6 +25,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -107,7 +108,7 @@ if (!tuiSpecifier) {
 
 // --- 2. a temporary log, price sheet, and /limits stub ----------------------
 
-const TEMP = mkdtempSync(path.join("/tmp/opencode", "tamias-verify-"));
+const TEMP = mkdtempSync(path.join(tmpdir(), "tamias-verify-"));
 const DB_PATH = path.join(TEMP, "requests.db");
 const PRICES_PATH = path.join(TEMP, "prices.toml");
 

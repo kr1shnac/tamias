@@ -582,7 +582,13 @@ is `0.1.0a3`.
 | Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. `tamias reconcile` compares stored computed cost with stored or looked-up provider cost per row; the live generation lookup succeeded (12 ids, 0 failed), but no invoice has been reconciled. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`) |
 | Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, direct NVIDIA capabilities and a 200 request on 2026-11-06, and OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key) |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions; the wheel carries `tamias/plugin` and CI fails if it does not |
-| Publish | Tag-triggered | `v1.0.2` publishes through Trusted Publishing (OIDC); `0.1.0a8` was the last artifact on PyPI |
+| Publish | Verified | `v1.0.2` published through Trusted Publishing (OIDC) on 2026-11-08. The PyPI wheel and sdist are byte-identical to the local build (matching SHA-256), and a clean Python 3.14 venv installed the wheel and ran `tamias 1.0.2`; `0.1.0a8` was the prior artifact |
+
+The `v1.0.2` CI run failed only in the plugin job: `scripts/verify.ts` created
+its fixture under a hardcoded `/tmp/opencode`, which does not exist on a fresh
+runner. The harness now uses `os.tmpdir()`; all 52 plugin checks pass locally.
+That change is test infrastructure only and is not part of the published
+artifacts.
 
 This page describes implemented repository behaviour and the runs recorded above.
 It does not claim provider compatibility, savings, latency, or live-agent success
