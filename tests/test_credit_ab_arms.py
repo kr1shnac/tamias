@@ -314,3 +314,79 @@ def test_the_oracle_reports_a_timeout_without_the_output(tmp_path: Path) -> None
 
     assert passed is False
     assert "timed out" in reason
+
+
+
+class _RecordingTransport:
+    """An httpx transport that keeps every request body it was handed.
+
+    The arms run through the real proxy against the mock upstream, so the only
+    place the request body can be observed is the transport itself.
+    """
+
+    def __init__(self, app, seen: list[dict]):
+        from mock_upstream import StreamingASGITransport
+
+        self.inner = StreamingASGITransport(app)
+        self.seen = seen
+
+    async def handle_async_request(self, request):
+        import json
+
+        body = await request.aread()
+        try:
+            self.seen.append(json.loads(body))
+        except ValueError:
+            self.seen.append({})
+        return await self.inner.handle_async_request(request)
+
+    def handle_request(self, request):
+        raise AssertionError("the arms must use the async transport")
+
+
+def _capture_bodies(module, monkeypatch) -> list[dict]:
+    from mock_upstream import create_mock_upstream
+
+    import tamias.proxy as proxy_module
+
+    seen: list[dict] = []
+    original = proxy_module.create_app
+
+    def create_app(upstream, store, sheet, mode, **kwargs):
+        kwargs["transport"] = _RecordingTransport(create_mock_upstream(), seen)
+        return original(upstream, store, sheet, mode, **kwargs)
+
+    monkeypatch.setattr(proxy_module, "create_app", create_app)
+    return seen
+
+
+def test_max_tokens_reaches_the_wire_and_is_omitted_when_unset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The live failure this defends: an unbounded request made the provider
+    reserve the model's whole context against the balance, so the arm was
+    refused 402 before the task was ever attempted."""
+    module = _module()
+    module._SECRET = FAKE_KEY
+
+    seen = _capture_bodies(module, monkeypatch)
+    outcome = module.run_arm(
+        _args(tmp_path, max_tokens=64),
+        module.ArmSpec("off", "off", ""),
+        tmp_path / "bounded.db",
+    )
+    assert outcome.error is None, outcome.error
+    assert seen, "no request reached the upstream"
+    bounded = seen[:2]
+    assert all(body.get("max_tokens") == 64 for body in bounded), bounded
+
+    # A second arm reuses the same patch (and the same list, hence the slice):
+    # without the flag the request is still buildable, it is just unbounded.
+    outcome = module.run_arm(
+        _args(tmp_path, max_tokens=None),
+        module.ArmSpec("off", "off", ""),
+        tmp_path / "unbounded.db",
+    )
+    assert outcome.error is None, outcome.error
+    unbounded = seen[2:]
+    assert unbounded and all("max_tokens" not in body for body in unbounded), unbounded

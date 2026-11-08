@@ -402,20 +402,21 @@ smaller than the floor is reported as below the floor, not as a measurement.
 
 ## Not verified
 
-- **Savings measurement.** No measured savings exist. Every saving figure the
-  report or the OpenCode pop-up prints is arithmetic over invented or listed rates applied
-  to logged token counts; none has been reconciled against a provider invoice, and
-  no paid, non-zero-price run has been authorised. The *arithmetic* is now
-  verified against authored rates (`scripts/shadow_rate_check.py`, above,
-  including the negative case) and the *measurement across two arms* is verified
-  end to end offline (`scripts/credit_ab_check.py`, above); what remains
-  unverified is that the rates are real and that any cheap model is genuinely
-  cheaper per task. `tamias reconcile` makes the comparison possible row by row,
-  offline from stored provider costs, online from the provider's generation
-  record, or from a provider invoice via `--invoice` (row-level or day-level, so
-  any provider that exports billing can prove the billed side). A live generation
-  lookup has been run; **no invoice file has been reconciled**, and no live A/B
-  has been authorised, so no realised saving is claimed anywhere.
+- **Savings measurement.** One small live measurement now exists: a paid
+  two-arm A/B on 2026-11-09 against OpenRouter measured **$0.000038** from the
+  provider's own ledger for a 2-request task (`X - Y` = `$0.000061` −
+  `$0.000024`), against computed figures of `$0.000052` and `$0.000019`. The
+  arms were proven (off rewrote 0, active rewrote 1, two rows each), the
+  `--max-spend 0.50` ceiling held (the ledger moved `$0.000085`), and the
+  verdict is the provider's record, not arithmetic. What that does **not**
+  establish: any rate, any model, or any saving a user would see. It is one task
+  at the ledger's floor, and `usage` lagged minutes behind it — reading the
+  ledger too early turned a real saving into a measured *loss* until the harness
+  waited after each arm. Every other savings figure in `report` and the pop-up is
+  still list-price arithmetic over logged tokens, and the pop-up labels it
+  `est. … below list` because its baseline is a counterfactual no provider billed.
+  `tamias reconcile --invoice` (row-level or day-level) is the path to a
+  per-request proof on any provider; **no invoice file has been reconciled**.
 - **The pop-up's saving line is an estimate by construction.** Its baseline is
   the requested model re-priced from the sheet, which is a counterfactual, not
   a bill. The pop-up now says `est. X% below list` (one decimal, so 99.75% never
@@ -525,7 +526,6 @@ same task runs twice through the same agent — once with routing off (`X`) and 
 with routing active (`Y`) — and `GET /api/v1/key`'s `data.usage` is read around
 each arm, so `saving = X - Y`. Routing is the only variable; the ledger is the
 provider's record, not arithmetic the caller controls.
-
 **Offline first** (no key, no socket, no money):
 
 ```sh
@@ -570,6 +570,22 @@ reached. A sweep stopped mid-way ranks nothing, so it reports **INCONCLUSIVE**;
 the A/B that reaches the ceiling between its arms does not send the active arm at
 all. A negative `--max-spend` is a usage error, and the ceiling is echoed before
 the first request so the operator can see the limit they set.
+
+**Bounded requests, and the ledger's lag.** Two live findings shaped the
+harness, and both are now controlled by flags:
+
+- An unbounded request reserves the model's **whole context** against the
+  balance: OpenRouter refused a run with `402 ... requested up to 131072 tokens,
+  but can only afford 36995`. The same request with `--max-tokens 64` returned
+  200. `--max-tokens` is therefore the flag that makes a credit-limited key able
+  to run at all, and it keeps the run's worst-case cost known.
+- `usage` (the lifetime total) **lags a live run by minutes**. Read immediately
+  after an arm it reports `$0.00` for money that was spent; read once, late, it
+  books *both* arms' spend onto the last arm, which turns a real saving into a
+  negative one — that happened live, and the code was corrected so the wait
+  applies after **each** arm (`--settle SECONDS`), not only at the end. When the
+  field has still not moved by the end of the window, the run says so rather
+  than calling the arm free.
 
 **Spend ceiling.** Every live run should set `--max-spend USD`. It is a hard cap
 enforced against the provider's own ledger: after each arm the script reads
@@ -643,9 +659,9 @@ is `0.1.0a3`.
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
-| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. `tamias reconcile` compares stored computed cost with stored or looked-up provider cost per row, or with a provider invoice supplied as a CSV (`--invoice`, row-level or day-level); the live generation lookup succeeded (12 ids, 0 failed), but no invoice file has been reconciled. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`) |
+| Savings measurement | One small live measurement | A paid two-arm A/B ran on 2026-11-09 against OpenRouter under a `$0.50` ceiling and measured **$0.000038** from the provider's own ledger for a 2-request task (off `$0.000061`, active `$0.000024`; the computed figures were `$0.000052` and `$0.000019`). That is the provider's record rather than arithmetic, but it is one task at the ledger's floor, so it is evidence that the pipeline measures -- not a claim about running cost. The pop-up's and `report`'s figures remain list-price estimates |
 | Platform coverage | CI-gated | Linux (Python 3.11–3.14) is the full gate and passes here (1217 tests); macOS and Windows run the same suite on Python 3.12 in CI. Windows/macOS runs have not been executed on this machine: no result is claimed for them yet |
-| Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, direct NVIDIA capabilities and a 200 request on 2026-11-06, and OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key) |
+| Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, direct NVIDIA capabilities and a 200 request on 2026-11-06, OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key), and the paid A/B on 2026-11-09 |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions; the wheel carries `tamias/plugin` and CI fails if it does not |
 | Publish | Verified | `v1.0.2` published through Trusted Publishing (OIDC) on 2026-11-08. The PyPI wheel and sdist are byte-identical to the local build (matching SHA-256), and a clean Python 3.14 venv installed the wheel and ran `tamias 1.0.2`; `0.1.0a8` was the prior artifact |
 

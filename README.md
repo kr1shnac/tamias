@@ -260,9 +260,11 @@ gates are the stable surface. Treat every figure it prints with care:
   a provider with no per-request billing API can still prove the billed side.
   The first live offline run found 10 of 19 metered rows comparable and two priced
   rows billed above the computed list price; the online lookup confirmed both
-  stored bills exactly. **No invoice has been reconciled and no paid run has been
-  authorised, so no savings figure anywhere in the repository is proven.** The
-  OpenCode pop-up labels its saving line `est. … below list`, because its
+  stored bills exactly. One paid A/B has since measured **$0.000038** from the
+  provider's own ledger for a 2-request task — the provider's record, not
+  arithmetic — which proves the pipeline measures at the ledger's floor, not that
+  any rate is right. **No invoice has been reconciled, so no running-cost saving
+  is proven.** The pop-up labels its saving line `est. … below list`, because its
   baseline is a list-price counterfactual, not a bill.
 - **Live routing is verified against two providers, not every provider.** On
   2026-11-04, direct NVIDIA and OpenRouter were served side by side: a planning

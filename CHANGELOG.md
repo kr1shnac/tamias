@@ -47,8 +47,26 @@ describing an arithmetic estimate as a realised saving.
   routing). A negative result exits 0 with the loss printed: a measured loss is
   a finding, not a failure to hide. `--max-spend USD` is a hard ceiling enforced
   against the provider's own ledger, not an estimate: the run stops before
-  sending the next request once that key's usage has moved by that much. No live
-  run is authorised yet, and none has been made.
+  sending the next request once that key's usage has moved by that much.
+- **Three live findings are now flags in `credit_ab_check.py`.** An unbounded
+  request reserves the model's whole context against the balance, so
+  OpenRouter refused a run with `402 ... requested up to 131072 tokens, but can
+  only afford 36995`; `--max-tokens N` bounds it. `GET /api/v1/key`'s
+  `usage` lags a live run by minutes, so a read taken immediately reports
+  `$0.00` for money that was spent, and a single late read books *both* arms'
+  spend onto the last arm — which measured a real saving as a **loss** until
+  `--settle SECONDS` made the wait apply after each arm. And when the lifetime
+  field has not moved but `usage_daily` has, `compare_arms` reads the daily
+  field and names it, instead of reporting "no money moved". A falling
+  `usage_daily` is treated as a day rollover, never as a negative saving.
+- **One live measurement exists: $0.000038.** A paid two-arm A/B on 2026-11-09
+  against OpenRouter (strong `deepseek/deepseek-v4.1-flash`, cheap
+  `inclusionai/ling-3.0-flash`, `--max-spend 0.50`) measured
+  `X $0.000061 - Y $0.000024` from the provider's own ledger for a 2-request
+  task, with the arms proven (off rewrote 0, active rewrote 1) and the ledger
+  moving `$0.000085` in total — the ceiling held. That is the provider's record
+  rather than arithmetic, and it is evidence the pipeline measures at the
+  ledger's floor; it is not evidence that any rate is right.
 - **The pop-up's savings bar says `est. X% below list` instead of
   `realised`.** Its baseline is the requested model re-priced from the price
   sheet — a counterfactual no provider ever billed. The percentage carries one

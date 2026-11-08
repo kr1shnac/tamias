@@ -572,3 +572,61 @@ def test_the_sweep_also_stops_at_the_ceiling(monkeypatch, capsys) -> None:
     assert arms_run == ["off"], arms_run
     assert "stopped at the ceiling" in out
     assert "INCONCLUSIVE" in out
+
+
+def test_a_stale_lifetime_field_falls_back_to_the_daily_field() -> None:
+    """The live failure: `/api/v1/key`'s `usage` lagged the run by minutes, so
+    two arms that each cost a fraction of a cent read `$0.00` on both sides and
+    the comparison measured nothing.  `usage_daily` had moved."""
+    module = _module()
+    arms = module.Arms(
+        off=module.ArmResult(name="off", mode="off", rewritten=0, requests_sent=2),
+        active=module.ArmResult(name="active", mode="active", rewritten=1, requests_sent=2),
+        before=module.Ledger(usage=10.00, usage_daily=0.0100),
+        between=module.Ledger(usage=10.00, usage_daily=0.0106),
+        after=module.Ledger(usage=10.00, usage_daily=0.0108),
+    )
+
+    ok, lines = module.compare_arms(arms)
+    text = "\n".join(lines)
+
+    assert ok is True
+    assert "MEASURED SAVING: $0.000400" in text
+    # The run must name the field it measured from, so a reader can see the
+    # lifetime total had not caught up.
+    assert "[usage_daily]" in text
+
+
+def test_a_day_rollover_is_never_read_as_a_saving() -> None:
+    module = _module()
+    arms = module.Arms(
+        off=module.ArmResult(name="off", mode="off", rewritten=0, requests_sent=2),
+        active=module.ArmResult(name="active", mode="active", rewritten=1, requests_sent=2),
+        before=module.Ledger(usage=10.00, usage_daily=0.50),
+        between=module.Ledger(usage=10.00, usage_daily=0.00),
+        after=module.Ledger(usage=10.00, usage_daily=0.00),
+    )
+
+    _, lines = module.compare_arms(arms)
+    text = "\n".join(lines)
+
+    assert "MEASURED SAVING" not in text
+    assert "[usage_daily]" not in text
+
+
+def test_the_lifetime_total_is_preferred_when_it_moved() -> None:
+    module = _module()
+    arms = module.Arms(
+        off=module.ArmResult(name="off", mode="off", rewritten=0, requests_sent=2),
+        active=module.ArmResult(name="active", mode="active", rewritten=1, requests_sent=2),
+        before=module.Ledger(usage=10.00, usage_daily=0.01),
+        between=module.Ledger(usage=10.06, usage_daily=0.02),
+        after=module.Ledger(usage=10.08, usage_daily=0.03),
+    )
+
+    _, lines = module.compare_arms(arms)
+    text = "\n".join(lines)
+
+    assert "MEASURED SAVING: $0.040000" in text
+    assert "[usage]" in text
+    assert "[usage_daily]" not in text

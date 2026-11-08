@@ -61,6 +61,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,12 @@ class Ledger:
         if self.usage is None or before.usage is None:
             return None
         return self.usage - before.usage
+
+    def delta_daily(self, before: Ledger) -> float | None:
+        """Dollars this key spent today, between two reads, or None."""
+        if self.usage_daily is None or before.usage_daily is None:
+            return None
+        return self.usage_daily - before.usage_daily
 
     def delta_free_requests(self, before: Ledger) -> int | None:
         """Free-model requests consumed between two reads, or None."""
@@ -265,6 +272,26 @@ class Arms:
     notes: list[str] = field(default_factory=list)
 
 
+def _spend_delta(before: Ledger, after: Ledger) -> tuple[float | None, str | None]:
+    """Dollars spent between two ledger reads, from the field that moved.
+
+    ``usage`` is the lifetime total, and OpenRouter's copy of it lagged a live
+    run by minutes: two arms that cost a fraction of a cent each read
+    ``$0.00`` on both sides, so the comparison measured nothing.
+    ``usage_daily`` is the fresher field, so when the lifetime total has not
+    moved but the daily one has, the daily delta is the measurement and the
+    run says which field it came from.  A *decreasing* daily delta is a day
+    rollover, not a negative saving, so it is never used.
+    """
+    lifetime = after.delta_usage(before)
+    if lifetime:
+        return lifetime, "usage"
+    daily = after.delta_daily(before)
+    if daily is not None and daily > 0:
+        return daily, "usage_daily"
+    return lifetime, "usage"
+
+
 def compare_arms(
     arms: Arms, min_detectable: float = DEFAULT_MIN_DETECTABLE
 ) -> tuple[bool, list[str]]:
@@ -298,21 +325,13 @@ def compare_arms(
             "so there is nothing for the ledger to differ on"
         )
 
-    x = (
-        None
-        if arms.before is None or arms.between is None
-        else arms.between.delta_usage(arms.before)
-    )
-    y = (
-        None
-        if arms.between is None or arms.after is None
-        else arms.after.delta_usage(arms.between)
-    )
+    x, x_source = _spend_delta(arms.before, arms.between)
+    y, y_source = _spend_delta(arms.between, arms.after)
 
     if x is not None and y is not None:
         saving = x - y
-        lines.append(f"arm X (router off):    {_usd(x)}")
-        lines.append(f"arm Y (router active): {_usd(y)}")
+        lines.append(f"arm X (router off):    {_usd(x)}  [{x_source}]")
+        lines.append(f"arm Y (router active): {_usd(y)}  [{y_source}]")
         if abs(saving) < min_detectable:
             lines.append(
                 f"saving {_usd(saving)} is below the instrument floor "
@@ -353,6 +372,33 @@ def _ceiling(args: argparse.Namespace) -> float | None:
         say(f"--max-spend must be zero or greater, not {value}")
         return _INVALID
     return float(value)
+
+
+def _settled_read(args: argparse.Namespace, token: str, since: Ledger) -> Ledger:
+    """Read the ledger, waiting for the provider's aggregate field to catch up.
+
+    ``usage`` is a lifetime total that lags a live run by minutes.  Reading it
+    immediately after an arm reports ``$0.00`` for money that was spent, and a
+    later single settled read then books *both* arms' spend onto whichever arm
+    happens to be last — which turns a real saving into a negative one.  So the
+    wait is applied after **each** arm, not only at the end, and the read is
+    repeated until the field moves or the patience runs out.
+    """
+    ledger = read_key(token)
+    if args.settle <= 0 or ledger.usage is None or since.usage is None:
+        return ledger
+    deadline = time.monotonic() + args.settle
+    while time.monotonic() < deadline:
+        if ledger.usage > since.usage:
+            return ledger
+        remaining = deadline - time.monotonic()
+        time.sleep(min(15.0, max(0.0, remaining)))
+        ledger = read_key(token)
+    if ledger.usage is not None and since.usage is not None and ledger.usage <= since.usage:
+        say("  (the ledger had not moved by the end of the settle window; this "
+            "arm's delta reads $0.00, which is the instrument's lag, not a free "
+            "request)")
+    return ledger
 
 
 def _over_ceiling(before: Ledger, ledger: Ledger, ceiling: float | None) -> bool:
@@ -824,6 +870,12 @@ async def _run_arm(args: argparse.Namespace, arm: ArmSpec, db_path: Path) -> Arm
     }
     model = arm.model_sent(args.strong_model)
     task = args.task or "Reply with the word ok"
+    # An unbounded request is not a harmless default: OpenRouter reserves the
+    # model's full context (131072 tokens) against the balance, so a
+    # credit-limited key is refused 402 before the task is ever attempted.  A
+    # bounded request is what makes the measurement runnable, and it keeps the
+    # run's cost a known quantity rather than a worst case.
+    max_tokens = getattr(args, "max_tokens", None)
     # Two turns, the shape a real agent sends: a plain user turn, which the
     # router always STAYs on, then a trailing easy-tool result, which is what
     # it SWITCHes on.  A sweep whose only request were a user turn would
@@ -848,6 +900,9 @@ async def _run_arm(args: argparse.Namespace, arm: ArmSpec, db_path: Path) -> Arm
             "stream": False,
         },
     ]
+    if max_tokens is not None:
+        for body in bodies:
+            body["max_tokens"] = int(max_tokens)
 
     if arm.mode == "bypass":
         # The static arm: the request never traverses Tamias.
@@ -1070,7 +1125,7 @@ def run_live_ab(args: argparse.Namespace, token: str) -> int:
         off_db = workdir / "off.db"
         off_out = run_arm(args, ArmSpec(name="off", mode="off", cheap_model=""), off_db)
         _off_rows, _off_rewritten, off_cost = _row_summary(off_db)
-        between = read_key(token)
+        between = _settled_read(args, token, before)
         say(f"ledger between  usage {_usd(between.usage)}")
         if _over_ceiling(before, between, ceiling):
             say("the active arm was not sent, so this run cost no more than the ceiling.")
@@ -1083,8 +1138,11 @@ def run_live_ab(args: argparse.Namespace, token: str) -> int:
             active_db,
         )
         _on_rows, _on_rewritten, on_cost = _row_summary(active_db)
-        after = read_key(token)
+        after = _settled_read(args, token, between)
         say(f"ledger after    usage {_usd(after.usage)}")
+        if _over_ceiling(before, after, ceiling):
+            say("NOTE: the ceiling was reached; both arms already ran, and nothing")
+            say("will be sent again.  Re-run under the same ceiling to measure again.")
         say()
 
         off = ArmResult(
@@ -1251,6 +1309,15 @@ def _parser() -> argparse.ArgumentParser:
                         help="hard ceiling on dollars this key spends during the "
                              "run; the arms stop when the provider's ledger "
                              "reaches it. Never send a paid run without one")
+    parser.add_argument("--max-tokens", type=int, default=None, metavar="N",
+                        help="cap completion tokens per request. Without it the "
+                             "provider reserves the model's whole context "
+                             "against the balance and can refuse the run with "
+                             "402 before the task is attempted")
+    parser.add_argument("--settle", type=float, default=0.0, metavar="SECONDS",
+                        help="wait this long after the last arm before the final "
+                             "ledger read; the provider's aggregate fields lag a "
+                             "run by minutes (default: 0)")
     parser.add_argument("--candidates", default="",
                         help="comma-separated cheap models to sweep, e.g. a,b,c")
     parser.add_argument("--repeats", type=int, default=3,
