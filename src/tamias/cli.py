@@ -2149,15 +2149,19 @@ def opencode_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
-def _shell_join(argv: Sequence[str]) -> str:
+def _shell_join(argv: Sequence[str], *, windows: bool = False) -> str:
     """Quote an argv for the shell the user will paste it into.
 
     POSIX shells get :func:`shlex.join`; Windows gets the quoting
     :mod:`subprocess` uses for ``CreateProcess``, which ``cmd.exe`` and
     PowerShell both accept for ordinary paths and flags.  Using POSIX quoting
     on Windows turns ``C:\\Program Files\\...`` into a command that cannot run.
+
+    The platform is an argument rather than a global read so the same code is
+    testable on every runner, and so a caller cannot accidentally quote for the
+    wrong shell.
     """
-    if os.name == "nt":
+    if windows:
         return subprocess.list2cmdline(list(argv))
     return shlex.join(argv)
 
@@ -2200,7 +2204,7 @@ def _opencode_serve_command(args: argparse.Namespace) -> str:
     registry = getattr(args, "registry", None)
     if registry:
         argv.extend(["--registry", str(Path(registry).expanduser())])
-    return _shell_join(argv)
+    return _shell_join(argv, windows=os.name == "nt")
 
 
 OPENCODE_COMMAND_FILENAME = "tamias.md"
@@ -2314,7 +2318,7 @@ def opencode_install(args: argparse.Namespace) -> int:
     inr_rate = getattr(args, "inr_rate", None)
     if inr_rate is not None:
         report_argv.extend(["--inr-rate", f"{inr_rate:g}"])
-    report_command = _shell_join(report_argv)
+    report_command = _shell_join(report_argv, windows=os.name == "nt")
     content = (
         "---\n"
         "description: Show tamias savings, tokens and routing status\n"

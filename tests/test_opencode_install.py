@@ -8,6 +8,7 @@ without ``--force``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -135,8 +136,32 @@ def test_paths_with_spaces_are_shell_quoted(
     assert main(install_args(project, db, prices)) == 0
 
     text = (project / ".opencode" / "commands" / "tamias.md").read_text(encoding="utf-8")
-    assert "--db '" in text
-    assert "my project/requests.db'" in text
+    # The generated command is quoted for the shell the user runs it in: POSIX
+    # shells get shlex's single quotes, Windows gets the double quotes
+    # CreateProcess understands.  Both must survive a path with a space.
+    if os.name == "nt":
+        assert '--db "' in text
+        assert 'my project\\requests.db"' in text
+    else:
+        assert "--db '" in text
+        assert "my project/requests.db'" in text
+
+
+def test_the_windows_shell_gets_windows_quoting() -> None:
+    """One platform's quoting rules never leaked into the other's command line.
+
+    ``opencode install`` ran under a Windows runner and emitted
+    ``--db 'C:\\ ...'``, which cmd.exe reads as a literal path with quotes in
+    it, so the generated command could not run.  It now quotes for the shell
+    the user runs it in.
+    """
+    assert cli._shell_join(
+        ["tamias", "report", "--db", r"C:\my project\requests.db"],
+        windows=True,
+    ) == 'tamias report --db "C:\\my project\\requests.db"'
+    assert cli._shell_join(
+        ["tamias", "report", "--db", "/home/me/my project/requests.db"],
+    ) == "tamias report --db '/home/me/my project/requests.db'"
 
 
 def test_install_refuses_to_overwrite_without_force(
