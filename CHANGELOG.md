@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.2] - 2026-11-06
+## [1.0.2] - 2026-11-08
 
 A packaging, routing and honesty pass: the pop-up travels with the wheel and
 actually loads, its savings bar says what it measured, the two surfaces agree
@@ -74,6 +74,13 @@ on every number they both print, and CI now fails when the TUI breaks.
 
 ### Fixed
 
+- **The adapter wires never learned a refusal.** `/v1/messages` and
+  `/v1/responses` relayed a `429`/`404` straight to the client: the same
+  request the chat route failed over was a failed turn on the Anthropic wire,
+  and the refusal was not recorded for later requests. Both adapters now learn
+  it; `/v1/messages` retries it on the next gated model before the first
+  streamed byte, and both refuse a model no configured provider serves instead
+  of relaying it to whichever provider happened to be last.
 - **The pop-up invented a price where the proxy reports UNKNOWN.** Cached
   tokens against a model that never quoted a cached rate were charged at the
   input rate, so `/tamias` showed a number `tamias report` refuses to print.

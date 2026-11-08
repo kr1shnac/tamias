@@ -1,7 +1,10 @@
 # Security Policy
 
-Tamias is an alpha local proxy. Its authentication is **opt-in**, and binding
-beyond loopback is a **two-key** act: a wider bind requires *both*
+Tamias is a local proxy at **1.0**. Version 1.0 means the command line, the
+config formats and the three routing gates are the stable surface; it is not a
+claim that the proxy is hardened for hostile networks. Its authentication is
+**opt-in**, and binding beyond loopback is a **two-key** act: a wider bind
+requires *both*
 
 - **authentication** — `serve` requires `--auth-token` (or `$TAMIAS_AUTH_TOKEN`)
   or company keys configured with `--keys-db`; and

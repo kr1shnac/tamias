@@ -25,11 +25,14 @@ its own: you bring the keys, and tamias decides which one to spend.
   and it must not be cooling down. Survivors rank cheapest-first, with a quality
   floor for the step being routed, so cheapness can never buy a bad answer on a
   hard step.
-- **Fails over on a refusal.** `429` records a cooldown for that model; `404`
-  means "this provider does not serve this model for this account" and is
-  remembered for 12 hours; `5xx` and transport failures cool the model down too.
-  The turn is retried immediately on the next candidate that passed the same
-  gates, preferring one at least as capable as the model that refused.
+- **Fails over on a refusal.** On `/v1/chat/completions` and `/v1/messages`,
+  `429` records a cooldown for that model; `404` means "this provider does not
+  serve this model for this account" and is remembered for 12 hours; `5xx`
+  cools the model down too, and a transport failure does the same on the chat
+  wire. The turn is retried immediately
+  on the next candidate that passed the same gates, preferring one at least as
+  capable as the model that refused. The meter-only Responses wire records a
+  refusal for the routes that do route, but does not retry it itself.
 - **Makes free and paid visible.** `tamias report` separates tokens on
   $0-priced models from tokens on paid ones and prints the realised saving for
   the requests the proxy actually rewrote. A free model is never coloured to
