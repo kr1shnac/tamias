@@ -28,8 +28,15 @@ on every number they both print, CI now fails when the TUI breaks, and
   On the operator log (1459 rows, 1440 passthrough excluded), 10 of 19 metered
   rows were comparable: 8 matched (7 free at `$0.00`) and 2 paid DeepSeek rows
   were billed 48% and 60% above the computed list price, so the command exited
-  `3` (`FAIL`). No savings claim is proven; the rates were not changed on two
-  rows.
+  `3` (`FAIL`). An `--online` lookup of the same rows returned those stored
+  bills exactly, so the gap is in the list-price computation. No savings claim
+  is proven; the rates were not changed on two rows.
+- **`tamias report` uses the provider's bill for the actual side.** The
+  realised saving is `requested (warm list price) - actual used`; when a row
+  carries `provider_cost_usd`, that measured number is the actual side instead
+  of list-price arithmetic for the used model. The line says how many actual
+  costs came from the provider bill. The requested side remains a list-price
+  counterfactual, because a counterfactual has no invoice.
 
 ### Added
 
@@ -64,9 +71,12 @@ on every number they both print, CI now fails when the TUI breaks, and
   the variables (and the `api_key_command` alternative) on stderr.
 - **`tamias reconcile --online` reads the provider's own record.** It calls only
   `GET /api/v1/generation?id=…`, uses `data.total_cost` as the billed side, and
-  keeps the stored `provider_cost_usd` in the artifact for comparison. The key
-  comes from `--api-key-env` and is never printed. A failed lookup leaves the
-  row unknown and prevents a `PASS`.
+  keeps the stored `provider_cost_usd` in the artifact for comparison. Only
+  `gen-` ids are OpenRouter generations; other providers' ids are skipped, not
+  counted as failed lookups. The key comes from `--api-key-env` and is never
+  printed. A failed lookup leaves the row unknown and prevents a `PASS`. A live
+  run looked up 12 generations with zero failures and one skipped non-OpenRouter
+  id.
 
 - **A `pip install tamias` pop-up now actually loads.** The wheel shipped the
   TypeScript only, and OpenCode resolves a plugin's imports *beside* the plugin

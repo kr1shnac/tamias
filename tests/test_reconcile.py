@@ -312,6 +312,17 @@ def test_the_lookup_reads_only_the_documented_generation_endpoint():
     assert LookupClient.calls[0]["params"] == {"id": "gen-abc"}
 
 
+def test_non_openrouter_generation_ids_are_not_sent_to_openrouter():
+    client = LookupClient()
+    rows = [{"id": 1, "generation_id": "chatcmpl-123", "provider_cost_usd": None}]
+
+    costs, errors = lookup_generation_costs(rows, client=client)
+
+    assert costs == {}
+    assert errors == 0
+    assert LookupClient.calls == []
+
+
 def test_online_fills_a_missing_billed_cost(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ):
@@ -341,6 +352,22 @@ def test_online_without_a_key_exits_before_any_request(
 
     assert code == 1
     assert "OPENROUTER_API_KEY is not set" in err
+
+
+def test_online_skips_a_non_openrouter_id_and_uses_the_stored_bill(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    db = tmp_path / "requests.db"
+    log(db, computed=0.10, billed=0.10, generation="chatcmpl-123")
+    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+    monkeypatch.setattr(reconcile.httpx, "Client", LookupClient)
+
+    code, out, err = run(capsys, db, "--online")
+
+    assert code == 0
+    assert "PASS" in out
+    assert "skipped" in err
+    assert LookupClient.calls == []
 
 
 class FailingClient(LookupClient):

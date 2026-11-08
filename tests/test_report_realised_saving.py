@@ -192,6 +192,59 @@ def test_active_shape_two_rewritten(tmp_path, capsys):
     )
 
 
+BILLED_TABLE = """
+date = "2026-10-04"
+
+["expensive-model"]
+input = 10.0
+output = 20.0
+cached_input = 10.0
+
+["cheap-model"]
+input = 1.0
+output = 2.0
+cached_input = 1.0
+"""
+
+
+def test_realised_saving_uses_the_provider_bill_for_the_used_model(tmp_path, capsys):
+    """The actual side is the provider's measured bill when the row has one.
+
+    List-price arithmetic for the used model would show a gain; the provider
+    billed more than the requested model's list price, so the real result is a
+    loss.  The report must use the measurement, not the friendlier estimate,
+    and say where the actual cost came from.
+    """
+    db = str(tmp_path / "log.db")
+    _log(
+        db,
+        Usage(
+            input_tokens=1_000,
+            output_tokens=100,
+            cached_input_tokens=0,
+            cache_write_tokens=None,
+            provider_cost_usd=0.50,
+        ),
+        None,
+        "SWITCH",
+        model_used="cheap-model",
+        model_requested="expensive-model",
+    )
+
+    prices = write_prices(tmp_path, BILLED_TABLE)
+    code, out = _run(capsys, db, prices)
+
+    assert code == 0
+    realised = next(
+        line for line in out.splitlines() if line.startswith("realised saving")
+    )
+    # requested warm: 1000 * 10/1e6 + 100 * 20/1e6 = 0.012
+    # billed actual: 0.50, so the realised saving is -0.488
+    assert "-$0.488000" in realised, realised
+    assert "over 1 rows" in realised, realised
+    assert "1 of 1 actual costs came from the provider bill" in realised, realised
+
+
 def test_shadow_no_rewritten(tmp_path, capsys):
     """Scenario (b): shadow-only DB with no rewritten rows.
 

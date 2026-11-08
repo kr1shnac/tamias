@@ -21,7 +21,7 @@ generation record.
 | `--since YYYY-MM-DD` | no | Lower bound on the row's timestamp (inclusive, calendar date). |
 | `--until YYYY-MM-DD` | no | Upper bound on the row's timestamp (inclusive, calendar date). |
 | `--tolerance USD` | no | Absolute USD tolerance for a match. Default `0.000001`. A negative value is a runtime error. |
-| `--online` | no | Read the provider's generation record for every selected row with a `generation_id` and use that `total_cost` as the billed side. |
+| `--online` | no | Read the provider's generation record for every selected row whose `generation_id` starts with `gen-` and use that `total_cost` as the billed side. Other providers' ids are skipped, not sent to OpenRouter. |
 | `--api-key-env NAME` | no | Environment variable holding the lookup key (default `OPENROUTER_API_KEY`). Only read with `--online`; the value is never printed, logged, or placed in argv. |
 | `--out PATH` | no | Write a JSON artifact with one object per selected row. |
 | `--json` | no | Emit a JSON summary on stdout instead of the human-readable report. |
@@ -40,9 +40,11 @@ tokens against a newer sheet would change the claim being tested.
   the response Tamias handled. The command does not fetch an invoice.
 - **Billed, online** — `data.total_cost` from
   `GET https://openrouter.ai/api/v1/generation?id=<generation-id>`. This reads an
-  existing generation; it never creates a completion. The stored
-  `provider_cost_usd` is retained in the artifact as `logged_billed_cost`, and
-  the lookup value is `lookup_cost`.
+  existing generation; it never creates a completion. Only ids that start with
+  `gen-` are OpenRouter generation ids; a `chatcmpl-…`, `msg_…`, or any other
+  provider's id is skipped rather than sent to an endpoint that cannot know it.
+  A skipped id is not a failed lookup. The stored `provider_cost_usd` is retained
+  in the artifact as `logged_billed_cost`, and the lookup value is `lookup_cost`.
 
 A zero-price row compares `$0.00` with `$0.00` and is a match. That is
 arithmetic, not evidence of savings: a free row cannot prove that a paid
@@ -61,9 +63,11 @@ alternative would have cost more.
 With `--online`, a failed lookup leaves that row without a lookup value. If any
 lookup failed, the run cannot end in `PASS`, even when every row still carries a
 stored provider cost: the independent verification did not happen. A selected
-row without a `generation_id` keeps its stored `provider_cost_usd` and is not
-looked up; `--online` adds a provider record where one can be fetched, it does
-not erase a number the provider already reported.
+row without a `generation_id`, or with an id that is not an OpenRouter `gen-`
+id, keeps its stored `provider_cost_usd` and is not looked up; `--online` adds a
+provider record where one can be fetched, it does not erase a number the
+provider already reported. Skipped ids are reported separately and do not by
+themselves prevent a `PASS`.
 
 ## Human-readable output
 
@@ -113,8 +117,9 @@ the totals.
 ```
 
 With `--online`, the object also carries
-`"lookups": {"succeeded": 3, "failed": 0}`. The exit code follows the table
-above.
+`"lookups": {"succeeded": 3, "failed": 0, "skipped": 0}`. `skipped` counts
+selected rows whose `generation_id` is present but is not an OpenRouter `gen-`
+id. The exit code follows the table above.
 
 ## Artifact (`--out`)
 

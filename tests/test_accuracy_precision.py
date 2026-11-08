@@ -373,10 +373,13 @@ def reference_report(
 ) -> dict[str, Any]:
     """What ``tamias report`` prints: its two savings totals and their caveats.
 
-    ``report`` prices **both arms from the sheet**: its saving is an
-    apples-to-apples list-price comparison, which is why its label says
-    estimate and not measured.  The switch arm is the row's logged target for a
-    shadow or declined decision, and the model that ran for an applied one.
+    ``report`` prices the estimated saving's two arms from the sheet.  The
+    realised saving also starts from a list-price counterfactual for the
+    requested model, but its actual side is the provider's billed amount when
+    the row carries one; only rows without a bill fall back to list-price
+    arithmetic for the model that ran.  The switch arm of the estimate is the
+    row's logged target for a shadow or declined decision, and the model that
+    ran for an applied one.
     """
     ranked = sorted(
         ((price["input"] + price["output"]) / 2, name) for name, price in sheet.items()
@@ -414,7 +417,12 @@ def reference_report(
             requested_cost = reference_list_cost(
                 case["requested"], reference_warm(case["usage"]), sheet
             )
-            used_cost = reference_list_cost(case["used"], case["usage"], sheet)
+            billed = case["usage"].provider_cost_usd
+            used_cost = (
+                Decimal(str(billed))
+                if billed is not None
+                else reference_list_cost(case["used"], case["usage"], sheet)
+            )
             if requested_cost is None or used_cost is None:
                 realised_unpriced += 1
             else:
@@ -618,12 +626,13 @@ def test_the_report_agrees_with_the_reference_model(tmp_path: Path, capsys: Any)
         float(expected["saved"]), abs=0.0005
     ), f"report {amount.group(1)} vs reference {expected['saved']}"
 
-    line = re.search(r"realised saving[^:]*: \$([0-9.]+)", out)
+    line = re.search(r"realised saving[^:]*: (-)?\$([0-9.]+)", out)
     if expected["realised_count"]:
         assert line is not None, out
-        assert float(line.group(1)) == pytest.approx(
+        printed_realised = float(line.group(2)) * (-1 if line.group(1) else 1)
+        assert printed_realised == pytest.approx(
             float(expected["realised_saved"]), abs=0.0005
-        ), f"realised {line.group(1)} vs reference {expected['realised_saved']}"
+        ), f"realised {printed_realised} vs reference {expected['realised_saved']}"
     if expected["realised_unpriced"]:
         assert f"{expected['realised_unpriced']} of" in out
 

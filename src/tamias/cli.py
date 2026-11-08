@@ -91,6 +91,10 @@ from tamias.types import Usage
 DEFAULT_URL = OPENROUTER_MODELS_URL
 
 ESTIMATE_LABEL = "estimate; cache-aware, can be negative; not measured"
+REALISED_LABEL = (
+    "baseline is list-price, actual billed where recorded; "
+    "cache-aware, can be negative"
+)
 ROUTER_MODES = ("shadow", "off", "active")
 SIMULATED_LABEL = "SIMULATED PRICES, NOT REAL SAVINGS"
 RUN_START_TIMEOUT_SECONDS = 15
@@ -241,6 +245,19 @@ def _stored_cost(row: dict[str, Any]) -> float | None:
     reconciliation.
     """
     raw = row.get("computed_list_cost_usd")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return float(raw)
+
+
+def _billed_cost(row: dict[str, Any]) -> float | None:
+    """The provider-reported cost for this row, or None when it did not report one.
+
+    This is the number the provider said it billed, kept separate from the
+    list-price computation.  A zero is a real zero; a missing value is never
+    turned into one.
+    """
+    raw = row.get("provider_cost_usd")
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         return None
     return float(raw)
@@ -493,6 +510,7 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
 
     realised_saved = 0.0
     realised_count = 0
+    realised_billed = 0
     realised_unpriced = 0
     # Switches the proxy actually applied: a SWITCH decision whose row then
     # ran on a different model than the one requested.  ``switched`` counts
@@ -567,7 +585,15 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
             cost_requested = compute_cost(
                 model_requested, assume_cache_warm(usage), sheet
             ).usd
-            cost_used = compute_cost(model_used, usage, sheet).usd
+            billed_used = _billed_cost(row)
+            if billed_used is not None:
+                # The provider's own number is the actual cost of the model
+                # that ran.  Prefer it over list-price arithmetic; the
+                # requested side remains a list-price counterfactual.
+                cost_used = billed_used
+                realised_billed += 1
+            else:
+                cost_used = compute_cost(model_used, usage, sheet).usd
             if cost_requested is not None and cost_used is not None:
                 # Cache-aware and unclamped: a switch that re-ingested more than
                 # it saved shows as a negative "realised saving" (F-1).
@@ -827,8 +853,13 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
             line1 = (
                 f"realised saving (rows the proxy actually rewrote): "
                 f"{money(realised_saved)} over {realised_count} rows "
-                f"({ESTIMATE_LABEL}"
+                f"({REALISED_LABEL}"
             )
+            if realised_billed:
+                line1 += (
+                    f"; {realised_billed} of {realised_count} actual costs "
+                    "came from the provider bill"
+                )
             if realised_unpriced:
                 # Mirror the estimated line above: whenever any rewritten row
                 # went unpriced, say so, and count against every rewritten row.
@@ -842,7 +873,7 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
         else:
             line1 = (
                 f"realised saving: UNKNOWN over {realised_unpriced + realised_count} "
-                f"rows ({ESTIMATE_LABEL}){suffix}"
+                f"rows ({REALISED_LABEL}){suffix}"
             )
     else:
         line1 = ""
@@ -3748,6 +3779,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
 
     lookups: dict[str, float] = {}
     lookup_errors = 0
+    lookup_skipped = 0
     online = bool(getattr(args, "online", False))
     if online:
         key_env = getattr(args, "api_key_env", reconcile_mod.DEFAULT_KEY_ENV)
@@ -3755,17 +3787,29 @@ def reconcile_command(args: argparse.Namespace) -> int:
         if not token:
             print(f"tamias reconcile: {key_env} is not set", file=sys.stderr)
             return 1
+        lookup_skipped = sum(
+            1
+            for row in selected
+            if row.get("generation_id")
+            and not reconcile_mod.is_openrouter_generation_id(
+                row.get("generation_id")
+            )
+        )
         with reconcile_mod.httpx.Client(
             headers={"Authorization": f"Bearer {token}"}, timeout=20.0
         ) as client:
             lookups, lookup_errors = reconcile_mod.lookup_generation_costs(
                 selected, client=client
             )
-        print(
+        message = (
             f"looked up {len(lookups)} generation(s); "
-            f"{lookup_errors} generation lookup(s) failed",
-            file=sys.stderr,
+            f"{lookup_errors} generation lookup(s) failed"
         )
+        if lookup_skipped:
+            message += (
+                f"; {lookup_skipped} non-OpenRouter generation id(s) skipped"
+            )
+        print(message, file=sys.stderr)
 
     enriched: list[dict[str, Any]] = []
     for row in selected:
@@ -3826,6 +3870,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
             document["lookups"] = {
                 "succeeded": len(lookups),
                 "failed": lookup_errors,
+                "skipped": lookup_skipped,
             }
         print(json.dumps(document, sort_keys=True))
     else:

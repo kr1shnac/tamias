@@ -188,14 +188,19 @@ questions:
   decision logged with the row; only rows that predate that column fall back to
   the sheet's cheapest.
 - **realised saving** prices only rows the proxy actually rewrote:
-  `model_requested (warm) - model_used`.
+  `model_requested (warm) - actual used`. The actual side is the provider's own
+  `provider_cost_usd` when the row recorded one, and list-price arithmetic for
+  `model_used` when it did not. The report says how many of the actual costs
+  came from the provider bill, because a measured number and an arithmetic one
+  are not the same kind of claim.
 
 The requested side is always priced with a warm cache, because the counterfactual
-is an ongoing conversation, not a first prompt. That makes the estimate
+is an ongoing conversation, not a first prompt. That makes the saving
 falsifiable: it can be zero or negative, and the report shows the loss rather
-than hiding it. Neither number is a provider invoice. A provider's own billed
-amount is stored separately as `provider_cost_usd`; use `tamias reconcile` to
-compare it with the computed figure.
+than hiding it. The requested side remains a list-price counterfactual even when
+the actual side is billed; a counterfactual has no invoice. Use
+`tamias reconcile` to compare the computed list price with the provider's billed
+amount row by row.
 
 Before 1.0.1, an applied active-mode row compared the target with itself and
 reported `$0.00`, so a run that did save money could not prove it. The report

@@ -26,6 +26,11 @@ LOOKUP_URL = "https://openrouter.ai/api/v1/generation"
 DEFAULT_KEY_ENV = "OPENROUTER_API_KEY"
 DEFAULT_TOLERANCE = 1e-6
 
+#: OpenRouter's generation ids are the only ids its lookup endpoint knows.
+#: Other wires use their own ids (``chatcmpl-``, ``msg_``, ...), and sending
+#: those to OpenRouter would count a predictable 404 as a failed verification.
+OPENROUTER_GENERATION_PREFIX = "gen-"
+
 PASS = "PASS"
 FAIL = "FAIL"
 INCOMPLETE = "INCOMPLETE"
@@ -102,6 +107,11 @@ def _integer(value: Any) -> int | None:
 
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def is_openrouter_generation_id(value: Any) -> bool:
+    """Whether ``value`` is an id the OpenRouter generation endpoint accepts."""
+    return isinstance(value, str) and value.startswith(OPENROUTER_GENERATION_PREFIX)
 
 
 def _computed(row: dict[str, Any]) -> float | None:
@@ -252,19 +262,25 @@ def select_rows(
 def lookup_generation_costs(
     rows: Iterable[dict[str, Any]], *, client: httpx.Client
 ) -> tuple[dict[str, float], int]:
-    """Read ``total_cost`` for each distinct generation id in the rows.
+    """Read ``total_cost`` for each distinct OpenRouter generation id in the rows.
 
-    Only the documented generation endpoint is called.  A missing id, a
-    transport failure, a non-2xx response, or a response without a numeric
-    ``data.total_cost`` leaves that generation out of the result and increments
-    the error count.  The caller decides whether an unknown cost is acceptable;
-    this function never substitutes zero.
+    Only the documented generation endpoint is called, and only for ids that
+    start with ``gen-``.  Other providers' response ids are not OpenRouter
+    generations; they are skipped rather than sent to an endpoint that cannot
+    know them.  A transport failure, a non-2xx response, or a response without
+    a numeric ``data.total_cost`` leaves that generation out of the result and
+    increments the error count.  The caller decides whether an unknown cost is
+    acceptable; this function never substitutes zero.
     """
     generation_ids: list[str] = []
     seen: set[str] = set()
     for row in rows:
         generation_id = _text(row.get("generation_id"))
-        if generation_id and generation_id not in seen:
+        if (
+            generation_id
+            and is_openrouter_generation_id(generation_id)
+            and generation_id not in seen
+        ):
             seen.add(generation_id)
             generation_ids.append(generation_id)
 

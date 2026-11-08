@@ -58,10 +58,11 @@ or an in-process mock. What it pins down:
   `tests/test_reconcile.py` pins the arithmetic (match within tolerance,
   mismatch, missing billed vs missing computed), the `--since`/`--until`
   window, the JSON summary, the artifact fields, the documented generation
-  endpoint, and that a failed lookup stays `INCOMPLETE`; the lookup key is
-  asserted absent from stdout and stderr. Offline rows use the stored
-  `provider_cost_usd`; `--online` uses `data.total_cost`. The live OpenRouter
-  lookup and a real invoice comparison are **not** exercised.
+  endpoint, non-OpenRouter ids being skipped without a request, and that a
+  failed lookup stays `INCOMPLETE`; the lookup key is asserted absent from
+  stdout and stderr. Offline rows use the stored `provider_cost_usd`;
+  `--online` uses `data.total_cost`. A live OpenRouter lookup has been run; a
+  real invoice comparison is **not** exercised.
 
 ## Verified with authored rates (`scripts/shadow_rate_check.py`)
 
@@ -159,8 +160,16 @@ The command exited `3` (`FAIL`). The remaining nine metered rows were
 incomplete: seven lacked a billed cost, eight lacked a computed cost, and some
 were both. The free rows matched at `$0.00`, which proves no saving. This is the
 first live evidence that the list-price computation is not always the
-provider's bill; the rates were not changed on the strength of two rows. The
-`--online` lookup is still fixture-tested only.
+provider's bill; the rates were not changed on the strength of two rows.
+
+An online run on the same log called only the documented generation endpoint for
+the 12 distinct `gen-` ids: none failed, and one non-OpenRouter id
+(`chatcmpl-…`) was skipped rather than sent. For rows 1313 and 1317 the lookup
+returned exactly the stored bill (`$0.000008096` and `$0.00001918`), so the
+mismatch is in the computed list price, not in the stored measurement. The
+verdict was unchanged and the command still exited `3`. `tamias report` now
+uses that stored bill as the actual side of the realised saving and prints how
+many actual costs came from the provider bill.
 
 The local `1.0.2` wheel and sdist built on 2026-11-08 contain
 `tamias/reconcile.py`; `twine check` passed for both.
@@ -365,9 +374,10 @@ smaller than the floor is reported as below the floor, not as a measurement.
   unverified is that the rates are real and that any cheap model is genuinely
   cheaper per task. `tamias reconcile` now makes the comparison possible
   row by row, offline from stored provider costs or online from the provider's
-  generation record; no live lookup or invoice run has been done.
-- **A live reconcile.** `tamias reconcile --online` is fixture-tested only. No
-  real generation has been looked up, and no provider invoice has been compared
+  generation record; a live generation lookup has been run, but no provider
+  invoice has been compared.
+- **A provider invoice.** `tamias reconcile --online` has read real generation
+  records (12 ids, 0 failed), but no invoice from any provider has been compared
   with the log.
 - **Paid-model behaviour.** Every live rate used was a real `0`. Real per-token
   arithmetic against a **non-zero** rate has never been checked.
@@ -545,7 +555,7 @@ is `0.1.0a3`.
 | Active routing | Opt-in | `--router-mode active` rewrites the model to `--cheap-model`; refused at startup unless the target is in `--registry`, tool-capable, and priced; a key-forbidden switch is suppressed, not refused |
 | Multi-provider routing | Implemented, live | Two providers served from one process on 2026-11-04; per-model provider, credential, and cheapest-first ranking. Provider coverage beyond NVIDIA, OpenRouter and Zen is config-tested, not live |
 | Failover | Implemented | `404` learned for 12 h and retried in-request live; `429`/`5xx` cooldowns are fixture-tested only. `/v1/messages` now uses the same retry with an unserved-model guard; `/v1/responses` learns refusals without rewriting. Adapter paths are fixture-tested, not live |
-| Cost provenance | Implemented | Provider billed cost and list-price computation remain separate; `tamias reconcile` compares them row by row and exits non-zero on a mismatch |
+| Cost provenance | Implemented | Provider billed cost and list-price computation remain separate; `tamias reconcile` compares them row by row and exits non-zero on a mismatch; `tamias report` uses the billed cost as the actual side of the realised saving where recorded |
 | Legacy cost rows | Unknown | Ambiguous `cost_usd` is excluded from computed/reconciliation totals |
 | Session privacy | Implemented | Per-database salt and legacy session migration |
 | SSE parsing | Implemented | Shared assembler and adversarial parser fixtures; live providers unverified |
@@ -557,7 +567,7 @@ is `0.1.0a3`.
 | Log maintenance | Implemented | `tamias prune`; `tamias doctor` size warning |
 | Supply chain | CI-gated | `pip-audit --strict`, CycloneDX SBOM artifact, `pip-licenses` report with a copyleft denylist |
 | Benchmark | Implemented | `scripts/benchmark_overhead.py`, offline, no socket |
-| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. `tamias reconcile` now compares stored computed cost with stored or looked-up provider cost per row, but no live lookup or invoice reconciliation has been run. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`) |
+| Savings measurement | Not attempted | No paid, non-zero-price run has been authorised; no savings claim. `tamias reconcile` compares stored computed cost with stored or looked-up provider cost per row; the live generation lookup succeeded (12 ids, 0 failed), but no invoice has been reconciled. The arithmetic is verified against authored rates (`shadow_rate_check.py`, including a negative case) and the two-arm ledger measurement is verified offline (`credit_ab_check.py`) |
 | Live provider behavior | Partly verified | CI uses offline/injected transports only. Live runs: OpenRouter + NVIDIA on 2026-10-04 and 2026-11-04, direct NVIDIA capabilities and a 200 request on 2026-11-06, and OpenCode Zen on 2026-10-30 (routing only; it answered 429 without a key) |
 | Package build | CI-gated | Build, `twine check`, and a fresh-venv wheel smoke run in GitHub Actions; the wheel carries `tamias/plugin` and CI fails if it does not |
 | Publish | Tag-triggered | `v1.0.2` publishes through Trusted Publishing (OIDC); `0.1.0a8` was the last artifact on PyPI |
