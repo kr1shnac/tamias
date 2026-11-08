@@ -17,6 +17,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from tamias import pricing, session
+from tamias import providers as providers_mod
 from tamias import sse as sse_module
 from tamias.pricing import PriceSheet
 from tamias.types import CostBreakdown, Decision, Usage
@@ -129,6 +130,19 @@ def _upstream_failure_response() -> JSONResponse:
     )
 
 
+def _unknown_provider(model: str, providers: tuple[str, ...]) -> JSONResponse:
+    """A 400 for a model no configured provider serves."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": providers_mod.unknown_model_message(model, providers),
+                "type": "invalid_request_error",
+            }
+        },
+        status_code=400,
+    )
+
+
 def _promote_route(app: FastAPI, path: str) -> None:
     for index, route in enumerate(app.router.routes):
         if getattr(route, "path", None) == path:
@@ -155,6 +169,11 @@ def register_routes(
         timeout = getattr(app.state, "upstream_timeout_seconds", 600.0)
         client = httpx.AsyncClient(timeout=timeout, transport=transport)
         app.state.upstream_client = client
+
+    # This route never rewrites a model, but a refusal it sees must still be
+    # remembered for the routes that do route, and for ``/limits``.
+    remember_limit = getattr(app.state, "remember_limit", None)
+    catalogue = getattr(app.state, "providers", None)
 
     def record(
         session_id: str,
@@ -266,9 +285,18 @@ def register_routes(
                 return denied
         root_for = getattr(app.state, "upstream_root_for", None)
         headers_for = getattr(app.state, "upstream_headers_for", None)
+        root = root_for(model_requested) if root_for is not None else base
+        if not root:
+            # Meter-only does not mean relay anything anywhere: a model no
+            # configured provider serves is refused rather than billed to the
+            # last provider that answered.
+            return _unknown_provider(
+                model_requested,
+                catalogue.names() if catalogue is not None else (),
+            )
         outgoing = client.build_request(
             "POST",
-            (root_for(model_requested) if root_for is not None else base) + RESPONSES_PATH,
+            root + RESPONSES_PATH,
             content=raw,
             headers=(
                 headers_for(model_requested, request)
@@ -294,6 +322,8 @@ def register_routes(
                     failure_type=exc.failure_type,
                 )
                 return _upstream_failure_response()
+            if remember_limit is not None:
+                remember_limit(model_requested, upstream)
             try:
                 payload: Any = upstream.json()
             except ValueError:
@@ -332,6 +362,8 @@ def register_routes(
                 failure_type=exc.failure_type,
             )
             return _upstream_failure_response()
+        if remember_limit is not None:
+            remember_limit(model_requested, upstream)
         return StreamingResponse(
             stream_response(
                 upstream,

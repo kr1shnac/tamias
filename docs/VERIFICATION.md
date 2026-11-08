@@ -29,6 +29,12 @@ or an in-process mock. What it pins down:
 - **The three adapter routes.** `/v1/chat/completions`, `/v1/messages` and
   `/v1/responses` are exercised against fixtures (buffered, completed-stream and
   truncated-stream cases), including Anthropic and Responses usage merging.
+- **Adapter failover is the chat route's failover.** `/v1/messages` retries a
+  refused model (429/404) on the next gated model before the first streamed
+  byte, remembers the refusal for later requests, and refuses a model no
+  configured provider serves; `/v1/responses` records the same refusals without
+  rewriting the client's model and refuses an unserved model too
+  (`tests/test_adapter_failover.py`).
 - **The catch-all passthrough.** It relays other paths and writes one count-only
   row per request (`route="passthrough"`, tokens and cost NULL).
 - **Budgets and keys.** Reserve-then-settle, sub-caps, both rate windows, the
@@ -228,6 +234,23 @@ Observed **2026-11-06** on Linux (Python 3.14, opencode 2.2.5) on the same
   `/limits` pool stays the three models its `--cheap-model` names until the
   operator widens it.
 
+## Verified on a live streaming turn (2026-11-08)
+
+One streaming chat request through the running service, recorded as row 1459 in
+`~/.tamias/requests.db`:
+
+- **The route and mode.** `route=chat`, `router_mode=active`, decision `STAY`
+  (`user turn: planning`), model `nvidia/nemotron-3.5-lightning:free`.
+- **Usage arrived without an opt-in.** The provider reported it on the stream
+  although `include_usage` was not requested: `input_tokens=23`,
+  `output_tokens=16`, `cached_input_tokens=0`.
+- **Provenance was stored.** `generation_id=gen-1794140924-u4C0NyYhRy50D9nXcyz2`,
+  `provider_cost_usd=0.0`, `computed_list_cost_usd=0.0`, `cost_source=computed`,
+  priced from `prices.toml + prices.local.toml`.
+- **What the zeros mean.** This model is free on the account's declared tier.
+  The row proves streamed usage capture and provenance; it is not an invoice and
+  not a savings measurement.
+
 ## Verified inside a real OpenCode TUI
 
 The plugin's `scripts/verify.ts` harness reproduces the host contract, but it
@@ -334,7 +357,9 @@ smaller than the floor is reported as below the floor, not as a measurement.
 - **Anthropic, Codex and Claude Code live traffic.** The `/v1/messages` and
   `/v1/responses` routes are fixture-tested only; no live Anthropic, Codex or
   Claude Code traffic has been observed. Only `/v1/chat/completions` was
-  exercised live.
+  exercised live. The adapter failover added on 2026-11-08 (retry, limit
+  learning, unserved-model refusal) is likewise fixture-tested only; no live
+  `429` has reached either adapter.
 - **Cache effects.** Whether switching models destroys a warm prompt cache, and
   what that costs per task, is not measured. Effort changes may also invalidate a
   provider's cache; this has not been measured either.
@@ -485,7 +510,7 @@ is `0.1.0a3`.
 | Shadow routing | Implemented | Decisions recorded without rewriting upstream requests |
 | Active routing | Opt-in | `--router-mode active` rewrites the model to `--cheap-model`; refused at startup unless the target is in `--registry`, tool-capable, and priced; a key-forbidden switch is suppressed, not refused |
 | Multi-provider routing | Implemented, live | Two providers served from one process on 2026-11-04; per-model provider, credential, and cheapest-first ranking. Provider coverage beyond NVIDIA, OpenRouter and Zen is config-tested, not live |
-| Failover | Implemented | `404` learned for 12 h and retried in-request live; `429`/`5xx` cooldowns are fixture-tested only |
+| Failover | Implemented | `404` learned for 12 h and retried in-request live; `429`/`5xx` cooldowns are fixture-tested only. `/v1/messages` now uses the same retry with an unserved-model guard; `/v1/responses` learns refusals without rewriting. Adapter paths are fixture-tested, not live |
 | Cost provenance | Implemented | Provider billed cost and list-price computation remain separate |
 | Legacy cost rows | Unknown | Ambiguous `cost_usd` is excluded from computed/reconciliation totals |
 | Session privacy | Implemented | Per-database salt and legacy session migration |

@@ -397,20 +397,47 @@ def _unknown_provider(model: str, providers: tuple[str, ...]) -> JSONResponse:
     happened to be last would spend another provider's credit under a model id
     that provider does not offer.
     """
-    known = ", ".join(providers) or "none"
     return JSONResponse(
         {
             "error": {
-                "message": (
-                    f"no configured provider serves model {model!r} "
-                    f"(providers: {known}). Add the provider to ~/.tamias/providers.toml "
-                    "or the model to ~/.tamias/models.toml."
-                ),
+                "message": providers_mod.unknown_model_message(model, providers),
                 "type": "invalid_request_error",
             }
         },
         status_code=400,
     )
+
+
+def _next_retry_target(
+    pool: candidates.CandidatePool,
+    capabilities: Registry,
+    refused: str,
+    *,
+    require_priced: bool,
+) -> str:
+    """The next gated model after ``refused`` was turned away, or ``""``.
+
+    Quality is held where it can be.  The retry prefers a model at least as
+    capable as the one that refused; only when no such model is left does it
+    fall back to the strongest survivor.  A cheaper answer beats a failed turn,
+    but a silent downgrade on a hard step is not the default.
+
+    Shared by every route that can fail over, so a refusal on one wire selects
+    the same successor as a refusal on another.
+    """
+    info = capabilities.get(refused)
+    floor = candidates.quality_of(info) if info is not None else 0.0
+    best = pool.best(
+        exclude={refused},
+        min_quality=floor,
+        require_priced=require_priced,
+    )
+    if best is None:
+        remaining = [c for c in pool.candidates if c.model != refused]
+        if require_priced:
+            remaining = [c for c in remaining if c.priced]
+        best = max(remaining, key=lambda c: c.quality) if remaining else None
+    return best.model if best is not None else ""
 
 
 def _payment_required(key: Key, ceiling: Decimal, reserve: Reserve) -> JSONResponse:
@@ -1525,6 +1552,21 @@ def create_app(
             return build(routing.pool, **kwargs)
         return build(**kwargs)
 
+    def retry_target(body: dict[str, Any], refused: str) -> str:
+        """The successor after ``refused`` was turned away, or ``""``.
+
+        The pool is rebuilt rather than filtered: recording the refusal also
+        cooled the model down, so the rebuild is what makes the next request
+        -- and this one -- see the limit.  Both the chat route and the adapter
+        routes ask this same question through ``app.state``.
+        """
+        return _next_retry_target(
+            pool_for(body),
+            capabilities,
+            refused,
+            require_priced=router_mode == "active",
+        )
+
     def provider_of(model: str) -> str:
         if not len(catalogue):
             return ""
@@ -1623,34 +1665,6 @@ def create_app(
                 headers=headers_for(model, request),
             )
 
-        def retry_target(refused: str) -> str:
-            """The next gated model after ``refused`` was turned away, or ``""``.
-
-            The pool is rebuilt rather than filtered: recording the refusal also
-            cooled the model down, so the rebuild is what makes the next request
-            -- and this one -- see the limit.
-
-            Quality is held where it can be.  The retry prefers a model at least
-            as capable as the one that refused; only when no such model is left
-            does it fall back to the strongest survivor.  A cheaper answer beats
-            a failed turn, but a silent downgrade on a hard step is not the
-            default.
-            """
-            pool = pool_for(body)
-            info = capabilities.get(refused)
-            floor = candidates.quality_of(info) if info is not None else 0.0
-            best = pool.best(
-                exclude={refused},
-                min_quality=floor,
-                require_priced=router_mode == "active",
-            )
-            if best is None:
-                remaining = [c for c in pool.candidates if c.model != refused]
-                if router_mode == "active":
-                    remaining = [c for c in remaining if c.priced]
-                best = max(remaining, key=lambda c: c.quality) if remaining else None
-            return best.model if best is not None else ""
-
         outgoing = build(routed_model)
         started = time.perf_counter()
 
@@ -1685,7 +1699,7 @@ def create_app(
             # is exactly the kind of refusal another candidate can absorb.
             remember_limit(running_model, upstream)
             if limits_mod.retryable(upstream.status_code):
-                fallback = retry_target(running_model)
+                fallback = retry_target(body, running_model)
                 if fallback:
                     await upstream.aclose()
                     decision = replace(
@@ -1754,7 +1768,7 @@ def create_app(
         # stream.
         remember_limit(running_model, upstream)
         if limits_mod.retryable(upstream.status_code):
-            fallback = retry_target(running_model)
+            fallback = retry_target(body, running_model)
             if fallback:
                 await upstream.aclose()
                 decision = replace(
@@ -1913,6 +1927,7 @@ def create_app(
     app.state.upstream_headers_for = headers_for
     app.state.remember_limit = remember_limit
     app.state.route_context = route_context
+    app.state.retry_target = retry_target
 
     anthropic_adapter.register_routes(
         app,

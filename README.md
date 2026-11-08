@@ -3,7 +3,7 @@
 Tamias is a local proxy that puts **every provider you have** behind one
 OpenAI-compatible endpoint, routes each request to the cheapest model that can
 do the work, fails over when a provider is limited or a model is gone, and
-records what that saved.
+meters the tokens and list-price cost of every call.
 
 It is not a provider. It ships no model, no credential and no subscription of
 its own: you bring the keys, and tamias decides which one to spend.

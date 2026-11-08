@@ -44,7 +44,9 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from tamias import limits as limits_mod
 from tamias import pricing, router, session
+from tamias import providers as providers_mod
 from tamias import sse as sse_module
 from tamias.pricing import PriceSheet
 from tamias.router import RouterConfig
@@ -327,6 +329,11 @@ def _upstream_failure_response() -> JSONResponse:
     )
 
 
+def _unknown_provider(model: str, providers: tuple[str, ...]) -> JSONResponse:
+    """A 400 in Anthropic's envelope for a model no configured provider serves."""
+    return _bad_request(providers_mod.unknown_model_message(model, providers))
+
+
 def _promote_route(app: FastAPI, path: str) -> None:
     """Make sure ``path`` is matched before any catch-all route.
 
@@ -402,6 +409,11 @@ def register_routes(
         timeout = getattr(app.state, "upstream_timeout_seconds", 600.0)
         client = httpx.AsyncClient(timeout=timeout, transport=transport)
         app.state.upstream_client = client
+
+    # Published by ``proxy.create_app`` so every route asks the same two
+    # questions: what refused this model, and what may replace it.
+    remember_limit = getattr(app.state, "remember_limit", None)
+    retry_target = getattr(app.state, "retry_target", None)
 
     def current(session_id: str, model: str) -> SessionState:
         """The session's state, registering it on the session's first request.
@@ -584,17 +596,31 @@ def register_routes(
         root_for = getattr(app.state, "upstream_root_for", None)
         headers_for = getattr(app.state, "upstream_headers_for", None)
 
-        outgoing = client.build_request(
-            "POST",
-            (root_for(routed_model or model_requested) if root_for is not None else base)
-            + MESSAGES_PATH,
-            content=outbound(raw, body, routed_model),
-            headers=(
-                headers_for(routed_model or model_requested, request)
-                if headers_for is not None
-                else forward_headers(request)
-            ),
-        )
+        running_model = routed_model or model_requested
+        root = root_for(running_model) if root_for is not None else base
+        if not root:
+            # A catalogue is configured and nothing serves this model.  Relaying
+            # it would spend the last provider's credit under a model id that
+            # provider does not offer.
+            return _unknown_provider(
+                running_model,
+                catalogue.names() if catalogue is not None else (),
+            )
+
+        def build(target: str | None) -> httpx.Request:
+            model = target or model_requested
+            return client.build_request(
+                "POST",
+                (root_for(model) if root_for is not None else base) + MESSAGES_PATH,
+                content=outbound(raw, body, target),
+                headers=(
+                    headers_for(model, request)
+                    if headers_for is not None
+                    else forward_headers(request)
+                ),
+            )
+
+        outgoing = build(routed_model)
         started = time.perf_counter()
 
         if not body.get("stream"):
@@ -615,6 +641,29 @@ def register_routes(
                 )
                 advance(session_id, model_requested)
                 return _upstream_failure_response()
+            if remember_limit is not None:
+                remember_limit(running_model, upstream)
+            # A 429 or a 404 says nothing was generated, so the same turn can be
+            # retried on a model that passed all three gates.  The refusal is
+            # remembered first: that is what keeps the next request away too.
+            if retry_target is not None and limits_mod.retryable(upstream.status_code):
+                fallback = retry_target(body, running_model)
+                if fallback:
+                    await upstream.aclose()
+                    decision = replace(
+                        decision,
+                        action="SWITCH",
+                        target_model=fallback,
+                        reason=(
+                            f"upstream {upstream.status_code} on {running_model}: "
+                            f"retried on {fallback}"
+                        ),
+                    )
+                    routed_model = fallback
+                    running_model = fallback
+                    upstream = await upstream_send(client, build(fallback))
+                    if remember_limit is not None:
+                        remember_limit(running_model, upstream)
             payload: Any = None
             try:
                 payload = upstream.json()
@@ -656,6 +705,29 @@ def register_routes(
             )
             advance(session_id, model_requested)
             return _upstream_failure_response()
+        # The status is known before a byte is relayed, so a refusal can still
+        # be retried on another gated model without the client seeing a
+        # truncated stream.
+        if remember_limit is not None:
+            remember_limit(running_model, upstream)
+        if retry_target is not None and limits_mod.retryable(upstream.status_code):
+            fallback = retry_target(body, running_model)
+            if fallback:
+                await upstream.aclose()
+                decision = replace(
+                    decision,
+                    action="SWITCH",
+                    target_model=fallback,
+                    reason=(
+                        f"upstream {upstream.status_code} on {running_model}: "
+                        f"retried on {fallback}"
+                    ),
+                )
+                routed_model = fallback
+                running_model = fallback
+                upstream = await upstream_send(client, build(fallback), stream=True)
+                if remember_limit is not None:
+                    remember_limit(running_model, upstream)
         return StreamingResponse(
             _stream_messages(
                 upstream,

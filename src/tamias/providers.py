@@ -337,6 +337,20 @@ def empty_catalogue() -> ProviderCatalogue:
     return ProviderCatalogue()
 
 
+def unknown_model_message(model: str, providers: tuple[str, ...]) -> str:
+    """The one explanation for a model no configured provider serves.
+
+    Every metered wire refuses this request, so the sentence is written once
+    and wrapped in each wire's own error envelope.
+    """
+    known = ", ".join(providers) or "none"
+    return (
+        f"no configured provider serves model {model!r} "
+        f"(providers: {known}). Add the provider to ~/.tamias/providers.toml "
+        "or the model to ~/.tamias/models.toml."
+    )
+
+
 def _require_str(entry: dict, key: str, where: str) -> str:
     value = entry.get(key)
     if not isinstance(value, str) or not value.strip():

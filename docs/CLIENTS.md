@@ -16,7 +16,9 @@ tamias agent-config codex --port 8000 --project example
 ```
 
 The generated snippet uses Tamias as its local model provider and the Responses
-wire API.
+wire API. That wire is meter-only: Tamias logs and prices the usage, refuses a
+model no configured provider serves, and remembers a refusal, but it does not
+rewrite Codex's model or fail over mid-request.
 
 ## OpenCode — unverified
 
