@@ -27,10 +27,13 @@ on every number they both print, CI now fails when the TUI breaks, and
 - **The first live reconcile found billed costs above the computed list price.**
   On the operator log (1459 rows, 1440 passthrough excluded), 10 of 19 metered
   rows were comparable: 8 matched (7 free at `$0.00`) and 2 paid DeepSeek rows
-  were billed 48% and 60% above the computed list price, so the command exited
-  `3` (`FAIL`). An `--online` lookup of the same rows returned those stored
-  bills exactly, so the gap is in the list-price computation. No savings claim
-  is proven; the rates were not changed on two rows.
+  were billed about 49% and 60% above the computed list price, so the command
+  exited `3` (`FAIL`). An `--online` lookup returned those stored bills exactly
+  and named the served endpoints: InferenceNet at `$0.103/M` prompt and
+  `$0.6/M` completion, and DeepInfra at `$0.14/M` and `$0.42/M`, both above the
+  sheet's model-level rates. The gap is endpoint pricing, not list-price
+  arithmetic (corrected 2026-11-09). No savings claim is proven; the rates were
+  not changed on two rows.
 - **`tamias report` uses the provider's bill for the actual side.** The
   realised saving is `requested (warm list price) - actual used`; when a row
   carries `provider_cost_usd`, that measured number is the actual side instead

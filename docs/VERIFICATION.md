@@ -170,18 +170,27 @@ rows. Ten had both numbers: eight matched, two did not.
 
 The command exited `3` (`FAIL`). The remaining nine metered rows were
 incomplete: seven lacked a billed cost, eight lacked a computed cost, and some
-were both. The free rows matched at `$0.00`, which proves no saving. This is the
-first live evidence that the list-price computation is not always the
-provider's bill; the rates were not changed on the strength of two rows.
+were both. The free rows matched at `$0.00`, which proves no saving.
 
 An online run on the same log called only the documented generation endpoint for
 the 12 distinct `gen-` ids: none failed, and one non-OpenRouter id
 (`chatcmpl-…`) was skipped rather than sent. For rows 1313 and 1317 the lookup
 returned exactly the stored bill (`$0.000008096` and `$0.00001918`), so the
-mismatch is in the computed list price, not in the stored measurement. The
-verdict was unchanged and the command still exited `3`. `tamias report` now
-uses that stored bill as the actual side of the realised saving and prints how
-many actual costs came from the provider bill.
+stored measurement is not in doubt. The generation records also name the served
+endpoint and its native token counts, which explain the gap:
+
+| Row | Served by | Prompt | Completion | Reconstructed bill |
+| --- | --- | --- | --- | --- |
+| 1313 | InferenceNet | 32 × `$0.103/M` | 8 × `$0.6/M` | `$0.000008096` |
+| 1317 | DeepInfra | 89 × `$0.14/M` | 16 × `$0.42/M` | `$0.00001918` |
+
+The sheet used model-level rates (`$0.045/M` and `$0.5/M`), not the served
+endpoint's rates. `native_tokens_reasoning` equals the completion count on both
+rows, so reasoning was included rather than omitted. This is endpoint-pricing
+variance, not a list-price arithmetic error; the rates were not changed on the
+strength of two rows. The verdict was unchanged and the command still exited
+`3`. `tamias report` now uses that stored bill as the actual side of the
+realised saving and prints how many actual costs came from the provider bill.
 
 The local `1.0.2` wheel and sdist built on 2026-11-08 contain
 `tamias/reconcile.py`; `twine check` passed for both.

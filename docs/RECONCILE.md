@@ -50,6 +50,34 @@ A zero-price row compares `$0.00` with `$0.00` and is a match. That is
 arithmetic, not evidence of savings: a free row cannot prove that a paid
 alternative would have cost more.
 
+## Why a mismatch can be legitimate
+
+The computed side prices the model at the rate in the sheet. On an aggregator
+such as OpenRouter, one model id can be served by many upstream endpoints at
+different per-token prices, and the gateway chooses the endpoint. The billed
+cost is authoritative for the request that actually ran; the computed side is a
+model-level estimate.
+
+The live run on 2026-11-08 found two such rows on
+`deepseek/deepseek-v4.1-flash`. Reconstructing each bill from the generation
+record's `provider_name` and native token counts reproduces it exactly:
+
+| Request | Served by | Prompt | Completion | Reconstructed bill |
+| --- | --- | --- | --- | --- |
+| 1313 | InferenceNet | 32 × `$0.103/M` | 8 × `$0.6/M` | `$0.000008096` |
+| 1317 | DeepInfra | 89 × `$0.14/M` | 16 × `$0.42/M` | `$0.00001918` |
+
+The sheet carried `$0.045/M` and `$0.5/M` for the model. The arithmetic was
+right; the model-level rate was not the served endpoint's rate. The generation
+records report `native_tokens_reasoning` equal to the completion count, so
+reasoning tokens were already included, not missed.
+
+Do not "fix" a mismatch by copying the bill into the sheet. That hides which
+endpoint served the request and turns a price into a post-hoc rationalisation.
+Use the bill as the actual side of a realised saving, keep the requested-side
+counterfactual labelled as an estimate, and treat the model-level sheet rate as
+an estimate rather than a quote for every endpoint.
+
 ## Status and exit codes
 
 | Status | Exit | Meaning |
