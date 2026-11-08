@@ -341,18 +341,22 @@ This registry contains **capabilities only**. Prices stay in the price sheet.
 | Flag | Required | Meaning |
 | --- | --- | --- |
 | `--db PATH` | yes | Path to the SQLite request log. |
-| `--prices PATH` | no | TOML price sheet used to price the log. Defaults to the same resolution as `report`. |
-| `--api-key-env NAME` | no | Environment variable holding the provider API key (default `OPENROUTER_API_KEY`). Only the name is read; the secret never enters argv. |
+| `--since YYYY-MM-DD` | no | Lower bound on row timestamp (inclusive, calendar date). |
+| `--until YYYY-MM-DD` | no | Upper bound on row timestamp (inclusive, calendar date). |
+| `--tolerance USD` | no | Absolute USD tolerance for a match (default `0.000001`). |
+| `--online` | no | Read the provider's generation record and use its `total_cost` as the billed side. Requires `--api-key-env`. |
+| `--api-key-env NAME` | no | Environment variable holding the lookup key (default `OPENROUTER_API_KEY`). Only read with `--online`; the secret never enters argv. |
 | `--out PATH` | no | Write a text-free JSON artifact (one row per request) to this path. |
-| `--since YYYY-MM-DD` | no | Lower bound on row timestamp (inclusive). |
-| `--until YYYY-MM-DD` | no | Upper bound on row timestamp (inclusive). |
-| `--tolerance USD` | no | Absolute USD tolerance used when comparing computed vs billed cost. |
 | `--json` | no | Emit a compact JSON summary on stdout instead of the human-readable report. |
 
-**Exit codes:** `0` complete, `1` runtime failure (reason on stderr), `2`
-`ZERO_ROWS` (no rows with a `generation_id` were found). See
-[`docs/RECONCILE.md`](RECONCILE.md) for the full contract, artifact columns, and
-third-party check notes.
+Offline is the default and uses only the log. `--prices` is not accepted:
+reconciliation compares the cost Tamias claimed at request time with the
+provider's cost, not a re-pricing with a newer sheet.
+
+**Exit codes:** `0` PASS, `3` FAIL (a difference exceeds tolerance), `2`
+INCOMPLETE or `ZERO_ROWS` (missing number, nothing comparable, or empty window),
+`1` runtime failure (reason on stderr). See
+[`docs/RECONCILE.md`](RECONCILE.md) for the full contract and artifact columns.
 
 ## `tamias doctor`
 

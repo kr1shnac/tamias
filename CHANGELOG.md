@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 A packaging, routing and honesty pass: the pop-up travels with the wheel and
 actually loads, its savings bar says what it measured, the two surfaces agree
-on every number they both print, and CI now fails when the TUI breaks.
+on every number they both print, CI now fails when the TUI breaks, and
+`tamias reconcile` compares real billed costs instead of writing
+`difference: null`.
 
 ### Changed
 
@@ -22,6 +24,12 @@ on every number they both print, and CI now fails when the TUI breaks.
   registers that copy, so no source checkout or `--plugin` is required. The
   `tsconfig.json` is load-bearing: without `jsxImportSource: @opentui/solid`
   the host's Bun loader tries React's JSX runtime and the import fails.
+- **The first live reconcile found billed costs above the computed list price.**
+  On the operator log (1459 rows, 1440 passthrough excluded), 10 of 19 metered
+  rows were comparable: 8 matched (7 free at `$0.00`) and 2 paid DeepSeek rows
+  were billed 48% and 60% above the computed list price, so the command exited
+  `3` (`FAIL`). No savings claim is proven; the rates were not changed on two
+  rows.
 
 ### Added
 
@@ -54,6 +62,11 @@ on every number they both print, and CI now fails when the TUI breaks.
   A `systemd --user` unit inherits no shell, so an `api_key_env` provider is
   silently unconfigured under it. The command now reads the catalogue and prints
   the variables (and the `api_key_command` alternative) on stderr.
+- **`tamias reconcile --online` reads the provider's own record.** It calls only
+  `GET /api/v1/generation?id=…`, uses `data.total_cost` as the billed side, and
+  keeps the stored `provider_cost_usd` in the artifact for comparison. The key
+  comes from `--api-key-env` and is never printed. A failed lookup leaves the
+  row unknown and prevents a `PASS`.
 
 - **A `pip install tamias` pop-up now actually loads.** The wheel shipped the
   TypeScript only, and OpenCode resolves a plugin's imports *beside* the plugin
@@ -74,6 +87,14 @@ on every number they both print, and CI now fails when the TUI breaks.
 
 ### Fixed
 
+- **`tamias reconcile` was a stub that could not fail.** It listed rows with a
+  `generation_id`, ignored `--since`/`--until`/`--tolerance`, never read a
+  billed cost, and wrote `difference: null`. It now compares each selected
+  row's `computed_list_cost_usd` with the provider-reported
+  `provider_cost_usd` (or the online lookup), prints matched/mismatched counts
+  and a real difference, and exits `0` PASS, `3` FAIL, `2` INCOMPLETE or
+  `ZERO_ROWS`, `1` runtime error. `--prices` was removed: the command compares
+  the claim made at request time, not a re-pricing with a newer sheet.
 - **The adapter wires never learned a refusal.** `/v1/messages` and
   `/v1/responses` relayed a `429`/`404` straight to the client: the same
   request the chat route failed over was a failed turn on the Anthropic wire,

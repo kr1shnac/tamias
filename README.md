@@ -191,7 +191,8 @@ tamias run --prices prices.toml -- your-agent
 ```
 
 To compare what Tamias computed against what your provider actually billed, run
-`tamias reconcile` (see [`docs/RECONCILE.md`](docs/RECONCILE.md)).
+`tamias reconcile` — offline by default, or with `--online` to read the
+provider's generation record (see [`docs/RECONCILE.md`](docs/RECONCILE.md)).
 
 ## How it works
 
@@ -248,7 +249,10 @@ gates are the stable surface. Treat every figure it prints with care:
 - **Savings are estimates, not measurements.** The pence are computed from the
   price sheet and the tokens that ran; the provider's invoice is the only
   authority. `tamias report` prints both when both exist, and the realised
-  saving line covers only rows the proxy actually rewrote.
+  saving line covers only rows the proxy actually rewrote. `tamias reconcile`
+  compares the two row by row; the first live offline run found 10 of 19
+  metered rows comparable and two priced rows billed above the computed list
+  price, so no savings claim is proven yet.
 - **Live routing is verified against two providers, not every provider.** On
   2026-11-04, direct NVIDIA and OpenRouter were served side by side: a planning
   turn stayed on the requested paid model, an easy tool turn switched to a free

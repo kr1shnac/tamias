@@ -37,6 +37,7 @@ from urllib.request import urlopen
 
 from tamias import discovery as discovery_mod
 from tamias import manifest as manifest_mod
+from tamias import reconcile as reconcile_mod
 from tamias.catalog import (
     MODELS_DEV_URL,
     build_zen_registry,
@@ -3555,18 +3556,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="reconcile logged rows against the provider's billed cost per request",
     )
     reconcile_parser.add_argument("--db", required=True, help="path to the proxy sqlite log")
-    reconcile_parser.add_argument("--prices", default=None, help="optional price sheet")
     reconcile_parser.add_argument(
         "--api-key-env",
         default="OPENROUTER_API_KEY",
-        help="environment variable holding the API key",
+        help="environment variable holding the generation-lookup key "
+        "(only read with --online)",
+    )
+    reconcile_parser.add_argument(
+        "--online",
+        action="store_true",
+        help="also read the provider's generation record and use it as the "
+        "billed cost (network; requires --api-key-env)",
     )
     reconcile_parser.add_argument(
         "--out", default=None, help="write a text-free artifact to this path"
     )
     reconcile_parser.add_argument("--since", default=None, help="YYYY-MM-DD lower bound")
     reconcile_parser.add_argument("--until", default=None, help="YYYY-MM-DD upper bound")
-    reconcile_parser.add_argument("--tolerance", type=float, default=None, help="USD tolerance")
+    reconcile_parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=None,
+        help="USD tolerance for a match (default: 0.000001)",
+    )
     reconcile_parser.add_argument("--json", action="store_true", help="emit JSON")
     return parser
 
@@ -3683,61 +3695,161 @@ def demo_command(args: argparse.Namespace) -> int:
 
 
 def reconcile_command(args: argparse.Namespace) -> int:
-    """Reconcile logged rows against the provider's billed cost per request."""
-    import json
+    """Compare each row's computed list cost with the provider's billed cost.
+
+    Offline is the default and uses only the request log: no provider is
+    called and no key is read.  ``--online`` additionally reads the documented
+    OpenRouter generation record for every selected row that carries a
+    generation id, and uses that number as the billed side.  A lookup that
+    fails leaves the row unknown rather than guessing zero.
+
+    Exit codes are the contract in ``docs/RECONCILE.md``: 0 PASS, 3 FAIL, 2
+    INCOMPLETE or ZERO_ROWS, 1 runtime failure.
+    """
+    from dataclasses import replace
     from pathlib import Path
 
-    db_path = args.db
+    rows = _read_rows(args.db)
     try:
-        rows = _read_rows(db_path)
-    except Exception as exc:
+        selected_rows = reconcile_mod.select_rows(
+            rows,
+            getattr(args, "since", None),
+            getattr(args, "until", None),
+        )
+    except ValueError as exc:
         print(f"tamias reconcile: {exc}", file=sys.stderr)
         return 1
-    rows_with_gen = []
-    for row in rows:
-        if isinstance(row, dict) and row.get("generation_id"):
-            rows_with_gen.append(row)
-    if not rows_with_gen:
+    # A passthrough row is count-only by design: it has no model price and is
+    # never sent through the pricing path.  Counting it as an unpriced request
+    # would drown the rows that can actually be reconciled.
+    selected = [
+        row for row in selected_rows if row.get("route") != "passthrough"
+    ]
+    passthrough_excluded = len(selected_rows) - len(selected)
+    if not selected:
+        window = ""
+        if getattr(args, "since", None) or getattr(args, "until", None):
+            window = (
+                f" in --since {getattr(args, 'since', None) or 'start'}"
+                f" --until {getattr(args, 'until', None) or 'end'}"
+            )
         print(
-            "ZERO_ROWS: no rows with generation_id found; run tamias "
-            "reconcile after requests that recorded generation_id",
+            f"ZERO_ROWS: no metered rows selected{window}; run tamias reconcile "
+            "after requests have been logged",
             file=sys.stderr,
         )
         return 2
+
+    tolerance = (
+        reconcile_mod.DEFAULT_TOLERANCE
+        if getattr(args, "tolerance", None) is None
+        else float(args.tolerance)
+    )
+
+    lookups: dict[str, float] = {}
+    lookup_errors = 0
+    online = bool(getattr(args, "online", False))
+    if online:
+        key_env = getattr(args, "api_key_env", reconcile_mod.DEFAULT_KEY_ENV)
+        token = os.environ.get(key_env)
+        if not token:
+            print(f"tamias reconcile: {key_env} is not set", file=sys.stderr)
+            return 1
+        with reconcile_mod.httpx.Client(
+            headers={"Authorization": f"Bearer {token}"}, timeout=20.0
+        ) as client:
+            lookups, lookup_errors = reconcile_mod.lookup_generation_costs(
+                selected, client=client
+            )
+        print(
+            f"looked up {len(lookups)} generation(s); "
+            f"{lookup_errors} generation lookup(s) failed",
+            file=sys.stderr,
+        )
+
+    enriched: list[dict[str, Any]] = []
+    for row in selected:
+        generation_id = row.get("generation_id")
+        if isinstance(generation_id, str) and generation_id in lookups:
+            enriched.append({**row, "lookup_cost_usd": lookups[generation_id]})
+        else:
+            enriched.append(row)
+
+    try:
+        compared = reconcile_mod.compare_rows(enriched, tolerance=tolerance)
+    except ValueError as exc:
+        print(f"tamias reconcile: {exc}", file=sys.stderr)
+        return 1
+    summary = reconcile_mod.summarize(compared)
+    # In online mode the lookup is the independent verification.  If any
+    # selected row's lookup failed, a stored number must not turn the run into
+    # a PASS: the verification did not happen for every row.
+    if online and lookup_errors and summary.status == reconcile_mod.PASS:
+        summary = replace(summary, status=reconcile_mod.INCOMPLETE)
+
     out_path = getattr(args, "out", None)
     if out_path:
-        p = Path(out_path)
         artifact = []
-        for row in rows_with_gen:
+        for row in compared:
             artifact.append(
                 {
-                    "request_id": row.get("id"),
-                    "ts": row.get("ts"),
-                    "model_requested": row.get("model_requested"),
-                    "model_used": row.get("model_used"),
+                    "request_id": row.request,
+                    "ts": row.ts,
+                    "session_id_truncated": (row.session_id or "")[:8],
+                    "model_requested": row.model_requested,
+                    "model_used": row.model_used,
+                    "generation_id": row.generation_id,
                     "tokens": {
-                        "prompt_tokens": row.get("prompt_tokens"),
-                        "completion_tokens": row.get("completion_tokens"),
+                        "prompt_tokens": row.prompt_tokens,
+                        "completion_tokens": row.completion_tokens,
                     },
-                    "computed_cost": row.get("computed_cost_usd")
-                    or row.get("cost_usd"),
-                    "billed_cost": row.get("provider_cost_usd"),
-                    "difference": None,
-                    "session_id_truncated": (row.get("session_id") or "")[:8],
+                    "computed_cost": row.computed,
+                    "billed_cost": row.billed,
+                    "difference": row.difference,
+                    "matches": row.matches,
+                    "billed_source": row.billed_source,
+                    "logged_billed_cost": row.logged_billed,
+                    "lookup_cost": row.lookup_billed,
                 }
             )
-        p.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
-        print(f"wrote {p}")
-    if getattr(args, "json", False):
-        print(
-            json.dumps(
-                {"reconciled": len(rows_with_gen), "total": len(rows)}
-            )
+        destination = Path(out_path)
+        destination.write_text(
+            json.dumps(artifact, indent=2) + "\n", encoding="utf-8"
         )
-    else:
-        print(f"reconciled {len(rows_with_gen)} of {len(rows)} rows")
-    return 0
+        print(f"wrote {destination}", file=sys.stderr)
 
+    if getattr(args, "json", False):
+        document = summary.as_dict()
+        document["tolerance_usd"] = tolerance
+        document["passthrough_excluded"] = passthrough_excluded
+        if online:
+            document["lookups"] = {
+                "succeeded": len(lookups),
+                "failed": lookup_errors,
+            }
+        print(json.dumps(document, sort_keys=True))
+    else:
+        print(f"rows: {summary.rows} selected of {len(selected)} metered in log")
+        if passthrough_excluded:
+            print(
+                f"passthrough rows excluded: {passthrough_excluded} "
+                "(count-only, never priced)"
+            )
+        print(f"compared: {summary.compared} of {summary.rows}")
+        print(f"matched: {summary.matched}")
+        print(f"mismatched: {summary.mismatched}")
+        print(f"{summary.without_billed} without a billed cost")
+        print(f"{summary.without_computed} without a computed cost")
+        print(f"computed: {_money(summary.computed_usd)}")
+        print(f"billed: {_money(summary.billed_usd)}")
+        print(f"difference (billed - computed): {_money(summary.difference_usd)}")
+        print(summary.status)
+
+    if summary.status == reconcile_mod.FAIL:
+        return 3
+    if summary.status in (reconcile_mod.INCOMPLETE, reconcile_mod.EMPTY):
+        return 2
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
