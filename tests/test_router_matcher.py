@@ -218,9 +218,12 @@ def test_shared_rules_hold_under_both_profiles(profile: str) -> None:
     assert decide(body_with_tool("read", "ok"), state(index=2), cfg).action == "STAY"
     assert decide(body_with_tool("read", "ok"), state(index=3), cfg).action == "SWITCH"
 
-    hysteresis = decide(body_with_tool("read", "ok"), state(index=9, model=CHEAP), cfg)
-    assert hysteresis.action == "STAY"
-    assert "hysteresis" in hysteresis.reason
+    held = decide(body_with_tool("read", "ok"), state(index=9, model=CHEAP), cfg)
+    # A session on the cheap model holds it: the switch targets the same model,
+    # it does not drift back to the caller's model on the next turn.
+    assert held.action == "SWITCH"
+    assert held.target_model == CHEAP
+    assert "held" in held.reason
 
     assert decide(body_with_tool("edit_file", "wrote 1 file"), state(), cfg).action == "STAY"
 

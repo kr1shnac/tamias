@@ -37,7 +37,9 @@ from urllib.request import urlopen
 
 from tamias import discovery as discovery_mod
 from tamias import manifest as manifest_mod
+from tamias import misroute as misroute_mod
 from tamias import reconcile as reconcile_mod
+from tamias import verdict as verdict_mod
 from tamias.catalog import (
     MODELS_DEV_URL,
     build_zen_registry,
@@ -457,7 +459,13 @@ def _print_target_line(
         print("switch target: not recorded yet (no routed request in this log)")
 
 
-def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> None:
+def report(
+    db_path: str,
+    prices_path: str,
+    inr_rate: float | None = None,
+    *,
+    routing_verdict: bool = False,
+) -> None:
     """Print the cost and shadow-routing summary for one database.
 
     Every line that quotes an amount carries a banner when the price sheet
@@ -889,6 +897,11 @@ def report(db_path: str, prices_path: str, inr_rate: float | None = None) -> Non
             f"rupee figures are a display conversion at a fixed "
             f"\u20b9{inr_rate:g}/$ you gave, not a billed amount"
         )
+    if routing_verdict:
+        # What happened on the turn after each downgrade. Read-only: the reasons
+        # are already in the log, so this needs no column and no request text.
+        for line in verdict_mod.downgrade_outcomes(rows).lines():
+            print(line)
 
 
 def _model_pool(value: str) -> tuple[str, ...]:
@@ -934,6 +947,7 @@ def build_serve_app(
     enforce_host: bool = False,
     providers: object = None,
     limits: object = None,
+    misroute: object = None,
 ) -> Any:
     """Build the proxy ASGI app for ``tamias serve``, without starting a server.
 
@@ -978,6 +992,7 @@ def build_serve_app(
         enforce_host=enforce_host,
         providers=providers,
         limits=limits,
+        misroute=misroute,
     )
     app.state.store = store
     return app
@@ -1447,6 +1462,10 @@ def serve(args: argparse.Namespace) -> int:
         enforce_host=bool(args.trusted_host) or not is_loopback(args.host),
         providers=catalogue,
         limits=limit_ledger,
+        misroute=misroute_mod.MisroutePolicy(
+            enabled=bool(args.misroute_penalty),
+            escalate_turns=args.misroute_turns,
+        ),
     )
     if len(catalogue):
         target = " + ".join(catalogue.names())
@@ -3275,6 +3294,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="requests that must pass after the last switch before switching again",
     )
     serve_parser.add_argument(
+        "--misroute-penalty",
+        action="store_true",
+        help="when a session has been downgraded and the *next* turn fails a tool, "
+        "hold that session on the model the caller named for --misroute-turns "
+        "requests (default: off). Session-scoped only: one bad turn never "
+        "suppresses a model for every conversation, because tamias cannot see the "
+        "counterfactual. Every escalation is logged as a STAY whose reason names it",
+    )
+    serve_parser.add_argument(
+        "--misroute-turns",
+        type=int,
+        default=5,
+        metavar="N",
+        help="how many requests a misroute escalation holds the strong model for "
+        "(default: 5)",
+    )
+    serve_parser.add_argument(
         "--inject-usage",
         action="store_true",
         help="ask the upstream for a usage chunk on streaming requests even when "
@@ -3405,6 +3441,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="RUPEES_PER_USD",
         help="also show each dollar amount converted to rupees at this fixed "
         "rate (a display conversion, not a billed amount); e.g. --inr-rate 85",
+    )
+    report_parser.add_argument(
+        "--routing-verdict",
+        action="store_true",
+        help="also print what each downgrade was followed by on the next turn, "
+        "read off the decision reasons already in the log (no new data, no "
+        "request text); a swap only carries an observed consequence when the "
+        "proxy actually rewrote it",
     )
     zen_parser = prices_sub.add_parser(
         "zen",
@@ -4327,7 +4371,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "report":
         try:
-            report(args.db, args.prices, getattr(args, "inr_rate", None))
+            report(
+                args.db,
+                args.prices,
+                getattr(args, "inr_rate", None),
+                routing_verdict=getattr(args, "routing_verdict", False),
+            )
         except (OSError, ValueError, sqlite3.DatabaseError) as exc:
             print(f"tamias report: {exc}", file=sys.stderr)
             return 1

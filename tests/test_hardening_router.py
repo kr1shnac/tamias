@@ -162,7 +162,16 @@ def test_hysteresis_holds_off_switching_once_on_the_cheap_model() -> None:
     body = {"model": STRONG, "messages": messages}
     for index in range(MIN_GAP + 3):
         decision = decide(body, SessionState("s", index, CHEAP), CONFIG)
-        assert decision.action == "STAY", f"flapped to {decision.target_model} at index {index}"
+        # A hold is a SWITCH onto the same model. Drifting back to the strong
+        # model on the next turn is the flap this guards against, and it is what
+        # the router used to do: STAY forwarded the caller's model every other
+        # turn, so the cheap model was only ever used half the time.
+        if decision.action == "SWITCH":
+            assert decision.target_model == CHEAP, (
+                f"flapped off the cheap model at index {index}: {decision}"
+            )
+        else:
+            assert decision.action == "STAY", decision
 
 
 def test_switching_waits_for_the_configured_gap() -> None:
@@ -253,8 +262,10 @@ def _assert_invariants(body: dict[str, Any], state: SessionState) -> Decision:
     last = body.get("messages")[-1] if body.get("messages") else None
     if isinstance(last, dict) and last.get("role") == "user":
         assert decision.action == "STAY", decision
-    if state.current_model == CHEAP:
-        assert decision.action == "STAY", f"flapped away from the cheap model: {decision}"
+    # A session already on the cheap model must never flap away from it: the
+    # only SWITCH allowed there is a hold on the same model.
+    if state.current_model == CHEAP and decision.action == "SWITCH":
+        assert decision.target_model == CHEAP, f"flapped away from the cheap model: {decision}"
     return decision
 
 

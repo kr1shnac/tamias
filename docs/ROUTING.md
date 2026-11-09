@@ -51,14 +51,20 @@ is normalized to the tool-turn shape the rules read.
    over `big_output_chars` -> STAY.
 4. A trailing `tool` message from an easy tool, with at least `min_gap`
    requests since the last switch -> SWITCH to a model from the pool that is
-   **cheaper than the model the caller asked for**.
+   **cheaper than the model the caller asked for**. A session already running
+   on that target *holds* it, and the hold is a SWITCH onto the same model
+   rather than a STAY — see the paragraph on hysteresis below.
 5. Anything else -> STAY.
 
-Hysteresis is keyed to the *chosen target*, not to "any pool member". Once the
-session is running on the model the gates picked, the gap counts as zero and it
-stays there until `min_gap` fresh requests have passed. A session sitting on a
-dearer pool member still moves to the cheaper target: otherwise a pool whose
-ranking changes would strand the conversation on the old, more expensive model.
+Hysteresis is keyed to the *chosen target*, not to "any pool member". A session
+already running on the target **holds** it: that hold is a SWITCH onto the same
+model, and `min_gap` does not apply to it, because `min_gap` limits *switches*
+rather than *holds*. A hold must not be recorded as STAY — STAY forwards the
+caller's own model, which used to drop every session off the cheap model on the
+turn after each switch, alternating strong/cheap, halving the saving and
+rebuilding the prompt cache on every turn. A session sitting on a *dearer* pool
+member still moves to the cheaper target: otherwise a pool whose ranking changes
+would strand the conversation on the old, more expensive model.
 
 A switch to an equal-cost or dearer model is refused with
 `no cheaper pool target than the requested model`. The old behaviour moved to
@@ -66,6 +72,31 @@ the first non-requested pool member even when it cost the same, which bought no
 saving and threw away the warm prompt cache. Prices come from the effective
 sheet (generated + local overlay); when a price is unknown the comparison is
 skipped rather than guessed.
+
+## Learning from a misroute
+
+`--misroute-penalty` (off by default) is the one part of the router whose
+behaviour changes because of what it has observed. When a session has been moved
+off the model the caller named and the *next* turn fails a tool, that session
+keeps the caller's model for `--misroute-turns` requests instead of shopping for
+a cheaper one again.
+
+The signal comes from the log and nothing else: `decision_reason` already
+distinguishes an easy tool turn from a failed one, so "the turn after a
+downgrade failed" needs no new column and no stored text. `tamias report
+--routing-verdict` prints it.
+
+**Why the scope is one conversation.** A misroute is one piece of evidence about
+one model on one kind of step, and the counterfactual is never visible: tamias
+did not also run the strong model, so it cannot know the cheap one failed where a
+better model would have succeeded. One unlucky turn must not suppress a model for
+every conversation — that is how a routing gateway learns the wrong lesson from a
+single bad session. The evidence is durable and shared (the log); the *decision*
+drawn from it is deliberately small.
+
+The counters are per-process and reset on restart, exactly like the session
+table. When the log holds enough evidence to justify a model-wide decision, that
+is a change to make on purpose with the data in front of you.
 
 ## The model pool
 

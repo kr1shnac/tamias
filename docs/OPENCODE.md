@@ -102,8 +102,10 @@ appends `/v1/chat/completions`, so the upstream URL it calls is
 - `--min-gap` (default 3) is how many requests must pass after the last switch
   before switching again. **For savings, use `0`.** A fresh OpenCode session
   starts at zero requests, so the default 3 holds back the first three easy
-  turns; `0` lets the first mechanical tool result route. Raise it if you see
-  the cheap model flapping on a long session.
+  turns; `0` lets the first mechanical tool result route. `min_gap` limits
+  switches, not holds — once a session is on the target it keeps it, so raising
+  it does not re-open the alternating-model behaviour that used to follow every
+  switch.
 
 A pool is written as a comma-separated list and keeps each OpenCode session on
 one member, spreading different sessions across the rest:

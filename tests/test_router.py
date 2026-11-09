@@ -131,13 +131,18 @@ def test_unmatched_tool_call_id_does_not_match_other_calls() -> None:
     assert "read" in decision.reason
 
 
-def test_hysteresis_keeps_cheap_model_in_place() -> None:
+def test_hysteresis_holds_the_chosen_target_in_place() -> None:
+    """Once the session is on the target, repeat easy turns do not churn.
+
+    The hold is a SWITCH to the same model: STAY would forward the caller's
+    model and drop the session off the target every other turn.
+    """
     body = body_with_tool("ls", "a.txt")
     on_cheap = state(index=99, model="cheap-1")
     decision = decide(body, on_cheap, CONFIG)
-    assert decision.action == "STAY"
-    assert decision.target_model is None
-    assert "hysteresis" in decision.reason
+    assert decision.action == "SWITCH"
+    assert decision.target_model == "cheap-1"
+    assert decision.reason == "already on cheap-1: held"
 
 
 @pytest.mark.parametrize(
@@ -147,6 +152,50 @@ def test_hysteresis_keeps_cheap_model_in_place() -> None:
 def test_min_gap_boundary(index: int, expected: str) -> None:
     decision = decide(body_with_tool("shell", "ok"), state(index=index), CONFIG)
     assert decision.action == expected
+
+
+def test_a_held_session_stays_on_the_target() -> None:
+    """A held turn is a switch, not a stay, at any min_gap.
+
+    Regression: the hold used to emit STAY, so a session bounced back to the
+    caller's model on every other easy turn -- alternating cheap/strong,
+    halving the saving and rebuilding the prompt cache on each turn.
+    """
+    config = RouterConfig(cheap_model="cheap-1", strong_model="strong-1", min_gap=3)
+    decision = decide(body_with_tool("read", "x"), state(index=4, model="cheap-1"), config)
+    assert decision.action == "SWITCH"
+    assert decision.target_model == "cheap-1"
+    assert "held" in decision.reason
+
+
+def test_held_sessions_do_not_ping_pong() -> None:
+    """The whole session, driven the way proxy.py drives it.
+
+    ``plan`` asks decide with the model the client named; ``advance`` records
+    the model that actually ran. A client that keeps naming its strong model
+    must still end up holding the cheap one for the rest of the run, because
+    ``min_gap`` limits switches rather than holds.
+    """
+    from tamias.router import applied_target
+
+    config = RouterConfig(cheap_model="cheap-1", strong_model="strong-1", min_gap=3)
+    index, current = 0, "strong-1"
+    ran: list[str] = []
+    for _ in range(8):
+        decision = decide(
+            body_with_tool("read", "x"),
+            SessionState(session_id="s1", request_index=index, current_model=current),
+            config,
+        )
+        routed = applied_target(
+            decision, requested="strong-1", enabled=decision.action == "SWITCH"
+        )
+        current = routed or "strong-1"
+        ran.append(current)
+        index += 1
+    # Three requests of gap before the first downgrade, then held for the rest
+    # of the run. Before the fix this was strong/cheap/strong/cheap...
+    assert ran == ["strong-1"] * 3 + ["cheap-1"] * 5, ran
 
 
 def test_hard_tool_stays_on_strong_model() -> None:
@@ -262,7 +311,7 @@ def test_pool_with_only_the_requested_model_stays() -> None:
     assert decision.reason == "no cheaper pool target than the requested model"
 
 
-def test_pool_hysteresis_keeps_the_chosen_target_in_place() -> None:
+def test_pool_hysteresis_holds_the_chosen_target_in_place() -> None:
     """Once the session is on the target, repeat easy turns do not churn."""
     config = RouterConfig(
         cheap_pool=("cheap-a", "cheap-b"), strong_model="strong-1", min_gap=3
@@ -273,8 +322,9 @@ def test_pool_hysteresis_keeps_the_chosen_target_in_place() -> None:
         config,
         ranked=("cheap-a", "cheap-b"),
     )
-    assert decision.action == "STAY"
-    assert decision.reason == "hysteresis: 0 of 3 requests since last switch"
+    assert decision.action == "SWITCH"
+    assert decision.target_model == "cheap-a"
+    assert decision.reason == "already on cheap-a: held"
 
 
 def test_pool_moves_off_a_dearer_member_to_the_cheaper_target() -> None:

@@ -98,7 +98,9 @@ the schema.
 | `--router-config PATH` | — | TOML router configuration path. |
 | `--cheap-model MODEL[,MODEL...]` | — | Model a SWITCH would move mechanical work to, or a comma-separated pool. Each session keeps one member; different sessions spread across the pool. `active` validates every member. |
 | `--strong-model MODEL` | — | Model the agent is expected to start on. |
-| `--min-gap N` | `3` | Requests that must pass after the last switch before switching again. |
+| `--min-gap N` | `3` | Requests that must pass after the last switch before switching again. It limits *switches*, not holds: a session already on the chosen target keeps it. |
+| `--misroute-penalty` | off | When a session has been downgraded and the *next* turn fails a tool, hold **that session** on the model the caller named for `--misroute-turns` requests. The scope is one conversation, because tamias cannot see the counterfactual — it did not also run the strong model — so one bad turn must never suppress a model for everybody. Every escalation is logged as a `STAY` whose reason names it, so `tamias report` shows the policy's effect. Counters are per-process and reset on restart, like the session table. |
+| `--misroute-turns N` | `5` | How many requests a misroute escalation holds the strong model for. |
 | `--effort-mode {off,meter,apply}` | `off` | Scope of the effort axis: `off` computes nothing, `meter` records the effort the policy would use, `apply` also sends it (only for a model `--registry` vouches for). |
 | `--effort-style {openrouter,openai}` | `openrouter` | Request-field style used when the effort policy is active. |
 | `--registry PATH` | `$TAMIAS_REGISTRY` or `~/.tamias/models.toml` | TOML capability catalogue `apply` consults. |
@@ -145,6 +147,7 @@ error (`2`). `--min-gap` was previously available only on `serve`.
 | `--db PATH` | — (required) | Path to the sqlite request log. |
 | `--prices PATH` | — (required) | TOML price sheet used to price the log. |
 | `--inr-rate RUPEES_PER_USD` | off | Also show each dollar amount converted to rupees at this fixed rate, e.g. `--inr-rate 85`. This is a **display conversion**, not a billed amount: the dollar figure stays authoritative and is the one that reconciles against a provider invoice. |
+| `--routing-verdict` | off | Also print what each downgrade was followed by on the next turn, read off the `decision_reason` values already in the log. No new column, no request text. A swap only carries an **observed** consequence when the proxy actually rewrote it (`active` mode): in shadow the request ran on the model the caller named, so nothing followed the downgrade and those rows are counted as projections only. An error after a swap is a **misroute candidate**, not a verdict — the proxy never saw the counterfactual, so the strong model may have failed that turn too. |
 
 ## `tamias demo` flags
 

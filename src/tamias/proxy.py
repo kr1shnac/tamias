@@ -78,6 +78,7 @@ from tamias import (
 )
 from tamias import limits as limits_mod
 from tamias import manifest as manifest_mod
+from tamias import misroute as misroute_mod
 from tamias import providers as providers_mod
 from tamias import sse as sse_module
 from tamias.budget import (
@@ -696,10 +697,23 @@ class SessionRecord:
     Wraps :class:`SessionState` with ``last_switch_index``, the value of
     ``request_index`` at the last acted-on SWITCH, so hysteresis can be measured
     from the switch rather than from the start of the session.  It holds no
-    conversation content: an identity string, two counters and a model name.
+    conversation content: an identity string, counters and a model name.
+
+    The last four attributes are the misroute policy's view of the session: the
+    request index an escalation runs to, how many strikes produced it, and
+    whether the previous request moved the session off the model the caller
+    named.  All four are per-process and reset on restart.
     """
 
-    __slots__ = ("session_id", "request_index", "last_switch_index", "current_model")
+    __slots__ = (
+        "session_id",
+        "request_index",
+        "last_switch_index",
+        "current_model",
+        "escalated_until",
+        "misroute_strikes",
+        "last_was_downgrade",
+    )
 
     def __init__(
         self,
@@ -707,11 +721,17 @@ class SessionRecord:
         request_index: int = 0,
         last_switch_index: int | None = None,
         current_model: str = UNKNOWN_MODEL,
+        escalated_until: int = 0,
+        misroute_strikes: int = 0,
+        last_was_downgrade: bool = False,
     ) -> None:
         self.session_id = session_id
         self.request_index = request_index
         self.last_switch_index = last_switch_index
         self.current_model = current_model
+        self.escalated_until = escalated_until
+        self.misroute_strikes = misroute_strikes
+        self.last_was_downgrade = last_was_downgrade
 
     def as_session_state(self) -> SessionState:
         """The projection handed to :func:`tamias.router.decide`."""
@@ -883,6 +903,7 @@ def create_app(
     enforce_host: bool = False,
     providers: providers_mod.ProviderCatalogue | None = None,
     limits: limits_mod.LimitLedger | None = None,
+    misroute: misroute_mod.MisroutePolicy | None = None,
 ) -> FastAPI:
     if router_mode not in ("shadow", "off", "active"):
         raise ValueError(
@@ -919,6 +940,11 @@ def create_app(
     # request log every route writes through; it settles the caller's reservation
     # at the one point the response's real cost is known.
     ledger = key_store.budget() if key_store is not None else None
+    # The misroute policy is off unless the operator turns it on, and it never
+    # changes which models are *eligible* -- only which one this session takes.
+    misroute_policy = misroute if misroute is not None else misroute_mod.DEFAULT_POLICY
+    if misroute_policy.escalate_turns < 0:
+        raise ValueError("misroute escalate_turns must not be negative")
     ceiling = parse_usd(request_ceiling_usd)
     if ceiling is None:
         ceiling = DEFAULT_REQUEST_CEILING_USD
@@ -1137,6 +1163,21 @@ def create_app(
                 target_model=None,
                 reason=f"pinned by client: kept {model}",
             )
+        elif misroute_policy.enabled and record.escalated_until and (
+            record.request_index < record.escalated_until
+        ):
+            # The misroute policy outranks the rules: this conversation already
+            # showed a downgrade followed by a failure, so it keeps the model the
+            # caller named for the rest of the window instead of shopping for a
+            # cheaper one again.  The reason is logged, so the report shows the
+            # escalation and it can never pass as a router rule.
+            decision = Decision(
+                action="STAY",
+                target_model=None,
+                reason=misroute_mod.escalation_reason(
+                    record.escalated_until - record.request_index
+                ),
+            )
         else:
             decision = router.decide(
                 body,
@@ -1147,8 +1188,11 @@ def create_app(
                 qualities=qualities,
                 costs=costs,
             )
-            if router_mode != "active" and not decision.availability:
-                decision = replace(decision, persisted_only=True)
+        if router_mode != "active" and not decision.availability:
+            # Every non-active branch marks its decision: the escalation and the
+            # pin are recorded decisions too, and a consumer reading the log must
+            # not be able to tell them apart from one that was acted on.
+            decision = replace(decision, persisted_only=True)
         if router_mode == "active" and decision.action == "SWITCH":
             record.last_switch_index = record.request_index
         logger.info(
@@ -1213,11 +1257,41 @@ def create_app(
             raw = with_usage_included(body)
         return raw
 
-    def advance(session_id: str, model_used: str) -> None:
-        """Count this request and note the model it actually ran on."""
+    def advance(session_id: str, model_used: str, decision: Decision | None = None) -> None:
+        """Count this request, note the model it ran on, and learn from the turn.
+
+        The observation is the whole point of ``decision``: if the *previous*
+        request in this session moved off the caller's model and *this* one looks
+        like a failure, the session is escalated -- it keeps the model the caller
+        named for the next few requests instead of shopping again.
+
+        The decision is carried in rather than read back from the log, so this
+        stays inside the request path with no second query.  A shadow-mode
+        decision counts too: the policy is simulated on the same terms as every
+        other routing decision.
+        """
         record = table.get_or_create(session_id, model_used)
+        # The previous request's fact, read before this one is recorded over it.
+        prior_was_downgrade = record.last_was_downgrade
         record.request_index += 1
         record.current_model = model_used
+        if (
+            misroute_policy.enabled
+            and decision is not None
+            and misroute_mod.failure_follows_downgrade(prior_was_downgrade, decision.reason)
+        ):
+            record.misroute_strikes += 1
+            # The counter has already moved, so the window is counted in whole
+            # future requests.
+            record.escalated_until = record.request_index + misroute_policy.escalate_turns
+            logger.info(
+                "session=%s misroute strike #%d: strong model held for %d request(s)",
+                session_id,
+                record.misroute_strikes,
+                misroute_policy.escalate_turns,
+            )
+        if decision is not None:
+            record.last_was_downgrade = decision.action == "SWITCH"
 
     def record(
         session_id: str,
@@ -1690,7 +1764,7 @@ def create_app(
                     failure_stage=exc.stage,
                     failure_type=exc.failure_type,
                 )
-                advance(session_id, model_used)
+                advance(session_id, model_used, decision)
                 return _upstream_failure_response()
             # A limit learned here is a limit every later request skips.  A 429
             # means nothing was generated, so one immediate retry on a model
@@ -1735,7 +1809,7 @@ def create_app(
                 effort_requested,
                 effort_used,
             )
-            advance(session_id, model_used)
+            advance(session_id, model_used, decision)
             return Response(
                 content=upstream.content,
                 status_code=upstream.status_code,
@@ -1761,7 +1835,7 @@ def create_app(
                 failure_stage=exc.stage,
                 failure_type=exc.failure_type,
             )
-            advance(session_id, model_used)
+            advance(session_id, model_used, decision)
             return _upstream_failure_response()
         # The status is known before a byte is relayed, so a refusal can still be
         # retried on another gated model without the client seeing a truncated
@@ -1862,7 +1936,7 @@ def create_app(
                 failure_stage=failure.stage if failure is not None else None,
                 failure_type=failure.failure_type if failure is not None else None,
             )
-            advance(session_id, model_used)
+            advance(session_id, model_used, decision)
 
     @app.api_route("/{path:path}", methods=PASSTHROUGH_METHODS)
     async def passthrough(path: str, request: Request) -> Response:

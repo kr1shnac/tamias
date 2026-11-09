@@ -14,6 +14,23 @@ describing an arithmetic estimate as a realised saving.
 
 ### Added
 
+- **`tamias report --routing-verdict` prints what each downgrade was followed
+  by.** It reads `decision_reason`, which already distinguishes an easy tool turn
+  from a failed one, and pairs each downgrade with the next turn in the same
+  session: no new column, no stored request text, no hook in the request path. A
+  swap carries an **observed** consequence only when the proxy actually rewrote
+  it (`active` mode); a shadow row ran on the model the caller named, so nothing
+  followed the downgrade and those rows are counted as projections only. An error
+  after a swap is a *misroute candidate*, never a verdict — the counterfactual
+  was never run.
+- **`tamias serve --misroute-penalty` holds a session after it stumbles.** When a
+  session has been moved off the model the caller named and the next turn fails a
+  tool, that session keeps the caller's model for `--misroute-turns` requests
+  (default 5). The scope is one conversation, because tamias cannot see the
+  counterfactual, so one unlucky turn must not suppress a model for everybody.
+  Every escalation is logged as a `STAY` whose reason names it, and in `shadow`
+  mode the policy is simulated rather than applied. Counters are per-process and
+  reset on restart, like the session table.
 - **`tamias reconcile --invoice` reconciles a provider's billing export.** A CSV
   with one identity column and one USD amount column is joined to the log by row
   id (`--invoice-join request_id`) or by the provider's generation id
@@ -36,6 +53,15 @@ describing an arithmetic estimate as a realised saving.
 
 ### Changed
 
+- **A hold is no longer recorded as a stay.** A session already running on the
+  target the gates picked used to be marked `STAY`, which forwards the caller's
+  own model — so the session bounced back to the strong model on the turn after
+  every switch, alternating strong/cheap and rebuilding the prompt cache on every
+  turn. The hold is now a `SWITCH` onto the same model (`already on <model>:
+  held`), and `min_gap` is documented as limiting switches rather than holds.
+  Consequence: with the default `min_gap = 3`, the README's OpenCode setup now
+  keeps a session on the chosen target instead of alternating, and shadow mode's
+  "would have switched" count matches what `active` mode does.
 - **The documented live A/B in `scripts/credit_ab_check.py` exists.** The
   no-`--candidates` path behind `--allow-spend` now runs the off arm, reads the
   ledger, runs the active arm with `--cheap-model`, reads the ledger again, and

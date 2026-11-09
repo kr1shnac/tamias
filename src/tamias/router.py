@@ -103,6 +103,11 @@ class RouterConfig:
     families, ``error_markers`` are the substrings that make a tool result a
     failure (None means "profile default"), and ``big_output_chars`` caps how
     large a shell result may be and still be easy (None means no cap).
+
+    ``min_gap`` is how many requests must pass between two *switches*.  It
+    does not limit a hold: a session already running on the chosen target keeps
+    it, because bouncing back to the caller's model every other turn would
+    halve the saving and double the prompt-cache rebuilds.
     """
 
     easy_tools: frozenset[str] = EASY_TOOLS
@@ -422,7 +427,10 @@ def decide(
        ``config.big_output_chars`` -> STAY;
     4. a trailing ``tool`` message from an easy tool -- under ``generic`` that
        is any read- or shell-family name -- with enough requests since the
-       last switch -> SWITCH to a member of ``config.pool``;
+       last switch -> SWITCH to a member of ``config.pool``.  A session already
+       running on the target *holds* it: that hold is a SWITCH, not a STAY,
+       because STAY forwards the caller's own model and would drop the session
+       off the cheap model on every other turn;
     5. anything else -> STAY.
 
     ``ranked`` is the ordered output of the three routing gates (cheapest
@@ -497,20 +505,26 @@ def decide(
                         # claim a saving that cannot exist.
                         decision = _stay("no model passed the routing gates")
                     else:
-                        # Hysteresis: once the session is on the chosen target,
-                        # the gap is zero, so it stays put until it grows again.
-                        # Being on *some other* pool member is not the same
-                        # thing: an expensive member must still move to the
-                        # cheaper target the gates picked.  With no pool at all,
-                        # a SWITCH is still recorded with an empty target:
-                        # shadow mode uses that to show the rule matched even
-                        # though nothing can be applied.
-                        gap = (
-                            0
-                            if target and state.current_model == target
-                            else state.request_index
-                        )
-                        if gap >= config.min_gap:
+                        # A session already running on the target the gates
+                        # picked *holds* it.  "Hold" means keeping that model,
+                        # not going back to the one the client named: STAY
+                        # forwards the caller's model, which undid the switch on
+                        # every other turn, halving the saving and invalidating
+                        # the prompt cache twice as often (see
+                        # ``test_a_held_session_stays_on_the_target`` and the
+                        # session walk-through in ``test_held_sessions_do_not_ping_pong``).
+                        # ``min_gap`` limits *switches*, not holds, so it does not
+                        # apply here.  Being on *some other* pool member is not
+                        # the same thing: an expensive member must still move to
+                        # the cheaper target the gates picked.
+                        if target and state.current_model == target:
+                            decision = Decision(
+                                action="SWITCH",
+                                target_model=target,
+                                reason=f"already on {target}: held",
+                                target_effort="low" if config.effort_policy else None,
+                            )
+                        elif state.request_index >= config.min_gap:
                             decision = Decision(
                                 action="SWITCH",
                                 target_model=target,
@@ -519,7 +533,8 @@ def decide(
                             )
                         else:
                             decision = _stay(
-                                f"hysteresis: {gap} of {config.min_gap} requests since last switch"
+                                f"hysteresis: {state.request_index} of"
+                                f" {config.min_gap} requests since last switch"
                             )
                 else:
                     decision = _stay(f"no rule matched: keep {requested_model}")
@@ -575,3 +590,58 @@ def applied_target(
     if allowed is not None and decision.target_model not in allowed:
         return None
     return decision.target_model
+
+
+#: The router mode, so a reader can tell a served decision from a recorded one.
+ROUTING_HEADER_MODE = "x-tamias-router-mode"
+#: What the router decided for this request: ``SWITCH`` or ``STAY``.
+ROUTING_HEADER_DECISION = "x-tamias-decision"
+#: The model the client named in the request body.
+ROUTING_HEADER_REQUESTED = "x-tamias-model-requested"
+#: The model that actually ran.
+ROUTING_HEADER_USED = "x-tamias-model-used"
+#: The reason the router gave, the same one the log row carries.
+ROUTING_HEADER_REASON = "x-tamias-reason"
+
+#: A header value is one bounded line; a reason never needs more than this.
+MAX_HEADER_VALUE = 512
+
+
+def _header_value(value: str) -> str:
+    """A string as one safe header line.
+
+    Reasons and model ids are the gateway's own text, but a header is a framing
+    construct: a newline in a value would end the response's header block.  The
+    gateway never writes one, and this makes sure a future reason cannot.
+    """
+    return " ".join(value.split())[:MAX_HEADER_VALUE]
+
+
+def routing_response_headers(
+    *,
+    mode: str,
+    decision: Decision,
+    requested: str | None,
+    used: str | None,
+) -> dict[str, str]:
+    """The routing decision as response headers.
+
+    The response body cannot carry this: the upstream only ever sees the model
+    the gateway sent it, so the model that actually ran is knowledge the
+    gateway holds alone.  ``requested`` is the model the client named and
+    ``used`` the model that ran -- on a STAY they are the same model, and under
+    ``shadow`` or ``off`` they are always the same model because nothing was
+    applied, so ``mode`` is what tells a served SWITCH from a recorded one.
+    """
+    headers = {
+        ROUTING_HEADER_MODE: _header_value(mode),
+        ROUTING_HEADER_DECISION: decision.action,
+    }
+    if requested:
+        headers[ROUTING_HEADER_REQUESTED] = _header_value(requested)
+    if used:
+        headers[ROUTING_HEADER_USED] = _header_value(used)
+    reason = _header_value(decision.reason or "")
+    if reason:
+        headers[ROUTING_HEADER_REASON] = reason
+    return headers
