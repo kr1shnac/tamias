@@ -1293,7 +1293,7 @@ def create_app(
         if decision is not None:
             record.last_was_downgrade = decision.action == "SWITCH"
 
-    def record(
+    def _log_request(
         session_id: str,
         model_requested: str,
         model_used: str,
@@ -1301,14 +1301,15 @@ def create_app(
         started: float,
         status: int,
         decision: Decision,
-        generation_id: object = None,
-        project: object = None,
-        effort_requested: str | None = None,
-        effort_used: str | None = None,
-        failure_stage: str | None = None,
-        failure_type: str | None = None,
-        route: str = "chat",
+        generation_id: object,
+        project: object,
+        effort_requested: str | None,
+        effort_used: str | None,
+        failure_stage: str | None,
+        failure_type: str | None,
+        route: str,
     ) -> None:
+        """The synchronous half of :func:`record`: price it, then append it."""
         cost = pricing.compute_cost(model_used, usage, sheet)
         metered.log_request(
             datetime.now(UTC).isoformat(timespec="milliseconds"),
@@ -1336,7 +1337,49 @@ def create_app(
             route=route,
         )
 
-    def budget_gate(
+    async def record(
+        session_id: str,
+        model_requested: str,
+        model_used: str,
+        usage: Usage,
+        started: float,
+        status: int,
+        decision: Decision,
+        generation_id: object = None,
+        project: object = None,
+        effort_requested: str | None = None,
+        effort_used: str | None = None,
+        failure_stage: str | None = None,
+        failure_type: str | None = None,
+        route: str = "chat",
+    ) -> None:
+        """Append this request's ledger row.
+
+        The write is a synchronous SQLite commit -- an fsync -- so it runs on a
+        worker thread rather than on the event loop: metering one request must
+        not stall every other in-flight stream for the length of a disk flush.
+        The store's own lock already serialises the writes, so this moves their
+        cost, not their order.
+        """
+        await asyncio.to_thread(
+            _log_request,
+            session_id,
+            model_requested,
+            model_used,
+            usage,
+            started,
+            status,
+            decision,
+            generation_id,
+            project,
+            effort_requested,
+            effort_used,
+            failure_stage,
+            failure_type,
+            route,
+        )
+
+    async def budget_gate(
         request: Request, key: Key, named: str | None, body: bytes | None
     ) -> Response | None:
         """Reserve one request against the key's limits, or refuse it.
@@ -1362,7 +1405,11 @@ def create_app(
             return _unpriced_forbidden(named)
         # Settling is driven by this variable, read when the request is logged.
         CURRENT_KEY_ID.set(key.key_id)
-        reserve = ledger.try_reserve(
+        # The reservation is a write transaction on the budget ledger, so it runs
+        # on a worker thread: a reservation must not stall the loop while it
+        # commits, any more than logging one does.
+        reserve = await asyncio.to_thread(
+            ledger.try_reserve,
             key.key_id,
             limits=limits,
             model=named,
@@ -1388,7 +1435,7 @@ def create_app(
             return None
         return key.models
 
-    def authorize(
+    async def authorize(
         request: Request,
         model: object,
         body: bytes | None = None,
@@ -1430,7 +1477,7 @@ def create_app(
             return _forbidden_model(target, key.models)
         if not key.limited or ledger is None:
             return None
-        return budget_gate(request, key, target, body)
+        return await budget_gate(request, key, target, body)
 
     @app.get("/policy")
     async def policy_manifest(request: Request) -> Response:
@@ -1706,7 +1753,7 @@ def create_app(
             enabled=router_mode == "active" or decision.availability,
             allowed=allowed_models_for(request),
         )
-        denied = authorize(request, model_requested, raw, effective=routed_model)
+        denied = await authorize(request, model_requested, raw, effective=routed_model)
         if denied is not None:
             return denied
         streaming = bool(body.get("stream"))
@@ -1750,7 +1797,7 @@ def create_app(
                 # does not pay the same timeout again.
                 remember_transport_failure(running_model)
                 model_used = model_requested
-                record(
+                await record(
                     session_id,
                     model_requested,
                     model_used,
@@ -1796,7 +1843,7 @@ def create_app(
                 payload = None
             details = payload if isinstance(payload, dict) else {}
             model_used = _model_name(details.get("model"))
-            record(
+            await record(
                 session_id,
                 model_requested,
                 model_used,
@@ -1813,7 +1860,17 @@ def create_app(
             return Response(
                 content=upstream.content,
                 status_code=upstream.status_code,
-                headers=forward_response_headers(upstream.headers),
+                headers={
+                    **forward_response_headers(upstream.headers),
+                    # The gateway's own view of the request, merged last so an
+                    # upstream cannot describe the routing it never saw.
+                    **router.routing_response_headers(
+                        mode=router_mode,
+                        decision=decision,
+                        requested=model_requested,
+                        used=running_model,
+                    ),
+                },
             )
 
         try:
@@ -1821,7 +1878,7 @@ def create_app(
         except UpstreamFailure as exc:
             remember_transport_failure(running_model)
             model_used = model_requested
-            record(
+            await record(
                 session_id,
                 model_requested,
                 model_used,
@@ -1870,7 +1927,17 @@ def create_app(
                 effort_used,
             ),
             status_code=upstream.status_code,
-            headers=forward_response_headers(upstream.headers),
+            headers={
+                **forward_response_headers(upstream.headers),
+                # The routed model belongs on the response head, where a client
+                # can read it before the first byte of the stream.
+                **router.routing_response_headers(
+                    mode=router_mode,
+                    decision=decision,
+                    requested=model_requested,
+                    used=running_model,
+                ),
+            },
         )
 
     async def _stream_chat(
@@ -1921,7 +1988,7 @@ def create_app(
         finally:
             await upstream.aclose()
             model_used = _model_name(seen_model)
-            record(
+            await record(
                 session_id,
                 model_requested,
                 model_used,
@@ -1942,7 +2009,7 @@ def create_app(
     async def passthrough(path: str, request: Request) -> Response:
         raw = await request.body()
         model = _body_model(raw)
-        denied = authorize(request, model, raw)
+        denied = await authorize(request, model, raw)
         if denied is not None:
             return denied
         # The passthrough is never priced and never budget-gated, but it is not
@@ -1960,7 +2027,7 @@ def create_app(
             params=request.query_params,
         )
         upstream = await client.send(outgoing, stream=True)
-        record(
+        await record(
             session.derive_session_id(
                 dict(request.headers.items()),
                 _json_object(raw),

@@ -41,7 +41,7 @@ from tamias.budget import (
     Limits,
     parse_usd,
 )
-from tamias.store import sanitize_project
+from tamias.store import apply_ledger_pragmas, sanitize_project
 
 KEY_PREFIX = "vk-"
 _TOKEN_BYTES = 32
@@ -204,6 +204,7 @@ class KeyStore:
         self._path = None if in_memory else Path(target)
         self._conn = sqlite3.connect(target, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        apply_ledger_pragmas(self._conn)
         self._lock = Lock()
         self._ledger: BudgetLedger | None = None
         with self._lock:

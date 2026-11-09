@@ -6,6 +6,7 @@ only relays requests and records the usage reported by the API.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Callable
@@ -175,18 +176,19 @@ def register_routes(
     remember_limit = getattr(app.state, "remember_limit", None)
     catalogue = getattr(app.state, "providers", None)
 
-    def record(
+    def _log_request(
         session_id: str,
         model_requested: str,
         model_used: str,
         usage: Usage,
         started: float,
         status: int,
-        generation_id: object = None,
-        project: object = None,
-        failure_stage: str | None = None,
-        failure_type: str | None = None,
+        generation_id: object,
+        project: object,
+        failure_stage: str | None,
+        failure_type: str | None,
     ) -> None:
+        """The synchronous half of :func:`record`: append it, meter-only."""
         store.log_request(
             datetime.now(UTC).isoformat(timespec="milliseconds"),
             session_id,
@@ -204,6 +206,38 @@ def register_routes(
             failure_stage=failure_stage,
             failure_type=failure_type,
             route="responses",
+        )
+
+    async def record(
+        session_id: str,
+        model_requested: str,
+        model_used: str,
+        usage: Usage,
+        started: float,
+        status: int,
+        generation_id: object = None,
+        project: object = None,
+        failure_stage: str | None = None,
+        failure_type: str | None = None,
+    ) -> None:
+        """Append this request's ledger row, off the event loop.
+
+        The append is a synchronous SQLite commit -- an fsync -- and it runs on
+        a worker thread so metering one request cannot stall every other
+        in-flight stream.
+        """
+        await asyncio.to_thread(
+            _log_request,
+            session_id,
+            model_requested,
+            model_used,
+            usage,
+            started,
+            status,
+            generation_id,
+            project,
+            failure_stage,
+            failure_type,
         )
 
     async def stream_response(
@@ -252,7 +286,7 @@ def register_routes(
             raise
         finally:
             await upstream.aclose()
-            record(
+            await record(
                 session_id,
                 model_requested,
                 _model_name(model_used) if model_used is not None else model_requested,
@@ -280,7 +314,7 @@ def register_routes(
         )
         model_requested = _model_name(body.get("model"))
         if authorize is not None:
-            denied = authorize(request, body.get("model"), raw)
+            denied = await authorize(request, body.get("model"), raw)
             if denied is not None:
                 return denied
         root_for = getattr(app.state, "upstream_root_for", None)
@@ -309,7 +343,7 @@ def register_routes(
             try:
                 upstream = await upstream_send(client, outgoing)
             except UpstreamFailure as exc:
-                record(
+                await record(
                     session_id,
                     model_requested,
                     model_requested,
@@ -330,7 +364,7 @@ def register_routes(
                 payload = {}
             details = payload if isinstance(payload, dict) else {}
             model_used = _model_name(details.get("model"))
-            record(
+            await record(
                 session_id,
                 model_requested,
                 model_used,
@@ -349,7 +383,7 @@ def register_routes(
         try:
             upstream = await upstream_send(client, outgoing, stream=True)
         except UpstreamFailure as exc:
-            record(
+            await record(
                 session_id,
                 model_requested,
                 model_requested,

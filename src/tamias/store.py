@@ -212,6 +212,44 @@ _INSERT = f"INSERT INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * 
 _SELECT = f"SELECT * FROM {TABLE} ORDER BY id"
 
 
+def apply_ledger_pragmas(conn: sqlite3.Connection) -> None:
+    """Put one tamias database into the mode its access pattern needs.
+
+    Three settings, each for a reason that shows up on a real machine:
+
+    * ``journal_mode=WAL`` -- the metering write happens on the event loop's
+      worker threads while the TUI pop-up reads the same file.  With the
+      default rollback journal a writer blocks every reader for the length of
+      its commit; with WAL a reader proceeds and a writer appends.  On Windows,
+      where creating and deleting the rollback journal file per row is the
+      expensive part, this is also what removes most of the commit cost.
+    * ``synchronous=NORMAL`` -- keeps the commit off the disk's worst-case
+      fsync latency.  The trade is explicit and intentional: a hard power loss
+      can lose the transactions since the last checkpoint, never a whole
+      database, and this log is metering rather than money the provider billed.
+    * ``busy_timeout`` -- a second tamias process (or the pop-up) waiting for
+      the writer gets a bounded wait instead of ``database is locked``.
+
+    ``:memory:`` accepts WAL as a no-op, so tests can share this path.
+
+    The order matters: ``busy_timeout`` first, because converting a database
+    from the default rollback journal to WAL needs exclusive access and would
+    otherwise fail outright when another tamias is mid-write.
+
+    Each statement is best effort, for the same reason the permission tightening
+    in :meth:`Store._restrict_permissions` is: a filesystem that refuses WAL
+    (some network mounts, a read-only or unusual mount) leaves the database in a
+    mode that still works, just with the old cost.  Failing to start a local
+    proxy over a journal mode would be a worse answer than the one it replaced.
+    """
+    for pragma in ("PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL",
+                   "PRAGMA synchronous=NORMAL"):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            return
+
+
 class Store:
     """Append-only request log backed by a local SQLite file.
 
@@ -226,6 +264,7 @@ class Store:
         target = db_path if str(db_path) == ":memory:" else self._path
         self._conn = sqlite3.connect(target, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        apply_ledger_pragmas(self._conn)
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_CREATE_TABLE)

@@ -143,6 +143,23 @@ matrix small: it only needs to run on the machine that runs your agent.
   suite on Ubuntu (Python 3.11–3.14) and the same suite on macOS and Windows
   (Python 3.12), so portability is checked rather than asserted.
 
+### The local databases
+
+The request log, the key store and the limit ledger are SQLite files under
+`~/.tamias`, each opened in WAL mode with `synchronous=NORMAL` and a
+`busy_timeout`. WAL is what lets the TUI pop-up read the log while a request
+writes it, and it removes most of the per-row commit cost on Windows, where
+creating and deleting a rollback journal file every request is the expensive
+part. The trade is deliberate: a hard **power** loss can lose the transactions
+since the last checkpoint (an application crash loses nothing). This is
+metering arithmetic over token counts, not money the provider billed, so the
+price sheet, the provider's own invoice and `tamias reconcile` remain the
+authority on cost.
+
+Every write on a request path runs on a worker thread rather than the event
+loop, so one metered request cannot stall the streams around it for the length
+of a disk flush.
+
 ### Windows caveats
 
 - **Database permissions are not enforced.** Tamias tightens the log database to

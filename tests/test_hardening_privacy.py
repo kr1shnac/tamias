@@ -212,7 +212,13 @@ async def send_secret_request(
 
 
 def db_bytes(db_path: Path) -> bytes:
-    return db_path.read_bytes()
+    # WAL keeps committed rows in the sidecar until a checkpoint, so the file
+    # on disk is the main database plus whatever -wal holds.
+    return b"".join(
+        path.read_bytes()
+        for path in [db_path, db_path.with_name(db_path.name + "-wal")]
+        if path.exists()
+    )
 
 
 def row_text(row: Any) -> str:

@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+from tamias.store import apply_ledger_pragmas
+
 #: Statuses that mean "this model is unavailable for now".  A 400 or a 422 is a
 #: request problem and must not cool the model down.
 RETRYABLE_STATUSES = frozenset({402, 403, 429, 500, 502, 503, 504, 529})
@@ -238,6 +240,7 @@ class LimitLedger:
         target = path if str(path) == ":memory:" else self._path
         self._conn = sqlite3.connect(target, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        apply_ledger_pragmas(self._conn)
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(

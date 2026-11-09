@@ -698,11 +698,16 @@ async def test_no_message_text_reaches_the_database_file(
 
     assert store_module.Store(db_path).rows(), "expected the request to be logged"
 
-    raw = db_path.read_bytes()
-    lowered = raw.lower()
+    # WAL keeps committed rows in the sidecar until a checkpoint, so "the
+    # database" is the main file plus its sidecars: a secret must not appear in
+    # any of them, and the session id must appear in at least one.
+    lowered = b"".join(
+        db_path.read_bytes() for db_path in [db_path, db_path.with_name(db_path.name + "-wal")]
+        if db_path.exists()
+    ).lower()
     for secret in secrets:
         assert secret.encode() not in lowered, f"{secret!r} was written to the database"
-    assert b"auto-" in raw
+    assert b"auto-" in lowered
 
 
 async def test_upstream_500_is_passed_through(client: httpx.AsyncClient, store: FakeStore) -> None:

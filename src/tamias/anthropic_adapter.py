@@ -32,6 +32,7 @@ here for that reason.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -500,7 +501,7 @@ def register_routes(
             current_model=model_used,
         )
 
-    def record(
+    def _log_request(
         session_id: str,
         model_requested: str,
         model_used: str,
@@ -508,11 +509,12 @@ def register_routes(
         started: float,
         status: int,
         decision: Decision,
-        project: object = None,
-        failure_stage: str | None = None,
-        failure_type: str | None = None,
-        generation_id: object = None,
+        project: object,
+        failure_stage: str | None,
+        failure_type: str | None,
+        generation_id: object,
     ) -> None:
+        """The synchronous half of :func:`record`: price it, then append it."""
         cost = cost_for_anthropic(model_used, usage, sheet)
         store.log_request(
             datetime.now(UTC).isoformat(timespec="milliseconds"),
@@ -531,6 +533,40 @@ def register_routes(
             failure_stage=failure_stage,
             failure_type=failure_type,
             route="messages",
+        )
+
+    async def record(
+        session_id: str,
+        model_requested: str,
+        model_used: str,
+        usage: Usage,
+        started: float,
+        status: int,
+        decision: Decision,
+        project: object = None,
+        failure_stage: str | None = None,
+        failure_type: str | None = None,
+        generation_id: object = None,
+    ) -> None:
+        """Append this request's ledger row, off the event loop.
+
+        The append is a synchronous SQLite commit -- an fsync -- and it runs on
+        a worker thread so metering one request cannot stall every other
+        in-flight stream.
+        """
+        await asyncio.to_thread(
+            _log_request,
+            session_id,
+            model_requested,
+            model_used,
+            usage,
+            started,
+            status,
+            decision,
+            project,
+            failure_stage,
+            failure_type,
+            generation_id,
         )
 
     async def _stream_messages(
@@ -565,7 +601,7 @@ def register_routes(
         finally:
             await upstream.aclose()
             model_used = _model_name(collector.model)
-            record(
+            await record(
                 session_id,
                 model_requested,
                 model_used,
@@ -604,7 +640,7 @@ def register_routes(
             allowed=None if allowed_models is None else allowed_models(request),
         )
         if authorize is not None:
-            denied = authorize(request, body.get("model"), raw, effective=routed_model)
+            denied = await authorize(request, body.get("model"), raw, effective=routed_model)
             if denied is not None:
                 return denied
 
@@ -642,7 +678,7 @@ def register_routes(
             try:
                 upstream = await upstream_send(client, outgoing)
             except UpstreamFailure as exc:
-                record(
+                await record(
                     session_id,
                     model_requested,
                     model_requested,
@@ -686,7 +722,7 @@ def register_routes(
                 payload = None
             details = payload if isinstance(payload, dict) else {}
             model_used = _model_name(details.get("model"))
-            record(
+            await record(
                 session_id,
                 model_requested,
                 model_used,
@@ -701,13 +737,23 @@ def register_routes(
             return Response(
                 content=upstream.content,
                 status_code=upstream.status_code,
-                headers=forward_response_headers(upstream.headers),
+                headers={
+                    **forward_response_headers(upstream.headers),
+                    # The same routing view the chat route publishes, so the
+                    # two wire formats cannot disagree about what ran.
+                    **router.routing_response_headers(
+                        mode=router_mode,
+                        decision=decision,
+                        requested=model_requested,
+                        used=running_model,
+                    ),
+                },
             )
 
         try:
             upstream = await upstream_send(client, outgoing, stream=True)
         except UpstreamFailure as exc:
-            record(
+            await record(
                 session_id,
                 model_requested,
                 model_requested,
@@ -754,7 +800,15 @@ def register_routes(
                 getattr(request.state, "project", None),
             ),
             status_code=upstream.status_code,
-            headers=forward_response_headers(upstream.headers),
+            headers={
+                **forward_response_headers(upstream.headers),
+                **router.routing_response_headers(
+                    mode=router_mode,
+                    decision=decision,
+                    requested=model_requested,
+                    used=running_model,
+                ),
+            },
         )
 
     _promote_route(app, MESSAGES_PATH)

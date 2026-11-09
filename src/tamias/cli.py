@@ -2926,6 +2926,28 @@ def _choose_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def _interrupt_child(process: subprocess.Popen[Any]) -> None:
+    """Ask a child to stop the way its platform expects.
+
+    On POSIX a SIGINT is the polite version of Ctrl+C and the child can finish
+    writing whatever it has open.  Windows has no such signal:
+    ``Popen.send_signal`` accepts only ``SIGTERM``, ``CTRL_C_EVENT`` and
+    ``CTRL_BREAK_EVENT``, and raises ``ValueError`` for anything else -- so
+    sending ``SIGINT`` there is not a softer stop, it is a crash in the handler
+    that is trying to shut down cleanly.  ``terminate()`` is the Windows
+    equivalent: unconditional, but it still lets ``wait()`` reap the process.
+    """
+    if os.name == "nt":
+        process.terminate()
+        return
+    try:
+        process.send_signal(signal.SIGINT)
+    except (OSError, ValueError):
+        # The child already exited, or refuses the signal on this platform;
+        # the caller's terminate/kill ladder handles either.
+        process.terminate()
+
+
 def _wait_for_proxy(process: subprocess.Popen[Any], port: int) -> bool:
     """Return once the proxy accepts loopback connections, within the fixed deadline."""
     deadline = time.monotonic() + RUN_START_TIMEOUT_SECONDS
@@ -3129,7 +3151,7 @@ def run(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             child_code = child_process.poll()
             if child_code is None:
-                child_process.send_signal(signal.SIGINT)
+                _interrupt_child(child_process)
                 try:
                     child_code = child_process.wait(timeout=RUN_STOP_TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
