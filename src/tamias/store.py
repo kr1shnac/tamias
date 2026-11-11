@@ -51,6 +51,11 @@ __all__ = [
 TABLE = "requests"
 META_TABLE = "tamias_meta"
 
+#: How many ids one prune ``DELETE`` binds.  SQLite caps bound variables per
+#: statement, and the cap differs by build; a batch this size stays far below
+#: every supported one while keeping the statement count small.
+_PRUNE_CHUNK = 400
+
 # The provider's response id is the only value in this log that arrives inside a
 # response body, so it is admitted on shape rather than on trust.  A real id is a
 # short opaque token: letters, digits and the separators OpenRouter's own examples
@@ -476,10 +481,18 @@ class Store:
                 )
             deleted = len(doomed)
             if doomed and not dry_run:
-                placeholders = ",".join("?" * len(doomed))
-                self._conn.execute(
-                    f"DELETE FROM {TABLE} WHERE id IN ({placeholders})", sorted(doomed)
-                )
+                # SQLite has a hard cap on the number of bound variables in one
+                # statement (999 on old builds, 32766 in newer ones).  A prune
+                # of a large log used to build one ``IN (...)`` with every id,
+                # so it failed exactly when it was needed most.  Delete in
+                # fixed-size batches instead.
+                ids = sorted(doomed)
+                for start in range(0, len(ids), _PRUNE_CHUNK):
+                    batch = ids[start : start + _PRUNE_CHUNK]
+                    placeholders = ",".join("?" * len(batch))
+                    self._conn.execute(
+                        f"DELETE FROM {TABLE} WHERE id IN ({placeholders})", batch
+                    )
                 self._conn.commit()
         return {"deleted": deleted, "remaining": total - deleted}
 

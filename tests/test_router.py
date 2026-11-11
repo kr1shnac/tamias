@@ -2,6 +2,7 @@
 
 import copy
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -152,6 +153,30 @@ def test_hysteresis_holds_the_chosen_target_in_place() -> None:
 def test_min_gap_boundary(index: int, expected: str) -> None:
     decision = decide(body_with_tool("shell", "ok"), state(index=index), CONFIG)
     assert decision.action == expected
+
+
+def test_min_gap_is_measured_from_the_last_switch() -> None:
+    """The switch clock restarts at the last applied switch, not at zero.
+
+    A conversation that keeps planning between tool turns used to pass
+    ``min_gap`` once and then switch on every tool turn.  The state below is
+    what a session looks like one, two and three requests after a switch.
+    """
+    last = 18
+    body = body_with_tool("read", "ok")
+
+    one_after = SessionState(
+        session_id="s1", request_index=20, current_model="strong-1", last_switch_index=last
+    )
+    held = decide(body, one_after, CONFIG)
+    assert held.action == "STAY"
+    assert "1 of 3 requests since last switch" in held.reason
+
+    two_after = replace(one_after, request_index=21)
+    assert decide(body, two_after, CONFIG).action == "STAY"
+
+    three_after = replace(one_after, request_index=22)
+    assert decide(body, three_after, CONFIG).action == "SWITCH"
 
 
 def test_a_held_session_stays_on_the_target() -> None:

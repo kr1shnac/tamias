@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -526,6 +527,48 @@ def _refusing_proxy(db_path: Path, prices_path: Path, transport: Any) -> tuple[F
         transport=transport,
     )
     return app, store
+
+
+class FullDiskStore(Store):
+    """A request log whose every write fails, as a filled disk's would."""
+
+    def log_request(self, *args: Any, **kwargs: Any) -> int:
+        raise sqlite3.OperationalError("database or disk is full")
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
+async def test_a_failed_meter_write_never_fails_a_served_request(
+    db_path: Path, prices_path: Path, stream: bool
+) -> None:
+    """The upstream has already been paid when the row is written.
+
+    A full disk may lose the ledger row -- and the proxy must say so in its
+    logs -- but it must not turn a served 200 into a 500, charging the caller
+    for a response it never receives.
+    """
+    store = FullDiskStore(db_path)
+    app = proxy.create_app(
+        UPSTREAM_URL,
+        store,
+        load_price_sheet(prices_path),
+        "shadow",
+        config=CONFIG,
+        transport=StreamingASGITransport(create_mock_upstream()),
+    )
+
+    async with proxy_client(app) as client:
+        response = await client.post(
+            CHAT_PATH,
+            content=user_body(STRONG, stream=stream),
+            headers=send_headers(f"disk-{stream}"),
+        )
+
+    assert response.status_code == 200
+    if stream:
+        assert "data:" in response.text
+    else:
+        assert response.json()["choices"][0]["message"]["content"]
+    store.close()
 
 
 class TimeoutTransport(httpx.AsyncBaseTransport):

@@ -32,6 +32,7 @@ from mock_upstream import StreamingASGITransport
 from tamias import anthropic_adapter, pricing, proxy, session
 from tamias.anthropic_adapter import AnthropicStreamUsage, usage_from_anthropic
 from tamias.pricing import ModelPrice, PriceSheet
+from tamias.router import RouterConfig
 from tamias.types import CostBreakdown, Decision, Usage
 
 UPSTREAM_URL = "http://upstream.invalid"
@@ -634,6 +635,189 @@ async def test_router_off_records_a_stay(
 
     assert store.last["decision"].action == "STAY"
     assert store.last["decision"].reason == "router disabled"
+
+
+# --------------------------------------------- what the response says here ---
+
+STRONG = "mock-claude-strong"
+CHEAP = "mock-claude-cheap"
+
+#: An easy tool step on the Anthropic wire: a trailing ``user`` turn of
+#: ``tool_result`` blocks, with the tool named on the assistant ``tool_use``.
+EASY_TOOL_BODY = json.dumps(
+    {
+        "model": STRONG,
+        "max_tokens": 1024,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "1", "name": "read"}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "1", "content": "file body"}
+                ],
+            },
+        ],
+    }
+).encode()
+
+
+def both_models_sheet() -> PriceSheet:
+    return PriceSheet(
+        date="2026-10-04",
+        models={
+            STRONG: ModelPrice(input=3.0, output=15.0),
+            CHEAP: ModelPrice(input=0.25, output=1.25),
+        },
+    )
+
+
+def lower_headers(response: httpx.Response) -> dict[str, str]:
+    return {key.lower(): value for key, value in response.headers.items()}
+
+
+async def test_an_active_switch_is_advertised_on_the_messages_route(
+    upstream: FastAPI, store: FakeStore
+) -> None:
+    """The Anthropic route publishes the same routing view as chat completions.
+
+    The two wire formats reach the same router decision through different
+    bodies, so a client must be able to read ``which model ran`` the same way
+    on both: a divergence here is a divergence in what the UI can show.
+    """
+    app = anthropic_adapter.register_routes(
+        FastAPI(lifespan=closing_lifespan),
+        UPSTREAM_URL,
+        store,
+        both_models_sheet(),
+        "active",
+        config=RouterConfig(cheap_model=CHEAP, min_gap=0),
+        transport=StreamingASGITransport(upstream),
+    )
+
+    async with as_client(app) as client:
+        response = await client.post(
+            "/v1/messages", content=EASY_TOOL_BODY, headers=ANTHROPIC_HEADERS
+        )
+
+    headers = lower_headers(response)
+    assert response.status_code == 200
+    assert headers["x-tamias-router-mode"] == "active"
+    assert headers["x-tamias-decision"] == "SWITCH"
+    assert headers["x-tamias-model-requested"] == STRONG
+    assert headers["x-tamias-model-used"] == CHEAP
+    assert "easy tool: read" in headers["x-tamias-reason"]
+    assert store.last["model_used"] == CHEAP
+
+
+async def test_a_pinned_messages_request_keeps_the_callers_model(
+    upstream: FastAPI, store: FakeStore
+) -> None:
+    """The pin is a routing contract on every wire, not only chat completions."""
+    app = anthropic_adapter.register_routes(
+        FastAPI(lifespan=closing_lifespan),
+        UPSTREAM_URL,
+        store,
+        both_models_sheet(),
+        "active",
+        config=RouterConfig(cheap_model=CHEAP, min_gap=0),
+        transport=StreamingASGITransport(upstream),
+    )
+
+    async with as_client(app) as client:
+        response = await client.post(
+            "/v1/messages",
+            content=EASY_TOOL_BODY,
+            headers={**ANTHROPIC_HEADERS, "x-tamias-pin": "1"},
+        )
+
+    assert response.status_code == 200
+    assert store.last["model_used"] == STRONG
+    assert store.last["decision"].action == "STAY"
+    assert "pinned by client" in store.last["decision"].reason
+    echoed = {key.lower() for key in response.json()["echo"]["headers"]}
+    assert "x-tamias-pin" not in echoed, "a tamias control header must not reach the upstream"
+
+
+async def test_the_gateways_authorization_is_not_relayed_on_the_messages_route(
+    upstream: FastAPI, store: FakeStore
+) -> None:
+    """The shared token authenticates the caller to tamias, not to Anthropic."""
+    app = proxy.create_app(
+        UPSTREAM_URL,
+        store,
+        both_models_sheet(),
+        "off",
+        auth_token="shared-token",
+        transport=StreamingASGITransport(upstream),
+    )
+
+    async with as_client(app) as client:
+        response = await client.post(
+            "/v1/messages",
+            content=EASY_TOOL_BODY,
+            headers={**ANTHROPIC_HEADERS, "authorization": "Bearer shared-token"},
+        )
+
+    assert response.status_code == 200
+    echoed = {key.lower(): value for key, value in response.json()["echo"]["headers"].items()}
+    assert "authorization" not in echoed
+    assert echoed["x-api-key"] == "sk-ant-mock-key", "the client's own Anthropic key still relays"
+
+
+async def test_messages_hysteresis_is_measured_from_the_last_switch(
+    upstream: FastAPI, store: FakeStore
+) -> None:
+    """The planning/tool loop must not switch on every tool turn here either."""
+    app = anthropic_adapter.register_routes(
+        FastAPI(lifespan=closing_lifespan),
+        UPSTREAM_URL,
+        store,
+        both_models_sheet(),
+        "active",
+        config=RouterConfig(cheap_model=CHEAP, min_gap=3),
+        transport=StreamingASGITransport(upstream),
+    )
+    headers = {**ANTHROPIC_HEADERS, session.SESSION_HEADER: "s1"}
+    ran: list[str] = []
+
+    async with as_client(app) as client:
+        for index in range(10):
+            body = make_body(STRONG) if index % 2 == 0 else EASY_TOOL_BODY
+            response = await client.post("/v1/messages", content=body, headers=headers)
+            assert response.status_code == 200
+            ran.append(store.last["model_used"])
+
+    assert ran == [STRONG] * 3 + [CHEAP] + [STRONG] * 3 + [CHEAP] + [STRONG] * 2
+
+
+async def test_shadow_does_not_advertise_a_switch_on_the_messages_route(
+    upstream: FastAPI, store: FakeStore
+) -> None:
+    """Same route, same decision recorded, nothing rewritten: the headers must
+    name the mode so the decision never reads as a model that ran."""
+    app = anthropic_adapter.register_routes(
+        FastAPI(lifespan=closing_lifespan),
+        UPSTREAM_URL,
+        store,
+        both_models_sheet(),
+        "shadow",
+        config=RouterConfig(cheap_model=CHEAP, min_gap=0),
+        transport=StreamingASGITransport(upstream),
+    )
+
+    async with as_client(app) as client:
+        response = await client.post(
+            "/v1/messages", content=EASY_TOOL_BODY, headers=ANTHROPIC_HEADERS
+        )
+
+    headers = lower_headers(response)
+    assert headers["x-tamias-router-mode"] == "shadow"
+    assert headers["x-tamias-model-used"] == STRONG
+    assert store.last["model_used"] == STRONG
+    assert store.last["decision"].persisted_only is True
 
 
 async def test_session_id_from_header_else_derived(

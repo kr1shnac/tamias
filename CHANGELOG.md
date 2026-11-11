@@ -125,6 +125,27 @@ describing an arithmetic estimate as a realised saving.
 
 ### Fixed
 
+- **A provider refusal can no longer move a key onto a model it forbids.** The
+  429/404 failover retry now goes through the same `applied_target` gate as
+  every other rewrite, so a restricted key receives the provider's own answer
+  instead of a silent switch onto a model outside its allowlist, and `off` mode
+  no longer rewrites anything on the retry path.
+- **A failed ledger write no longer fails a served request.** The upstream has
+  already been paid when the row is written; a full disk now logs the lost row
+  and returns the response, and a budget reservation is still settled so its
+  ceiling is not held for the whole TTL.
+- **A transport failure on the failover retry is a coded 502 with one row.**
+  It used to escape the handler as a 500 with no ledger entry.
+- **Retry-After cannot lock a model out for a century.** Delta-seconds and
+  HTTP-date forms are clamped to one day, and non-finite quota headers (`inf`,
+  `1e999`) are ignored instead of raising `OverflowError` on a successful
+  response.
+- **`min_gap` is measured from the last applied switch, not from the session's
+  first request.** A long planning conversation no longer switches on every
+  easy tool turn once it has passed the gap.
+- **The test transport lower-cases header names, as every real server does.**
+  A capitalised `Authorization` header now authenticates in tests, so header
+  handling is no longer proven only against httpx's lowercase spelling.
 - `scripts/credit_ab_check.py` printed a two-arm A/B procedure it could not run:
   `--allow-spend` without `--candidates` exited 2. The docs and the code now
   describe the same path.

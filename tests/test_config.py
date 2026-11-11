@@ -285,6 +285,55 @@ def test_serve_flag_beats_config_port(monkeypatch, tmp_path: Path) -> None:
     assert captured == {"port": 8123}
 
 
+def test_serve_with_an_upstream_ignores_the_default_provider_catalogue(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Pointing tamias at one URL must not also attach the user's real keys.
+
+    The default ``~/.tamias/providers.toml`` is a convenience for a
+    multi-provider setup.  Reading it while an explicit ``--upstream`` is given
+    would route matching model ids to real, billed providers and leave the
+    given upstream unused -- a surprising way to spend money.
+    """
+    home = tmp_path / "home"
+    (home / ".tamias").mkdir(parents=True)
+    _write(
+        home / ".tamias" / "providers.toml",
+        '[[providers]]\nname = "openrouter"\napi_key_env = "OPENROUTER_API_KEY"\n',
+    )
+    sheet = _write(
+        tmp_path / "prices.toml", 'date = "2026-10-06"\n[model]\ninput=1\noutput=1\n'
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("TAMIAS_PROVIDERS", raising=False)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(tmp_path / "absent.toml"))
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(app=app))
+
+    code = cli.main(
+        [
+            "serve",
+            "--upstream",
+            "http://127.0.0.1:1234/v1",
+            "--prices",
+            str(sheet),
+            "--db",
+            str(tmp_path / "requests.db"),
+        ]
+    )
+
+    assert code == 0
+    app = captured["app"]
+    try:
+        assert len(app.state.providers) == 0
+    finally:
+        app.state.store.close()
+    err = capsys.readouterr().err
+    assert "not reading" in err
+    assert "providers.toml" in err
+
+
 def _serve_args(tmp_path: Path, sheet: Path, *extra: str) -> list[str]:
     return [
         "serve",

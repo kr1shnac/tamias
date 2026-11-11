@@ -5,8 +5,9 @@ keeps no module-level mutable state.  Shadow mode (which only records the
 decision) and active mode (which rewrites ``body["model"]``) therefore always
 agree on what the decision was.
 
-``applied_target`` is the other half: the single place that turns a decision
-into an action, so no handler has to re-derive what a ``SWITCH`` means.
+``applied_target`` and :func:`availability_switch` are the other half: the
+single places that turn a decision into an action, so no handler has to
+re-derive what a ``SWITCH`` means.
 """
 
 import re
@@ -19,6 +20,23 @@ from tamias.types import Decision, SessionState, ToolClass
 
 EASY_TOOLS: frozenset[str] = frozenset({"shell", "bash", "read", "grep", "ls", "glob"})
 ERROR_MARKERS: tuple[str, ...] = ("Traceback", "FAILED", "error:")
+
+#: A client's "leave this request alone" signal.  Active routing is opt-in and
+#: bounded by three gates, but it still rewrites a model the *caller* named; a
+#: caller that knows the step is a hard one must be able to say so without
+#: turning the router off.  It is per-request and tamias-local: every route
+#: drops it before forwarding, exactly like the session header.
+PIN_HEADER = "x-tamias-pin"
+
+#: What counts as "yes".  Anything else is ignored, so a stray
+#: ``x-tamias-pin: maybe`` can never silently disable routing.
+PIN_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def pin_requested(headers: Mapping[str, str]) -> bool:
+    """Does the client ask for this request to stay on the model it named?"""
+    value = headers.get(PIN_HEADER, "")
+    return value.strip().lower() in PIN_TRUE_VALUES
 
 GENERIC_ERROR_MARKERS: tuple[str, ...] = (
     "Traceback",
@@ -447,6 +465,16 @@ def decide(
     requested_model = body.get("model")
     role = last.get("role")
     markers = config.error_markers if config.error_markers is not None else ERROR_MARKERS
+    # Requests since the last *applied* switch, not since the session began.  A
+    # conversation alternates planning turns (which stay on the caller's model)
+    # with mechanical ones, so counting from zero would let a long-lived session
+    # switch on every easy tool the moment it passed min_gap once -- the exact
+    # prompt-cache thrash the hysteresis exists to prevent.  With no switch yet,
+    # the session's own age is the honest answer.
+    last_switch = getattr(state, "last_switch_index", None)
+    since_switch = (
+        state.request_index - last_switch - 1 if last_switch is not None else state.request_index
+    )
 
     # Rule 0: a model inside its cooldown cannot answer, so the step type stops
     # mattering.  This is checked before every other rule so a limited model is
@@ -524,7 +552,7 @@ def decide(
                                 reason=f"already on {target}: held",
                                 target_effort="low" if config.effort_policy else None,
                             )
-                        elif state.request_index >= config.min_gap:
+                        elif since_switch >= config.min_gap:
                             decision = Decision(
                                 action="SWITCH",
                                 target_model=target,
@@ -533,7 +561,7 @@ def decide(
                             )
                         else:
                             decision = _stay(
-                                f"hysteresis: {state.request_index} of"
+                                f"hysteresis: {since_switch} of"
                                 f" {config.min_gap} requests since last switch"
                             )
                 else:
@@ -558,6 +586,45 @@ def decide(
             if tool is not None and _is_easy(tool, config):
                 decision = replace(decision, target_effort="low")
     return decision
+
+
+def availability_switch(
+    previous: Decision,
+    *,
+    requested: str,
+    target: str,
+    reason: str,
+    enabled: bool,
+    allowed: Collection[str] | None = None,
+) -> tuple[Decision, str | None]:
+    """The decision a provider refusal justifies, and the model it may run on.
+
+    A 429, a 404 or a 5xx is not a routing decision the operator opted into: it
+    is the *provider* refusing the turn, so the retry it justifies is applied on
+    the same terms as an availability-forced switch -- which is why ``enabled``
+    is the caller's answer, not this function's.  In ``off`` mode nothing is ever
+    rewritten, so the caller passes ``enabled=False`` and the refusal stands.
+
+    What it must still respect is the caller's allowlist.  Without that check a
+    single provider outage would silently move a restricted key onto a model it
+    never named and its operator never granted, which is exactly what the
+    allowlist exists to prevent -- and the log would show an ordinary SWITCH, so
+    nothing would look wrong afterwards.
+
+    Returns the decision to log and the model to run, or ``(previous, None)``
+    when the refusal stands.  Suppressing the switch rather than applying and
+    then refusing it is deliberate: the caller gets the provider's own answer.
+    """
+    decision = replace(previous, action="SWITCH", target_model=target, reason=reason)
+    applied = applied_target(
+        decision,
+        requested=requested,
+        enabled=enabled,
+        allowed=allowed,
+    )
+    if applied is None:
+        return previous, None
+    return decision, applied
 
 
 def applied_target(

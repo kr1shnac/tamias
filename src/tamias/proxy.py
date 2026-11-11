@@ -98,6 +98,7 @@ from tamias.router import RouterConfig
 from tamias.store import sanitize_generation_id, sanitize_project
 from tamias.types import CostBreakdown, Decision, SessionState, Usage
 from tamias.upstream import (
+    SETUP,
     STREAM,
     UpstreamFailure,
     classify_http_error,
@@ -151,11 +152,9 @@ PROJECT_HEADER = "x-tamias-project"
 #: a caller that knows the step is a hard one must be able to say so without
 #: turning the router off.  It is per-request and tamias-local: it is dropped
 #: before the upstream request is sent, exactly like the session header.
-PIN_HEADER = "x-tamias-pin"
-
-#: What counts as "yes".  Anything else is ignored, so a stray
-#: ``x-tamias-pin: maybe`` can never silently disable routing.
-PIN_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+#: The definitions live in :mod:`tamias.router` so every route shares them.
+PIN_HEADER = router.PIN_HEADER
+PIN_TRUE_VALUES = router.PIN_TRUE_VALUES
 
 DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {
     "accept-encoding",
@@ -166,8 +165,7 @@ DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {
 
 def pin_requested(headers: Mapping[str, str]) -> bool:
     """Does the client ask for this request to stay on the model it named?"""
-    value = headers.get(PIN_HEADER, "")
-    return value.strip().lower() in PIN_TRUE_VALUES
+    return router.pin_requested(headers)
 
 PASSTHROUGH_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # The count-only passthrough row still needs a non-NULL model (the log's schema
@@ -247,6 +245,15 @@ def forward_headers(request: Request) -> dict[str, str]:
         for key, value in request.headers.items()
         if key.lower() not in DROPPED_REQUEST_HEADERS | {PROJECT_HEADER}
     }
+    # A credential tamias itself authenticated must never be relayed onwards.
+    # ``Authorization: Bearer <the shared token>`` is *this gateway's* secret:
+    # forwarding it would hand every operator's token -- and, where company keys
+    # are in use, every caller's own key -- to whichever upstream answered.  A
+    # client that reaches the proxy unauthenticated keeps its header, so a
+    # loopback ``--upstream https://api.openai.com/v1`` relay still works.
+    if getattr(request.state, "identity", None) is not None:
+        headers.pop("authorization", None)
+        headers.pop("Authorization", None)
     key = getattr(request.state, "key", None)
     key_id = getattr(key, "key_id", None) if key is not None else None
     if isinstance(key_id, str) and key_id.startswith("vk-"):
@@ -739,6 +746,7 @@ class SessionRecord:
             session_id=self.session_id,
             request_index=self.request_index,
             current_model=self.current_model,
+            last_switch_index=self.last_switch_index,
         )
 
 
@@ -1033,11 +1041,13 @@ def create_app(
             if auth_token is not None and hmac.compare_digest(credential, auth_token):
                 # The operator's shared token carries no identity of its own.
                 request.state.key = None
+                request.state.identity = "token"
                 return await call_next(request)
             if key_store is not None:
                 key = key_store.authenticate(credential)
                 if key is not None:
                     request.state.key = key
+                    request.state.identity = "key"
                     if key.project is not None:
                         # The key's project is authoritative: a client cannot
                         # relabel its spend with a header it chose.
@@ -1193,8 +1203,9 @@ def create_app(
             # pin are recorded decisions too, and a consumer reading the log must
             # not be able to tell them apart from one that was acted on.
             decision = replace(decision, persisted_only=True)
-        if router_mode == "active" and decision.action == "SWITCH":
-            record.last_switch_index = record.request_index
+        # The switch index is deliberately *not* set here.  A decision is a
+        # want; whether it was applied is only known once the response says
+        # which model ran, so :func:`advance` records it from the outcome.
         logger.info(
             "session=%s prior_requests=%d model=%s mode=%s decision=%s target=%s reason=%s",
             session_id,
@@ -1257,7 +1268,12 @@ def create_app(
             raw = with_usage_included(body)
         return raw
 
-    def advance(session_id: str, model_used: str, decision: Decision | None = None) -> None:
+    def advance(
+        session_id: str,
+        model_used: str,
+        decision: Decision | None = None,
+        model_requested: str = "",
+    ) -> None:
         """Count this request, note the model it ran on, and learn from the turn.
 
         The observation is the whole point of ``decision``: if the *previous*
@@ -1265,14 +1281,25 @@ def create_app(
         like a failure, the session is escalated -- it keeps the model the caller
         named for the next few requests instead of shopping again.
 
-        The decision is carried in rather than read back from the log, so this
-        stays inside the request path with no second query.  A shadow-mode
-        decision counts too: the policy is simulated on the same terms as every
-        other routing decision.
+        ``model_requested`` is what makes the switch index honest.  A SWITCH is
+        only worth restarting the hysteresis clock for when the model that ran
+        is *not* the one the caller named: a shadow-mode decision records a
+        switch that never happened, and an upstream that echoes its own id for
+        the model it was given has not moved anywhere.  Reading the outcome
+        rather than the decision is what keeps ``min_gap`` measuring real
+        switches.
         """
         record = table.get_or_create(session_id, model_used)
         # The previous request's fact, read before this one is recorded over it.
         prior_was_downgrade = record.last_was_downgrade
+        if (
+            decision is not None
+            and decision.action == "SWITCH"
+            and model_used != model_requested
+            and model_used
+        ):
+            # This request *was* the switch, so the clock restarts from it.
+            record.last_switch_index = record.request_index
         record.request_index += 1
         record.current_model = model_used
         if (
@@ -1360,24 +1387,41 @@ def create_app(
         not stall every other in-flight stream for the length of a disk flush.
         The store's own lock already serialises the writes, so this moves their
         cost, not their order.
+
+        A failed write is **never** allowed to fail the request.  The upstream
+        has already been paid by the time this runs, so discarding its response
+        because a disk filled up would charge the caller for a turn they cannot
+        see.  The row is lost and the reason is logged at ERROR with the row's
+        identity, so an operator can see the gap in the ledger rather than trace
+        a 500 that has no cause in their logs.
         """
-        await asyncio.to_thread(
-            _log_request,
-            session_id,
-            model_requested,
-            model_used,
-            usage,
-            started,
-            status,
-            decision,
-            generation_id,
-            project,
-            effort_requested,
-            effort_used,
-            failure_stage,
-            failure_type,
-            route,
-        )
+        try:
+            await asyncio.to_thread(
+                _log_request,
+                session_id,
+                model_requested,
+                model_used,
+                usage,
+                started,
+                status,
+                decision,
+                generation_id,
+                project,
+                effort_requested,
+                effort_used,
+                failure_stage,
+                failure_type,
+                route,
+            )
+        except Exception:
+            logger.exception(
+                "request log write failed; the row is lost and the response stands "
+                "(session=%s requested=%s used=%s status=%s)",
+                session_id,
+                model_requested,
+                model_used,
+                status,
+            )
 
     async def budget_gate(
         request: Request, key: Key, named: str | None, body: bytes | None
@@ -1811,7 +1855,7 @@ def create_app(
                     failure_stage=exc.stage,
                     failure_type=exc.failure_type,
                 )
-                advance(session_id, model_used, decision)
+                advance(session_id, model_used, decision, model_requested)
                 return _upstream_failure_response()
             # A limit learned here is a limit every later request skips.  A 429
             # means nothing was generated, so one immediate retry on a model
@@ -1822,19 +1866,49 @@ def create_app(
             if limits_mod.retryable(upstream.status_code):
                 fallback = retry_target(body, running_model)
                 if fallback:
-                    await upstream.aclose()
-                    decision = replace(
+                    decision, applied = router.availability_switch(
                         decision,
-                        action="SWITCH",
-                        target_model=fallback,
+                        requested=model_requested,
+                        target=fallback,
                         reason=(
                             f"upstream {upstream.status_code} on {running_model}: "
                             f"retried on {fallback}"
                         ),
+                        # The mode's answer: only ``off`` refuses to rewrite
+                        # anything at all, and a refusal is not a routing win.
+                        enabled=router_mode != "off",
+                        allowed=allowed_models_for(request),
                     )
-                    routed_model = fallback
-                    running_model = fallback
-                    upstream = await upstream_send(client, build(fallback))
+                else:
+                    applied = None
+                if applied is not None:
+                    await upstream.aclose()
+                    routed_model = applied
+                    running_model = applied
+                    try:
+                        upstream = await upstream_send(client, build(applied))
+                    except UpstreamFailure as exc:
+                        # The retry is a second connection to a provider that
+                        # has already refused once, so it is the likeliest place
+                        # for a transport failure.  Letting it escape would turn
+                        # a deliberate 502 into an unhandled 500 with no row.
+                        remember_transport_failure(running_model)
+                        await record(
+                            session_id,
+                            model_requested,
+                            model_requested,
+                            Usage(None, None, None, None),
+                            started,
+                            502,
+                            decision,
+                            request.state.project,
+                            effort_requested,
+                            effort_used,
+                            failure_stage=exc.stage,
+                            failure_type=exc.failure_type,
+                        )
+                        advance(session_id, model_requested, decision, model_requested)
+                        return _upstream_failure_response()
                     remember_limit(running_model, upstream)
             payload: Any = None
             try:
@@ -1856,7 +1930,7 @@ def create_app(
                 effort_requested,
                 effort_used,
             )
-            advance(session_id, model_used, decision)
+            advance(session_id, model_used, decision, model_requested)
             return Response(
                 content=upstream.content,
                 status_code=upstream.status_code,
@@ -1892,7 +1966,7 @@ def create_app(
                 failure_stage=exc.stage,
                 failure_type=exc.failure_type,
             )
-            advance(session_id, model_used, decision)
+            advance(session_id, model_used, decision, model_requested)
             return _upstream_failure_response()
         # The status is known before a byte is relayed, so a refusal can still be
         # retried on another gated model without the client seeing a truncated
@@ -1901,19 +1975,43 @@ def create_app(
         if limits_mod.retryable(upstream.status_code):
             fallback = retry_target(body, running_model)
             if fallback:
-                await upstream.aclose()
-                decision = replace(
+                decision, applied = router.availability_switch(
                     decision,
-                    action="SWITCH",
-                    target_model=fallback,
+                    requested=model_requested,
+                    target=fallback,
                     reason=(
                         f"upstream {upstream.status_code} on {running_model}: "
                         f"retried on {fallback}"
                     ),
+                    enabled=router_mode != "off",
+                    allowed=allowed_models_for(request),
                 )
-                routed_model = fallback
-                running_model = fallback
-                upstream = await upstream_send(client, build(fallback), stream=True)
+            else:
+                applied = None
+            if applied is not None:
+                await upstream.aclose()
+                routed_model = applied
+                running_model = applied
+                try:
+                    upstream = await upstream_send(client, build(applied), stream=True)
+                except UpstreamFailure as exc:
+                    remember_transport_failure(running_model)
+                    await record(
+                        session_id,
+                        model_requested,
+                        model_requested,
+                        Usage(None, None, None, None),
+                        started,
+                        502,
+                        decision,
+                        request.state.project,
+                        effort_requested,
+                        effort_used,
+                        failure_stage=exc.stage,
+                        failure_type=exc.failure_type,
+                    )
+                    advance(session_id, model_requested, decision, model_requested)
+                    return _upstream_failure_response()
                 remember_limit(running_model, upstream)
         return StreamingResponse(
             _stream_chat(
@@ -2003,7 +2101,7 @@ def create_app(
                 failure_stage=failure.stage if failure is not None else None,
                 failure_type=failure.failure_type if failure is not None else None,
             )
-            advance(session_id, model_used, decision)
+            advance(session_id, model_used, decision, model_requested)
 
     @app.api_route("/{path:path}", methods=PASSTHROUGH_METHODS)
     async def passthrough(path: str, request: Request) -> Response:
@@ -2019,14 +2117,52 @@ def create_app(
         # the route prices nothing -- so the row can never inflate a total.
         started = time.perf_counter()
         passthrough_root = root_for(model) if model else base
+        if not passthrough_root:
+            # A catalogue is configured and nothing serves this model.  The
+            # metered routes refuse this case; relaying to the unconfigured
+            # placeholder root would spend a connection on a URL no provider
+            # owns and answer a 500 the caller cannot act on.
+            return _unknown_provider(model or PASSTHROUGH_MODEL, catalogue.names())
         outgoing = client.build_request(
             request.method,
-            f"{passthrough_root or base}/{path}",
+            f"{passthrough_root}/{path}",
             content=raw,
             headers=(headers_for(model, request) if model else forward_headers(request)),
             params=request.query_params,
         )
-        upstream = await client.send(outgoing, stream=True)
+        try:
+            upstream = await client.send(outgoing, stream=True)
+        except httpx.HTTPError as exc:
+            # The count-only row still has to exist, or a transport failure on
+            # an unmetered path would be the one request that leaves no trace.
+            await record(
+                session.derive_session_id(
+                    dict(request.headers.items()),
+                    _json_object(raw),
+                    session_salt,
+                    wire=session.WIRE_PASSTHROUGH,
+                ),
+                model or PASSTHROUGH_MODEL,
+                model or PASSTHROUGH_MODEL,
+                Usage(
+                    input_tokens=None,
+                    output_tokens=None,
+                    cached_input_tokens=None,
+                    cache_write_tokens=None,
+                ),
+                started,
+                502,
+                Decision(
+                    action="STAY",
+                    target_model=None,
+                    reason="passthrough route is not metered",
+                ),
+                project=request.state.project,
+                failure_stage=SETUP,
+                failure_type=classify_http_error(exc),
+                route="passthrough",
+            )
+            return _upstream_failure_response()
         await record(
             session.derive_session_id(
                 dict(request.headers.items()),
@@ -2086,6 +2222,7 @@ def create_app(
         upstream_url,
         metered,
         sheet,
+        router_mode=router_mode,
         session_salt=session_salt,
         authorize=authorize,
     )

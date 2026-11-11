@@ -76,9 +76,11 @@ from tamias.pricing_fetch import (
     zen_free_models,
 )
 from tamias.providers import (
+    PROVIDERS_ENV_VAR,
     ProviderError,
     catalogue_from_registry,
     default_providers_path,
+    empty_catalogue,
     load_providers,
 )
 from tamias.registry import Registry, default_registry_path, load_registry
@@ -1294,12 +1296,40 @@ def serve(args: argparse.Namespace) -> int:
     cfg = _load_effective_config(args)
     # Providers first: a catalogue makes a single --upstream optional, because
     # each model then names the provider that serves it.
-    explicit_providers = pick(getattr(args, "providers", None), cfg.providers, None)
-    try:
-        catalogue = load_providers(explicit_providers, missing_ok=not explicit_providers)
-    except ProviderError as exc:
-        print(f"tamias serve: {exc}", file=sys.stderr)
-        return 2
+    explicit_providers = pick(
+        getattr(args, "providers", None),
+        cfg.providers,
+        None,
+    )
+    env_providers = os.environ.get(PROVIDERS_ENV_VAR)
+    explicit_upstream = bool(
+        getattr(args, "upstream", None)
+        or os.environ.get(UPSTREAM_ENV_VAR)
+        or getattr(args, "provider", None)
+        or cfg.resolved_upstream()
+    )
+    if explicit_providers is None and env_providers is None and explicit_upstream:
+        # An explicit single upstream means single-upstream mode.  Reading the
+        # user's real catalogue here would silently attach their provider
+        # credentials and route matching model ids to real, billed providers --
+        # the opposite of what "point tamias at this URL" says.  An explicit
+        # --providers/$TAMIAS_PROVIDERS/config providers entry still wins.
+        catalogue = empty_catalogue()
+        implicit = default_providers_path()
+        if implicit.exists():
+            print(
+                f"tamias serve: upstream set; not reading {implicit} "
+                "(pass --providers to route across providers)",
+                file=sys.stderr,
+            )
+    else:
+        try:
+            catalogue = load_providers(
+                explicit_providers, missing_ok=explicit_providers is None
+            )
+        except ProviderError as exc:
+            print(f"tamias serve: {exc}", file=sys.stderr)
+            return 2
     upstream = _resolve_upstream(args, cfg)
     if not upstream and not len(catalogue):
         print(

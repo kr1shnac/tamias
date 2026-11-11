@@ -14,6 +14,7 @@ import pytest
 
 from tamias.limits import (
     BACKOFF_SECONDS,
+    MAX_COOLDOWN_SECONDS,
     QUOTA_TTL_SECONDS,
     RETRYABLE_STATUSES,
     UNAVAILABLE_SECONDS,
@@ -48,6 +49,40 @@ def test_no_quota_headers_means_no_quota_to_show():
     """An invented remaining count is a number no provider stands behind."""
     assert quota_from_headers("nvidia", {"content-type": "application/json"}) is None
     assert quota_from_headers("nvidia", {"x-ratelimit-remaining": ""}) is None
+
+
+def test_a_non_finite_quota_header_is_ignored_not_fatal():
+    """A malformed header on a *successful* response must not become a 500.
+
+    ``inf`` and ``1e999`` are valid floats and invalid counts; ``int()`` raises
+    ``OverflowError`` for them, which is not the ``ValueError`` a parser
+    usually guards.  One such header used to turn a served 200 into a 500.
+    """
+    quota = quota_from_headers(
+        "openai",
+        {
+            "x-ratelimit-remaining-requests": "inf",
+            "x-ratelimit-reset-requests": "30",
+        },
+    )
+
+    assert quota is not None
+    assert quota.remaining is None, "an infinite count is not a count"
+    assert quota.resets_in == 30
+
+
+def test_a_non_finite_reset_header_is_ignored_not_fatal():
+    quota = quota_from_headers(
+        "openai",
+        {
+            "x-ratelimit-remaining-requests": "12",
+            "x-ratelimit-reset-requests": "1e999",
+        },
+    )
+
+    assert quota is not None
+    assert quota.remaining == 12
+    assert quota.resets_in is None
 
 
 def test_a_duration_string_reset_is_understood():
@@ -229,3 +264,23 @@ def test_parse_retry_after_accepts_an_http_date():
     seconds = parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", now=now)
 
     assert seconds == 0.0, "a date in the past means retry now, not a negative wait"
+
+
+def test_a_far_future_retry_after_is_clamped_not_a_permanent_lockout():
+    """A clock skew or hostile header must not retire a model for a century."""
+    seconds = parse_retry_after("Wed, 01 Jan 2099 00:00:00 GMT", now=NOW)
+
+    assert seconds == MAX_COOLDOWN_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("inf", MAX_COOLDOWN_SECONDS),
+        ("1e999", MAX_COOLDOWN_SECONDS),
+        ("-inf", None),
+        ("nan", None),
+    ],
+)
+def test_a_non_finite_retry_after_is_clamped_or_rejected(header, expected):
+    assert parse_retry_after(header, now=NOW) == expected

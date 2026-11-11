@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -82,7 +83,16 @@ HOP_BY_HOP = frozenset(
 # fails the read, which surfaces as a connection error rather than a 502.
 DECODED_BODY_HEADERS = frozenset({"content-encoding"})
 PROJECT_HEADER = "x-tamias-project"
-DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER, SESSION_HEADER}
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {
+    "accept-encoding",
+    PROJECT_HEADER,
+    SESSION_HEADER,
+    router.PIN_HEADER,
+}
+#: How many conversations the adapter remembers.  Like the chat route's table,
+#: this is in-memory only and bounded: a proxy in front of many callers must not
+#: grow one live object per conversation for as long as the process runs.
+_SESSION_CAP = 1000
 
 DATA_PREFIX = b"data:"
 
@@ -298,13 +308,28 @@ def forward_headers(request: Request) -> dict[str, str]:
 
     ``x-api-key``, ``anthropic-version`` and ``anthropic-beta`` pass through
     here like any other header, which is what makes the credential and the API
-    version reach Anthropic exactly as the client sent them.
+    version reach Anthropic exactly as the client sent them -- for a client
+    that reaches tamias unauthenticated, as a loopback relay is.
+
+    A credential tamias itself authenticated is dropped: ``Authorization:
+    Bearer <the shared token or company key>`` belongs to this gateway, not to
+    the upstream it happens to relay to.
     """
-    return {
+    headers = {
         key: value
         for key, value in request.headers.items()
         if key.lower() not in DROPPED_REQUEST_HEADERS
     }
+    state = getattr(request, "state", None)
+    key = getattr(state, "key", None) if state is not None else None
+    key_id = getattr(key, "key_id", None) if key is not None else None
+    if (
+        (state is not None and getattr(state, "identity", None) is not None)
+        or (isinstance(key_id, str) and key_id.startswith("vk-"))
+    ):
+        headers.pop("authorization", None)
+        headers.pop("Authorization", None)
+    return headers
 
 
 def forward_response_headers(headers: httpx.Headers) -> dict[str, str]:
@@ -402,7 +427,10 @@ def register_routes(
         )
 
     base = upstream_url.rstrip("/")
-    sessions: dict[str, SessionState] = {}
+    # Session state is in-memory only and LRU-bounded, exactly like the chat
+    # route's: dropping the least recently used conversation resets it to
+    # request 0 rather than letting a public gateway grow without bound.
+    sessions: OrderedDict[str, SessionState] = OrderedDict()
     routing = router.DEFAULT_CONFIG if config is None else config
     catalogue = getattr(app.state, "providers", None)
     if router_mode == "active" and not routing.cheap_model and not len(catalogue or ()):
@@ -437,17 +465,27 @@ def register_routes(
         so ``advance`` always has a state to increment.
         """
         state = sessions.get(session_id)
-        if state is None:
-            state = SessionState(session_id=session_id, request_index=0, current_model=model)
-            sessions[session_id] = state
+        if state is not None:
+            sessions.move_to_end(session_id)
+            return state
+        if len(sessions) >= _SESSION_CAP:
+            sessions.popitem(last=False)
+        state = SessionState(session_id=session_id, request_index=0, current_model=model)
+        sessions[session_id] = state
         return state
 
-    def plan(session_id: str, body: dict[str, Any], model: str) -> Decision:
+    def plan(
+        session_id: str, body: dict[str, Any], model: str, *, pinned: bool = False
+    ) -> Decision:
         """Ask the router what it would do with this request, and log it.
 
         The decision is always recorded, whatever the mode.  In shadow mode it is
         marked ``persisted_only`` so that nothing downstream can mistake a
         recorded SWITCH for one that was acted on.
+
+        ``pinned`` keeps the caller's model in every mode, including ``active``:
+        the router never sees the request, so no gate or hysteresis rule can
+        override a caller that knows the step is a hard one.
 
         The gate inputs come from ``app.state.route_context``, the same helper
         the chat route uses: the capability, supply and health gates, the ranked
@@ -458,6 +496,12 @@ def register_routes(
         state = current(session_id, model)
         if router_mode == "off":
             decision = Decision(action="STAY", target_model=None, reason="router disabled")
+        elif pinned:
+            decision = Decision(
+                action="STAY",
+                target_model=None,
+                reason=f"pinned by client: kept {model}",
+            )
         else:
             context = getattr(app.state, "route_context", None)
             decision = router.decide(
@@ -492,14 +536,30 @@ def register_routes(
             return raw
         return json.dumps({**body, "model": routed_model}).encode()
 
-    def advance(session_id: str, model_used: str) -> None:
-        """Count this request and note the model it actually ran on."""
+    def advance(
+        session_id: str,
+        model_used: str,
+        decision: Decision | None = None,
+        model_requested: str = "",
+    ) -> None:
+        """Count this request, note the model it ran on, and restart the clock
+        only when the model that ran is not the one the caller named."""
         state = current(session_id, model_used)
+        last_switch = state.last_switch_index
+        if (
+            decision is not None
+            and decision.action == "SWITCH"
+            and model_used != model_requested
+            and model_used
+        ):
+            last_switch = state.request_index
         sessions[session_id] = SessionState(
             session_id=session_id,
             request_index=state.request_index + 1,
             current_model=model_used,
+            last_switch_index=last_switch,
         )
+        sessions.move_to_end(session_id)
 
     def _log_request(
         session_id: str,
@@ -533,6 +593,7 @@ def register_routes(
             failure_stage=failure_stage,
             failure_type=failure_type,
             route="messages",
+            router_mode=router_mode,
         )
 
     async def record(
@@ -553,21 +614,35 @@ def register_routes(
         The append is a synchronous SQLite commit -- an fsync -- and it runs on
         a worker thread so metering one request cannot stall every other
         in-flight stream.
+
+        A failed write never fails the request: the upstream has already been
+        paid by the time this runs, so a full disk must not discard a response
+        the caller cannot otherwise see.  The row is lost and logged instead.
         """
-        await asyncio.to_thread(
-            _log_request,
-            session_id,
-            model_requested,
-            model_used,
-            usage,
-            started,
-            status,
-            decision,
-            project,
-            failure_stage,
-            failure_type,
-            generation_id,
-        )
+        try:
+            await asyncio.to_thread(
+                _log_request,
+                session_id,
+                model_requested,
+                model_used,
+                usage,
+                started,
+                status,
+                decision,
+                project,
+                failure_stage,
+                failure_type,
+                generation_id,
+            )
+        except Exception:
+            logger.exception(
+                "request log write failed; the row is lost and the response stands "
+                "(session=%s requested=%s used=%s status=%s)",
+                session_id,
+                model_requested,
+                model_used,
+                status,
+            )
 
     async def _stream_messages(
         upstream: httpx.Response,
@@ -614,7 +689,7 @@ def register_routes(
                 failure_type=failure.failure_type if failure is not None else None,
                 generation_id=collector.generation_id,
             )
-            advance(session_id, model_used)
+            advance(session_id, model_used, decision, model_requested)
 
     @app.post(MESSAGES_PATH)
     async def messages(request: Request) -> Response:
@@ -632,7 +707,12 @@ def register_routes(
         model_requested = _model_name(body.get("model"))
         # The decision comes before the gate so the gate can price and cap the
         # model that will actually run.
-        decision = plan(session_id, body, model_requested)
+        decision = plan(
+            session_id,
+            body,
+            model_requested,
+            pinned=router.pin_requested(dict(request.headers.items())),
+        )
         routed_model = router.applied_target(
             decision,
             requested=model_requested,
@@ -690,7 +770,7 @@ def register_routes(
                     failure_stage=exc.stage,
                     failure_type=exc.failure_type,
                 )
-                advance(session_id, model_requested)
+                advance(session_id, model_requested, decision, model_requested)
                 return _upstream_failure_response()
             if remember_limit is not None:
                 remember_limit(running_model, upstream)
@@ -700,19 +780,42 @@ def register_routes(
             if retry_target is not None and limits_mod.retryable(upstream.status_code):
                 fallback = retry_target(body, running_model)
                 if fallback:
-                    await upstream.aclose()
-                    decision = replace(
+                    decision, applied = router.availability_switch(
                         decision,
-                        action="SWITCH",
-                        target_model=fallback,
+                        requested=model_requested,
+                        target=fallback,
                         reason=(
                             f"upstream {upstream.status_code} on {running_model}: "
                             f"retried on {fallback}"
                         ),
+                        enabled=router_mode != "off",
+                        allowed=(
+                            None if allowed_models is None else allowed_models(request)
+                        ),
                     )
-                    routed_model = fallback
-                    running_model = fallback
-                    upstream = await upstream_send(client, build(fallback))
+                else:
+                    applied = None
+                if applied is not None:
+                    await upstream.aclose()
+                    routed_model = applied
+                    running_model = applied
+                    try:
+                        upstream = await upstream_send(client, build(applied))
+                    except UpstreamFailure as exc:
+                        await record(
+                            session_id,
+                            model_requested,
+                            model_requested,
+                            Usage(None, None, None, None),
+                            started,
+                            502,
+                            decision,
+                            getattr(request.state, "project", None),
+                            failure_stage=exc.stage,
+                            failure_type=exc.failure_type,
+                        )
+                        advance(session_id, model_requested, decision, model_requested)
+                        return _upstream_failure_response()
                     if remember_limit is not None:
                         remember_limit(running_model, upstream)
             payload: Any = None
@@ -733,7 +836,7 @@ def register_routes(
                 getattr(request.state, "project", None),
                 generation_id=details.get("id"),
             )
-            advance(session_id, model_used)
+            advance(session_id, model_used, decision, model_requested)
             return Response(
                 content=upstream.content,
                 status_code=upstream.status_code,
@@ -765,7 +868,7 @@ def register_routes(
                 failure_stage=exc.stage,
                 failure_type=exc.failure_type,
             )
-            advance(session_id, model_requested)
+            advance(session_id, model_requested, decision, model_requested)
             return _upstream_failure_response()
         # The status is known before a byte is relayed, so a refusal can still
         # be retried on another gated model without the client seeing a
@@ -775,19 +878,40 @@ def register_routes(
         if retry_target is not None and limits_mod.retryable(upstream.status_code):
             fallback = retry_target(body, running_model)
             if fallback:
-                await upstream.aclose()
-                decision = replace(
+                decision, applied = router.availability_switch(
                     decision,
-                    action="SWITCH",
-                    target_model=fallback,
+                    requested=model_requested,
+                    target=fallback,
                     reason=(
                         f"upstream {upstream.status_code} on {running_model}: "
                         f"retried on {fallback}"
                     ),
+                    enabled=router_mode != "off",
+                    allowed=None if allowed_models is None else allowed_models(request),
                 )
-                routed_model = fallback
-                running_model = fallback
-                upstream = await upstream_send(client, build(fallback), stream=True)
+            else:
+                applied = None
+            if applied is not None:
+                await upstream.aclose()
+                routed_model = applied
+                running_model = applied
+                try:
+                    upstream = await upstream_send(client, build(applied), stream=True)
+                except UpstreamFailure as exc:
+                    await record(
+                        session_id,
+                        model_requested,
+                        model_requested,
+                        Usage(None, None, None, None),
+                        started,
+                        502,
+                        decision,
+                        getattr(request.state, "project", None),
+                        failure_stage=exc.stage,
+                        failure_type=exc.failure_type,
+                    )
+                    advance(session_id, model_requested, decision, model_requested)
+                    return _upstream_failure_response()
                 if remember_limit is not None:
                     remember_limit(running_model, upstream)
         return StreamingResponse(

@@ -220,6 +220,32 @@ async def test_a_valid_key_reaches_an_allowed_model(
         keys.close()
 
 
+async def test_a_capitalised_authorization_header_is_found(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    """Header names are case-insensitive on every real server.
+
+    Clients and SDKs write ``Authorization``; only the test transport used to
+    preserve that spelling into an ASGI scope without the lower-casing a real
+    server performs.  This request must authenticate exactly like the lowercase
+    spelling the rest of the suite uses.
+    """
+    keys = KeyStore(":memory:")
+    try:
+        _, token = keys.issue(label="alice", models=[ALLOWED])
+        app = build_app(upstream, store, sheet, keys)
+        async with as_client(app) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                content=body_of(ALLOWED),
+                headers={**JSON_HEADERS, "Authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 200
+        assert store.last["model_requested"] == ALLOWED
+    finally:
+        keys.close()
+
+
 async def test_a_restricted_key_is_refused_a_model_it_does_not_list(
     upstream: FastAPI, store: FakeStore, sheet: PriceSheet
 ) -> None:
@@ -307,6 +333,38 @@ async def test_a_passthrough_request_without_a_model_is_not_gated(
         async with as_client(app) as client:
             response = await client.get("/v1/models", headers=auth(token))
         assert response.status_code == 200
+    finally:
+        keys.close()
+
+
+async def test_the_gateways_credential_is_not_relayed_on_the_passthrough_route(
+    upstream: FastAPI, store: FakeStore, sheet: PriceSheet
+) -> None:
+    """The caller authenticated to *tamias*; the upstream is not its audience.
+
+    With no provider catalogue the relay keeps the client's own headers, which
+    is what makes a loopback ``--upstream`` setup work -- but a header tamias
+    itself accepted as a credential is not the client's to spend upstream.
+    """
+    seen: list[dict[str, str]] = []
+
+    @upstream.middleware("http")
+    async def capture(request: Request, call_next: Any) -> Response:  # noqa: ANN001
+        seen.append(dict(request.headers))
+        return await call_next(request)
+
+    keys = KeyStore(":memory:")
+    try:
+        _, token = keys.issue(label="alice")
+        app = build_app(upstream, store, sheet, keys)
+        async with as_client(app) as client:
+            response = await client.post(
+                "/v1/embeddings",
+                content=json.dumps({"model": ALLOWED, "input": "hi"}).encode(),
+                headers=auth(token),
+            )
+        assert response.status_code == 200
+        assert "authorization" not in seen[-1]
     finally:
         keys.close()
 

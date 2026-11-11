@@ -84,8 +84,17 @@ class SessionState:
 
     Holds no conversation content: only the session identity, how many
     requests have been seen, and the model currently in use.
+
+    ``last_switch_index`` is the ``request_index`` of the last request whose
+    routing was actually *applied* -- the one that moved the conversation off
+    the model the caller named.  It is what makes ``min_gap`` mean "requests
+    since the last switch" rather than "requests since the session started":
+    without it a long conversation that keeps coming back to the requested
+    model (every planning turn does) switches again the moment one easy tool
+    arrives, rebuilding the prompt cache on every step.
     """
 
     session_id: str
     request_index: int
     current_model: str
+    last_switch_index: int | None = None

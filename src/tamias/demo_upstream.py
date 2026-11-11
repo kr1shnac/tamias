@@ -145,12 +145,22 @@ def create_mock_upstream() -> FastAPI:
 
 
 def asgi_scope(request: httpx.Request) -> dict[str, Any]:
+    """The ASGI scope a real server would hand the app for this request.
+
+    Header names are lower-cased here because the ASGI spec requires it and
+    Starlette matches them byte-for-byte.  ``httpx`` preserves whatever case the
+    caller wrote, so passing ``request.headers.raw`` through unchanged produced
+    scopes no real server ever produces: a client sending ``Authorization`` (the
+    case the OpenAI SDK, curl and browsers all use) became unfindable, and every
+    piece of header handling was then tested only against the lowercase spelling
+    the test suite happens to use.
+    """
     return {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.0"},
         "http_version": "1.1",
         "method": request.method,
-        "headers": list(request.headers.raw),
+        "headers": [(key.lower(), value) for key, value in request.headers.raw],
         "scheme": request.url.scheme,
         "path": request.url.path,
         "raw_path": request.url.raw_path.split(b"?")[0],

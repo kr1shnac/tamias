@@ -26,6 +26,7 @@ none.
 
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
 import threading
@@ -83,6 +84,14 @@ QUOTA_RESET_HEADERS = (
 #: answered since the window started has told us nothing new.
 QUOTA_TTL_SECONDS = 600.0
 
+#: The longest cooldown any one provider hint may impose.  A provider is free to
+#: ask for a day off; it is not free to park a model for a century because it
+#: sent a malformed or epoch-valued ``Retry-After``.  Without this clamp one
+#: header -- ``Wed, 01 Jan 2099`` is a real shape, from a clock skewed backwards
+#: or a proxy that echoes an absolute date -- removed a model from routing for
+#: 72 years, persistently, with no operator-visible way back.
+MAX_COOLDOWN_SECONDS = 86_400
+
 
 @dataclass(frozen=True)
 class Quota:
@@ -103,9 +112,16 @@ def _first_int(headers: Mapping[str, str], names: Iterable[str]) -> int | None:
         if not text:
             continue
         try:
-            return int(float(text))
+            number = float(text)
         except ValueError:
             continue
+        # ``inf``, ``nan`` and ``1e999`` are all valid floats and all invalid
+        # counts.  ``int()`` raises OverflowError on a non-finite float, which is
+        # not a ValueError, so catching only the latter let one malformed quota
+        # header turn a *successful* upstream response into a 500.
+        if not math.isfinite(number):
+            continue
+        return int(number)
     return None
 
 
@@ -144,7 +160,7 @@ def _first_seconds(headers: Mapping[str, str], names: Iterable[str]) -> float | 
             seconds = _duration_seconds(text)
         if seconds is None:
             seconds = parse_retry_after(text)
-        if seconds is None:
+        if seconds is None or not math.isfinite(seconds):
             continue
         return max(0.0, seconds)
     return None
@@ -208,6 +224,10 @@ def parse_retry_after(value: str | None, now: float | None = None) -> float | No
     RFC 9110 allows both forms: delta-seconds (``120``) and an HTTP-date
     (``Wed, 21 Oct 2015 07:28:00 GMT``).  Providers in the wild send both, and
     more than one sends a date where a number was expected.
+
+    The result is clamped to :data:`MAX_COOLDOWN_SECONDS`.  A date form is
+    computed from *this* clock against a clock tamias does not control, so a
+    skewed or hostile value is otherwise a permanent lockout rather than a hint.
     """
     if not isinstance(value, str):
         return None
@@ -216,6 +236,10 @@ def parse_retry_after(value: str | None, now: float | None = None) -> float | No
         return None
     try:
         seconds = float(text)
+        # A negative delta-seconds is nonsense the provider should not have
+        # sent, not "retry now".
+        if seconds < 0 or seconds != seconds:  # NaN guard
+            return None
     except ValueError:
         try:
             when = parsedate_to_datetime(text)
@@ -224,10 +248,14 @@ def parse_retry_after(value: str | None, now: float | None = None) -> float | No
         if when is None:
             return None
         current = time.time() if now is None else now
-        return max(0.0, when.timestamp() - current)
-    if seconds < 0 or seconds != seconds:  # NaN guard
-        return None
-    return seconds
+        # A date in the past means "retry now", so this side clamps at zero.
+        seconds = max(0.0, when.timestamp() - current)
+    # Both forms are clamped at the top: a date is computed against a clock
+    # tamias does not control, and an infinity or an epoch-valued number is a
+    # skewed clock, not a request to stop routing for a century.
+    if not math.isfinite(seconds):
+        seconds = MAX_COOLDOWN_SECONDS
+    return min(seconds, MAX_COOLDOWN_SECONDS)
 
 
 class LimitLedger:
@@ -367,7 +395,11 @@ CREATE TABLE IF NOT EXISTS {_QUOTA_TABLE} (
             else:
                 ladder = BACKOFF_SECONDS[min(strikes - 1, len(BACKOFF_SECONDS) - 1)]
                 if retry_after is not None and retry_after > 0:
-                    seconds = max(ladder, retry_after)
+                    # Clamped here as well as in ``parse_retry_after``: a caller
+                    # that hands ``record`` a raw number must not be able to
+                    # park a model for longer than the ceiling, whatever the
+                    # header said.
+                    seconds = max(ladder, min(retry_after, MAX_COOLDOWN_SECONDS))
                 else:
                     seconds = ladder
             until = current + seconds

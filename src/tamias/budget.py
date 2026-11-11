@@ -78,6 +78,7 @@ connection keeps a single writer.
 from __future__ import annotations
 
 import contextvars
+import logging
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -87,6 +88,8 @@ from threading import Lock
 from typing import Any
 
 from tamias.types import CostBreakdown, Usage
+
+logger = logging.getLogger("tamias.budget")
 
 __all__ = [
     "DEFAULT_REQUEST_CEILING_USD",
@@ -599,11 +602,32 @@ class BudgetedLog:
         self._ledger = ledger
 
     def log_request(self, *args: Any, **kwargs: Any) -> int:
-        rowid = self._log.log_request(*args, **kwargs)
-        key_id = CURRENT_KEY_ID.get()
-        if key_id is not None:
-            usd, model, tokens = _measurement(args, kwargs)
-            self._ledger.settle(key_id, usd=usd, model=model, tokens=tokens)
+        """Log the row, then settle the reservation it resolves.
+
+        Settlement runs even when the log write fails.  A disk that filled
+        halfway through a request must not also leave that request's ceiling
+        held against the key for the whole reservation TTL, so the settle is in
+        a ``finally`` rather than behind a successful write.
+        """
+        try:
+            rowid = self._log.log_request(*args, **kwargs)
+        except Exception:
+            logger.exception(
+                "request log write failed; the row is lost and the response stands"
+            )
+            rowid = 0
+        finally:
+            key_id = CURRENT_KEY_ID.get()
+            if key_id is not None:
+                try:
+                    usd, model, tokens = _measurement(args, kwargs)
+                    self._ledger.settle(key_id, usd=usd, model=model, tokens=tokens)
+                except Exception:
+                    logger.exception(
+                        "budget settlement failed for key %s; the reservation "
+                        "expires on its own TTL",
+                        key_id,
+                    )
         return rowid
 
     def __getattr__(self, name: str) -> Any:

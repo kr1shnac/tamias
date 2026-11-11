@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
@@ -17,13 +18,15 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from tamias import pricing, session
+from tamias import pricing, router, session
 from tamias import providers as providers_mod
 from tamias import sse as sse_module
 from tamias.pricing import PriceSheet
 from tamias.types import CostBreakdown, Decision, Usage
 from tamias.upstream import STREAM, UpstreamFailure, classify_http_error
 from tamias.upstream import send as upstream_send
+
+logger = logging.getLogger("tamias.responses")
 
 RESPONSES_PATH = "/v1/responses"
 SESSION_HEADER = session.SESSION_HEADER
@@ -50,7 +53,12 @@ HOP_BY_HOP = frozenset(
 # fails the read, which surfaces as a connection error rather than a 502.
 DECODED_BODY_HEADERS = frozenset({"content-encoding"})
 PROJECT_HEADER = "x-tamias-project"
-DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"accept-encoding", PROJECT_HEADER, SESSION_HEADER}
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {
+    "accept-encoding",
+    PROJECT_HEADER,
+    SESSION_HEADER,
+    router.PIN_HEADER,
+}
 
 
 class RequestLog(Protocol):
@@ -91,11 +99,27 @@ def usage_from_responses(raw: Any) -> Usage:
 
 
 def forward_headers(request: Request) -> dict[str, str]:
-    return {
+    """Copy end-to-end request headers, minus tamias's own and its credential.
+
+    ``Authorization`` is dropped when tamias itself authenticated the request:
+    the shared token or the company key belongs to this gateway, not to the
+    upstream it relays to.  An unauthenticated loopback relay keeps it.
+    """
+    headers = {
         key: value
         for key, value in request.headers.items()
         if key.lower() not in DROPPED_REQUEST_HEADERS
     }
+    state = getattr(request, "state", None)
+    key = getattr(state, "key", None) if state is not None else None
+    key_id = getattr(key, "key_id", None) if key is not None else None
+    if (
+        (state is not None and getattr(state, "identity", None) is not None)
+        or (isinstance(key_id, str) and key_id.startswith("vk-"))
+    ):
+        headers.pop("authorization", None)
+        headers.pop("Authorization", None)
+    return headers
 
 
 def forward_response_headers(headers: httpx.Headers) -> dict[str, str]:
@@ -158,11 +182,17 @@ def register_routes(
     store: RequestLog,
     sheet: PriceSheet,
     *,
+    router_mode: str = "shadow",
     transport: httpx.AsyncBaseTransport | None = None,
     session_salt: bytes | None = None,
     authorize: Callable[[Request, object], Response | None] | None = None,
 ) -> FastAPI:
-    """Add the meter-only ``POST /v1/responses`` route to ``app``."""
+    """Add the meter-only ``POST /v1/responses`` route to ``app``.
+
+    ``router_mode`` is recorded with each row so a report can tell a shadow
+    gateway's booking from an active one's, even though this route never
+    rewrites the model it is given.
+    """
     base = upstream_url.rstrip("/")
     session_salt = session_salt or getattr(store, "session_salt", None)
     client = getattr(app.state, "upstream_client", None)
@@ -206,6 +236,7 @@ def register_routes(
             failure_stage=failure_stage,
             failure_type=failure_type,
             route="responses",
+            router_mode=router_mode,
         )
 
     async def record(
@@ -225,20 +256,34 @@ def register_routes(
         The append is a synchronous SQLite commit -- an fsync -- and it runs on
         a worker thread so metering one request cannot stall every other
         in-flight stream.
+
+        A failed write never fails the request: the upstream has already been
+        paid by the time this runs, so a full disk must not discard a response
+        the caller cannot otherwise see.  The row is lost and logged instead.
         """
-        await asyncio.to_thread(
-            _log_request,
-            session_id,
-            model_requested,
-            model_used,
-            usage,
-            started,
-            status,
-            generation_id,
-            project,
-            failure_stage,
-            failure_type,
-        )
+        try:
+            await asyncio.to_thread(
+                _log_request,
+                session_id,
+                model_requested,
+                model_used,
+                usage,
+                started,
+                status,
+                generation_id,
+                project,
+                failure_stage,
+                failure_type,
+            )
+        except Exception:
+            logger.exception(
+                "request log write failed; the row is lost and the response stands "
+                "(session=%s requested=%s used=%s status=%s)",
+                session_id,
+                model_requested,
+                model_used,
+                status,
+            )
 
     async def stream_response(
         upstream: httpx.Response,

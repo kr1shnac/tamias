@@ -688,3 +688,19 @@ def test_prune_keeps_only_the_newest_rows(store: Store) -> None:
 
     assert result == {"deleted": 3, "remaining": 2}
     assert len(store.rows()) == 2
+
+
+def test_prune_deletes_more_rows_than_one_statement_can_bind(store: Store) -> None:
+    """A large log must not make prune fail on SQLite's variable limit.
+
+    The limit is lowered here so the regression is visible on every build, not
+    only the ones with the historical 999-variable cap.
+    """
+    for index in range(1200):
+        log(store, ts=f"2026-10-04T12:00:00.{index:04d}Z")
+    store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 400)
+
+    result = store.prune(keep_rows=1)
+
+    assert result == {"deleted": 1199, "remaining": 1}
+    assert len(store.rows()) == 1

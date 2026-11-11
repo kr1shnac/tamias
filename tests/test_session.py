@@ -249,7 +249,10 @@ def test_session_record_projects_the_state_the_router_reads() -> None:
     )
 
     assert record.as_session_state() == proxy.SessionState(
-        session_id="s1", request_index=4, current_model="gpt-cheap"
+        session_id="s1",
+        request_index=4,
+        current_model="gpt-cheap",
+        last_switch_index=2,
     )
 
 

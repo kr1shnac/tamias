@@ -13,14 +13,17 @@ import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tamias.budget import (
+    CURRENT_KEY_ID,
     DEFAULT_RESERVATION_TTL_SECONDS,
     RATE_WINDOW_SECONDS,
+    BudgetedLog,
     BudgetError,
     BudgetLedger,
     Limits,
@@ -30,6 +33,7 @@ from tamias.budget import (
     to_micros,
 )
 from tamias.keys import KeysError, KeyStore
+from tamias.types import CostBreakdown, Usage
 
 NOW = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
 CEILING = Decimal("0.25")
@@ -373,3 +377,46 @@ def test_a_budget_reads_back_from_the_key_store(store: KeyStore) -> None:
     assert reread.model_caps == (("m", Decimal("1.00")),)
     assert reread.limited
     assert reread.limits.model_cap("m") == Decimal("1.00")
+
+
+def test_a_failed_request_log_still_settles_the_reservation() -> None:
+    """A full disk must not also pin the request's ceiling to the key's budget.
+
+    The row is lost, but the money the request actually spent is recorded and
+    the reservation released -- otherwise a logged failure would keep holding
+    the ceiling for the whole TTL and refuse the next legitimate request.
+    """
+    settled: list[tuple[str, Decimal | None, str, int | None]] = []
+
+    class RecordingLedger:
+        def settle(
+            self,
+            key_id: str,
+            *,
+            usd: Decimal | None,
+            model: str | None = None,
+            tokens: int | None = None,
+        ) -> bool:
+            settled.append((key_id, usd, model or "", tokens))
+            return True
+
+    class BrokenLog:
+        def log_request(self, *args: Any, **kwargs: Any) -> int:
+            raise sqlite3.OperationalError("database or disk is full")
+
+    log = BudgetedLog(BrokenLog(), RecordingLedger())
+    token = CURRENT_KEY_ID.set("vk-alice")
+    try:
+        rowid = log.log_request(
+            "2026-10-15T12:00:00.000+00:00",
+            "s1",
+            "m-strong",
+            "m-strong",
+            Usage(10, 5, None, None),
+            CostBreakdown(usd=0.25, formula="10*1 + 5*2", price_sheet_date="2026-10-15"),
+        )
+    finally:
+        CURRENT_KEY_ID.reset(token)
+
+    assert rowid == 0, "a lost row is reported as no row id"
+    assert settled == [("vk-alice", Decimal("0.25"), "m-strong", 15)]

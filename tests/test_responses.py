@@ -212,6 +212,7 @@ def test_forward_headers_drop_session_project_and_accept_encoding() -> None:
             "accept-encoding": "gzip",
             session.SESSION_HEADER: "sess-42",
             "x-tamias-project": "proj",
+            "x-tamias-pin": "1",
         },
     )
 
@@ -221,6 +222,7 @@ def test_forward_headers_drop_session_project_and_accept_encoding() -> None:
     assert "accept-encoding" not in forwarded
     assert session.SESSION_HEADER not in forwarded
     assert "x-tamias-project" not in forwarded
+    assert "x-tamias-pin" not in forwarded
 
 
 async def test_stream_relays_bytes_in_order_and_uses_response_completed(
