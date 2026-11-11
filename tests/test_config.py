@@ -305,6 +305,9 @@ def test_serve_with_an_upstream_ignores_the_default_provider_catalogue(
         tmp_path / "prices.toml", 'date = "2026-10-06"\n[model]\ninput=1\noutput=1\n'
     )
     monkeypatch.setenv("HOME", str(home))
+    # ``Path.home()`` reads USERPROFILE on Windows and HOME elsewhere; set both
+    # so the test reaches the same implicit catalogue on every CI platform.
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("TAMIAS_PROVIDERS", raising=False)
     monkeypatch.setenv(CONFIG_ENV_VAR, str(tmp_path / "absent.toml"))
 
