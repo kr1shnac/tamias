@@ -3,7 +3,7 @@
 Every command runs as `tamias <command>`. `tamias --help` lists them:
 
 ```text
-{prices,serve,run,demo,reconcile,report,agent-config,opencode,service,registry,doctor,prune,admin,config}
+{prices,serve,run,demo,reconcile,report,agent-config,opencode,service,registry,doctor,prune,limits,admin,config}
 ```
 
 | Command | Purpose |
@@ -21,6 +21,7 @@ Every command runs as `tamias <command>`. `tamias --help` lists them:
 | `service uninstall` | Stop and remove the unit tamias wrote. |
 | `doctor` | Check local tamias readiness. |
 | `prune` | Delete old rows from the request log. |
+| `limits` | List or clear remembered provider cooldowns. |
 | `admin` | Manage company keys and signed project manifests. |
 | `prices fetch` | Fetch an OpenRouter model price sheet. |
 | `prices set` | Write one model's rates into the hand-written overlay beside a sheet. |
@@ -390,6 +391,23 @@ INCOMPLETE or `ZERO_ROWS` (missing number, nothing comparable, or empty window),
 `1` runtime failure (reason on stderr). See
 [`docs/RECONCILE.md`](RECONCILE.md) for the full contract and artifact columns.
 
+## `tamias limits`
+
+```text
+tamias limits [--db PATH] [--limits PATH] [--clear MODEL | --clear-all]
+```
+
+Shows the provider cooldowns still in force: model, provider, refusing status,
+remaining time, strike count and the coded reason. `--limits` defaults to
+`limits.db` beside `--db`, the same file `tamias serve` uses. Neither the ledger
+nor the log is created by a read when it does not exist.
+
+`--clear MODEL` forgets every provider's lockout for that model; `--clear-all`
+forgets the whole ledger. Use it after fixing the cause — a rotated credential, a
+provider that has recovered — instead of waiting out the cooldown or deleting
+the database by hand. The gateway also publishes the same view at `GET /limits`
+(authenticated, like every other admin read).
+
 ## `tamias doctor`
 
 ```text
@@ -404,6 +422,12 @@ contract: `0` = ready, `1` = a blocking problem.**
 - `WARN` lines — a stale or missing price sheet, a missing `OPENROUTER_API_KEY`,
   an unreachable upstream — do **not**. A WARN-only run still exits `0`, so it
   is safe to chain with `&&`.
+- A model with incomplete input/output rates gets a `WARN Price sheet models`
+  line: its requests can only price as UNKNOWN. A model without
+  `cached_input`/`cache_write` gets a `WARN Price sheet cache` line: a provider
+  report that includes cached or cache-write tokens prices as UNKNOWN for that
+  model. Both are warnings, because the sheet is still valid for requests that
+  do not carry those counts.
 - `--online` additionally checks upstream reachability (a `WARN` if unreachable).
 
 ## Other exit codes

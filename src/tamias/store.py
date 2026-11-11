@@ -37,6 +37,7 @@ from tamias.types import CostBreakdown, Decision, Usage
 
 __all__ = [
     "Store",
+    "StoreError",
     "COLUMNS",
     "sanitize_generation_id",
     "sanitize_project",
@@ -255,6 +256,15 @@ def apply_ledger_pragmas(conn: sqlite3.Connection) -> None:
             return
 
 
+class StoreError(ValueError):
+    """The request log could not be opened, created or initialised.
+
+    A ``ValueError`` on purpose: every CLI entry point already treats a bad
+    input as a clean exit 1/2, so an unusable database path reports one line
+    instead of a traceback from deep inside :mod:`sqlite3`.
+    """
+
+
 class Store:
     """Append-only request log backed by a local SQLite file.
 
@@ -265,18 +275,32 @@ class Store:
 
     def __init__(self, db_path: str | Path) -> None:
         self._path = Path(db_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StoreError(
+                f"cannot create the request log directory {self._path.parent}: {exc}"
+            ) from exc
         target = db_path if str(db_path) == ":memory:" else self._path
-        self._conn = sqlite3.connect(target, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        apply_ledger_pragmas(self._conn)
+        try:
+            self._conn = sqlite3.connect(target, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            apply_ledger_pragmas(self._conn)
+        except sqlite3.Error as exc:
+            raise StoreError(f"cannot open the request log {self._path}: {exc}") from exc
         self._lock = threading.Lock()
-        with self._lock:
-            self._conn.executescript(_CREATE_TABLE)
-            self._migrate()
-            self._session_salt = self._ensure_session_salt()
-            self._migrate_legacy_sessions()
-            self._conn.commit()
+        try:
+            with self._lock:
+                self._conn.executescript(_CREATE_TABLE)
+                self._migrate()
+                self._session_salt = self._ensure_session_salt()
+                self._migrate_legacy_sessions()
+                self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.close()
+            raise StoreError(
+                f"cannot initialise the request log {self._path}: {exc}"
+            ) from exc
         if target != ":memory:":
             # The log holds per-session metering; keep it private to this user.
             # SQLite creates -wal/-shm/-journal sidecars with the same mode as

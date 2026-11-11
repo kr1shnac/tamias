@@ -23,6 +23,7 @@ from tamias.store import (  # noqa: E402
     GENERATION_ID_MAX_CHARS,
     ROUTE_VALUES,
     Store,
+    StoreError,
     sanitize_effort,
     sanitize_route,
 )
@@ -658,6 +659,24 @@ def test_store_persists_salt_and_migrates_legacy_session_values(tmp_path: Path) 
 def test_prune_requires_a_policy(store: Store) -> None:
     with pytest.raises(ValueError, match="keep_days and/or keep_rows"):
         store.prune()
+
+
+def test_an_unusable_database_path_is_a_clear_store_error(tmp_path: Path) -> None:
+    """A path under a regular file must not surface as a sqlite traceback."""
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+
+    with pytest.raises(StoreError, match="request log directory"):
+        Store(blocker / "requests.db")
+
+
+def test_a_file_that_is_not_a_database_is_a_clear_store_error(tmp_path: Path) -> None:
+    """A corrupt log is reported as the log's problem, not an internal error."""
+    corrupt = tmp_path / "requests.db"
+    corrupt.write_bytes(b"this is not sqlite")
+
+    with pytest.raises(StoreError, match="initialise the request log"):
+        Store(corrupt)
 
 
 def test_prune_deletes_rows_older_than_keep_days(store: Store) -> None:

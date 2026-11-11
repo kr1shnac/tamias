@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 
 import httpx
 import pytest
@@ -254,3 +255,32 @@ def test_the_default_discovery_mode_still_takes_everything(tmp_path):
     )
 
     assert [model.id for model in report.found["openrouter"]] == ["new-a", "new-b"]
+
+
+def test_providers_are_discovered_concurrently(tmp_path) -> None:
+    """One slow provider must not add its timeout to every other provider's.
+
+    Both handlers wait for the other to start; sequential discovery would time
+    the barrier out, so this fails unless the requests overlap.
+    """
+    barrier = threading.Barrier(2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        barrier.wait(timeout=2)
+        return httpx.Response(200, json={"data": [{"id": request.url.host}]})
+
+    first = Provider(name="first", base_url="https://first.invalid", key_source="env:A")
+    second = Provider(name="second", base_url="https://second.invalid", key_source="env:A")
+    catalogue = ProviderCatalogue(
+        providers={first.name: first, second.name: second},
+        credentials={first.name: Credential("a"), second.name: Credential("b")},
+    )
+
+    report = discover(
+        catalogue,
+        cache_path=tmp_path / "cache.json",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert set(report.found) == {"first", "second"}
+    assert report.failed == {}

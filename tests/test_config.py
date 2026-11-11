@@ -334,6 +334,40 @@ def test_serve_with_an_upstream_ignores_the_default_provider_catalogue(
     assert "providers.toml" in err
 
 
+def test_serve_persists_cooldowns_even_with_a_single_upstream(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """An explicit --upstream is not a reason to ignore the limits ledger.
+
+    A single-upstream gateway can still fail over across models in its
+    registry, and a restart must not forget a provider's lockout.
+    """
+    sheet = _write(tmp_path / "prices.toml", 'date = "2026-10-06"\n[model]\ninput=1\noutput=1\n')
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(app=app))
+
+    code = cli.main(
+        [
+            "serve",
+            "--upstream",
+            "http://upstream.invalid",
+            "--prices",
+            str(sheet),
+            "--db",
+            str(tmp_path / "requests.db"),
+        ]
+    )
+
+    assert code == 0
+    app = captured["app"]
+    try:
+        assert (tmp_path / "limits.db").exists()
+    finally:
+        app.state.limits.close()
+        app.state.store.close()
+    assert "shadow mode" in capsys.readouterr().err
+
+
 def _serve_args(tmp_path: Path, sheet: Path, *extra: str) -> list[str]:
     return [
         "serve",

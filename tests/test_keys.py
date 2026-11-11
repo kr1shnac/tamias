@@ -183,3 +183,20 @@ def test_the_store_creates_missing_parent_directories(tmp_path: Path) -> None:
         assert path.exists()
     finally:
         store.close()
+
+
+def test_an_unusable_key_store_path_is_a_clear_keys_error(tmp_path: Path) -> None:
+    """The gateway needs one clean line, not a sqlite traceback, at startup."""
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+
+    with pytest.raises(KeysError, match="key store directory"):
+        KeyStore(blocker / "keys.db")
+
+
+def test_a_file_that_is_not_a_key_store_is_a_clear_keys_error(tmp_path: Path) -> None:
+    corrupt = tmp_path / "keys.db"
+    corrupt.write_bytes(b"this is not sqlite")
+
+    with pytest.raises(KeysError, match="initialise the key store"):
+        KeyStore(corrupt)

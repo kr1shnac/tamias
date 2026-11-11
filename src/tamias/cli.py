@@ -57,7 +57,7 @@ from tamias.config import (
 )
 from tamias.effort import EFFORT_MODES
 from tamias.keys import KeysError, KeyStore
-from tamias.limits import ledger_for
+from tamias.limits import LimitLedger, ledger_for
 from tamias.pricing import (
     PriceSheet,
     assume_cache_warm,
@@ -1401,7 +1401,10 @@ def serve(args: argparse.Namespace) -> int:
     limits_path = getattr(args, "limits", None)
     if limits_path is None and args.db != ":memory:":
         limits_path = str(Path(args.db).expanduser().parent / "limits.db")
-    limit_ledger = ledger_for(limits_path) if len(catalogue) else None
+    # Persist cooldowns even in single-upstream mode: a --limits file the
+    # operator named must not be silently ignored just because no provider
+    # catalogue was configured.
+    limit_ledger = ledger_for(limits_path)
 
     # A wider bind needs *some* authentication.  Company keys count: requiring
     # the shared --auth-token here would force every deployment beyond loopback
@@ -2785,6 +2788,69 @@ def _fmt_bytes(size: int | None) -> str:
     return f"{size} bytes"
 
 
+def _seconds_label(seconds: float) -> str:
+    """``3700`` -> ``1h 01m``; a cooldown is read, not parsed."""
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def limits_command(args: argparse.Namespace) -> int:
+    """Show, or forget, the provider cooldowns that are still in force.
+
+    The gateway persists a lockout so a restart cannot forget it; that also
+    means a bad run (or a provider's clock-skewed ``Retry-After``) can keep a
+    model off routing until the cooldown expires.  This is the operator's way
+    to see why a model is not being chosen, and to clear it once the provider
+    has been fixed.
+    """
+    db = Path(args.db).expanduser()
+    path = (
+        Path(args.limits).expanduser()
+        if args.limits
+        else db.parent / "limits.db"
+    )
+    if not path.exists():
+        print(f"tamias limits: no lockouts ({path} does not exist)")
+        return 0
+
+    ledger = LimitLedger(path)
+    try:
+        active = ledger.active()
+        if args.clear is not None or args.clear_all:
+            targets = (
+                active
+                if args.clear_all
+                else tuple(limit for limit in active if limit.model == args.clear)
+            )
+            removed = sum(ledger.clear(limit.provider, limit.model) for limit in targets)
+            print(f"tamias limits: cleared {removed} lockout(s) from {path}")
+            if not removed:
+                print(f"tamias limits: no lockout matched {args.clear!r}")
+            active = ledger.active()
+        if not active:
+            print("tamias limits: no active lockouts")
+            return 0
+        print(
+            f"{'MODEL':<32} {'PROVIDER':<14} {'STATUS':<7} "
+            f"{'REMAINING':<10} {'STRIKES':<8} REASON"
+        )
+        for limit in active:
+            print(
+                f"{limit.model:<32} {(limit.provider or '-'):<14} "
+                f"{limit.status:<7} {_seconds_label(limit.remaining()):<10} "
+                f"{limit.strikes:<8} {limit.reason}"
+            )
+        return 0
+    finally:
+        ledger.close()
+
+
 def prune(args: argparse.Namespace) -> int:
     """Delete old rows from a request log; ``--dry-run`` only reports."""
     store = Store(args.db)
@@ -2840,6 +2906,23 @@ def doctor(
             print(f"WARN Price sheet: {prices} ({age.days} days old)")
         else:
             print(f"OK Price sheet: {prices} ({age.days} days old)")
+        unpriced = [model for model in sheet.models if not can_price(model, sheet)]
+        cache_gaps = [
+            model
+            for model, price in sheet.models.items()
+            if can_price(model, sheet)
+            and (price.cached_input is None or price.cache_write is None)
+        ]
+        if unpriced:
+            print(
+                f"WARN Price sheet models: {len(unpriced)} of {len(sheet.models)} "
+                "lack complete input/output rates; their requests price UNKNOWN"
+            )
+        if cache_gaps:
+            print(
+                f"WARN Price sheet cache: {len(cache_gaps)} of {len(sheet.models)} "
+                "lack cached_input/cache_write; a cache-token report prices UNKNOWN"
+            )
     except (OSError, ValueError) as exc:
         if not explicit:
             # No sheet was named, and this is a fresh checkout/install: the
@@ -3798,6 +3881,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print what would be deleted without deleting"
     )
 
+    limits_parser = sub.add_parser(
+        "limits", help="list or clear remembered provider cooldowns"
+    )
+    limits_parser.add_argument(
+        "--db", default="requests.db", help="path to the proxy sqlite log"
+    )
+    limits_parser.add_argument(
+        "--limits",
+        default=None,
+        help="cooldown ledger (default: limits.db beside --db)",
+    )
+    forget = limits_parser.add_mutually_exclusive_group()
+    forget.add_argument(
+        "--clear",
+        metavar="MODEL",
+        default=None,
+        help="forget every provider's lockout for this model",
+    )
+    forget.add_argument(
+        "--clear-all",
+        action="store_true",
+        help="forget every lockout in the ledger",
+    )
+
     admin_parser = sub.add_parser(
         "admin", help="manage company keys and signed project manifests"
     )
@@ -4454,11 +4561,25 @@ def main(argv: list[str] | None = None) -> int:
             explicit=_flag_given(args, "--prices"),
         )
     if args.command == "prune":
-        return prune(args)
+        try:
+            return prune(args)
+        except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+            print(f"tamias prune: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "limits":
+        try:
+            return limits_command(args)
+        except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+            print(f"tamias limits: {exc}", file=sys.stderr)
+            return 1
     if args.command == "config":
         return config_command(args)
     if args.command == "demo":
-        return demo_command(args)
+        try:
+            return demo_command(args)
+        except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+            print(f"tamias demo: {exc}", file=sys.stderr)
+            return 1
     if args.command == "reconcile":
         try:
             return reconcile_command(args)

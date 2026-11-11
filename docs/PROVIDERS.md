@@ -151,9 +151,11 @@ At start-up tamias reads each configured provider's `/v1/models` (trying
 always win, so a pinned `quality`, a corrected context window or a deliberate
 `tools = false` is never overwritten by provider metadata.
 
-New models therefore appear without editing config. `--no-discover` skips the
-fetch and uses the cache/registry as they are. Set `TAMIAS_MODELS_CACHE` to
-move the cache file.
+New models therefore appear without editing config. Providers are queried
+concurrently at start-up, so the slowest provider — not the sum of every
+provider's timeouts — bounds how long the port takes to bind. `--no-discover`
+skips the fetch and uses the cache/registry as they are. Set
+`TAMIAS_MODELS_CACHE` to move the cache file.
 
 A `/v1/models` answer is a *catalogue*, not an entitlement list. NVIDIA's public
 list names 85 models while a development key can call 14; the rest answer `404`,

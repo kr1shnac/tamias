@@ -220,12 +220,53 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   in **every** mode, `active` included. The router never sees the request, so
   no quality floor, cache or hysteresis rule can override the caller.
 - It is per-request and local: the header is dropped before the upstream request
-  is sent, like `x-tamias-session`, so a provider never sees it.
+  is sent, like `x-tamias-session`, so a provider never sees it. The pin is
+  honoured on both routes that can route (`/v1/chat/completions` and
+  `/v1/messages`). `/v1/responses` never rewrites a model, so it drops the
+  header and forwards the request unchanged.
 
 A pin is a statement about the step, and only the caller knows about the step.
 It costs money honestly — no saving is claimed for a request that was not
 rewritten, which is exactly what `tamias report` prices by comparing the
 requested and used models.
+
+## What the response advertises
+
+Both routed routes (`/v1/chat/completions` and `/v1/messages`) publish the
+gateway's own view of the request as response headers:
+
+| Header                   | Example                        | Meaning                                       |
+| ------------------------ | ------------------------------ | --------------------------------------------- |
+| `x-tamias-router-mode`   | `active`                       | the mode in force for this request            |
+| `x-tamias-decision`      | `SWITCH` / `STAY`              | what the router decided                       |
+| `x-tamias-model-requested` | `deepseek/deepseek-v4.1-flash` | the model the client named                    |
+| `x-tamias-model-used`    | `qwen/qwen3-coder-30b`         | the model that actually ran                   |
+| `x-tamias-reason`        | `easy tool: read`              | the router's own reason, the one the log carries |
+
+```sh
+curl -i http://127.0.0.1:8000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model": "...", "messages": [...]}'
+```
+
+They exist because the response body cannot carry this: the upstream only ever
+sees the rewritten model, so *what ran* is knowledge the gateway holds alone. A
+client that wants to show the switch — an agent UI does — reads it here, before
+the first streamed byte, since the headers are written with the response head.
+
+Read them with the mode beside them:
+
+- `active` — a `SWITCH` really rewrote the request, and `model-used` is the model
+  the provider answered on.
+- `shadow` — the decision was **recorded, not applied**: the upstream ran the
+  requested model, so `model-used` equals `model-requested` on every row.
+- `off` — no decision was computed; the reason says `router disabled`.
+
+The headers are merged after the upstream's, so a provider (or anything
+pretending to be one) cannot describe tamias' routing with its own
+`x-tamias-*` headers. A request the upstream never served — a refused budget, a
+transport failure — carries no routing headers at all: nothing ran, so there is
+nothing to advertise.
 
 ## TOML configuration
 

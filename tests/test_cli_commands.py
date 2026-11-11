@@ -46,6 +46,77 @@ def test_prune_keeps_the_newest_rows(tmp_path: Path, capsys) -> None:
     assert "would delete 0 rows; 1 remain" in out
 
 
+def test_prune_reports_an_unusable_database_path_without_a_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+
+    code = cli.main(["prune", "--db", str(blocker / "requests.db"), "--keep-rows", "1"])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("tamias prune:")
+    assert "request log directory" in err
+
+
+def test_serve_reports_an_unusable_database_path_without_a_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    sheet = tmp_path / "prices.toml"
+    sheet.write_text('date = "2026-10-06"\n[model]\ninput = 1\noutput = 1\n', encoding="utf-8")
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+
+    code = cli.main(
+        [
+            "serve",
+            "--upstream",
+            "http://upstream.invalid",
+            "--prices",
+            str(sheet),
+            "--db",
+            str(blocker / "requests.db"),
+            "--limits",
+            str(tmp_path / "limits.db"),
+        ]
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("tamias serve:")
+    assert "request log directory" in err
+
+
+def test_limits_lists_and_clears_a_lockout(tmp_path: Path, capsys) -> None:
+    from tamias.limits import LimitLedger
+
+    db = tmp_path / "requests.db"
+    ledger = LimitLedger(tmp_path / "limits.db")
+    try:
+        ledger.record("", "strong", 429, retry_after=600)
+    finally:
+        ledger.close()
+
+    assert cli.main(["limits", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "strong" in out
+    assert "429" in out
+    assert "upstream 429" in out
+
+    assert cli.main(["limits", "--db", str(db), "--clear", "strong"]) == 0
+    out = capsys.readouterr().out
+    assert "cleared 1 lockout(s)" in out
+
+    assert cli.main(["limits", "--db", str(db)]) == 0
+    assert "no active lockouts" in capsys.readouterr().out
+
+
+def test_limits_is_quiet_when_no_ledger_exists(tmp_path: Path, capsys) -> None:
+    assert cli.main(["limits", "--db", str(tmp_path / "requests.db")]) == 0
+    assert "no lockouts" in capsys.readouterr().out
+
+
 def _unused_port() -> int:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))

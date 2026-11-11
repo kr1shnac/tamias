@@ -200,17 +200,29 @@ class KeyStore:
         in_memory = str(db_path) == ":memory:"
         target = db_path if in_memory else Path(db_path)
         if not in_memory:
-            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            try:
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise KeysError(
+                    f"cannot create the key store directory {Path(target).parent}: {exc}"
+                ) from exc
         self._path = None if in_memory else Path(target)
-        self._conn = sqlite3.connect(target, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        apply_ledger_pragmas(self._conn)
+        try:
+            self._conn = sqlite3.connect(target, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            apply_ledger_pragmas(self._conn)
+        except sqlite3.Error as exc:
+            raise KeysError(f"cannot open the key store {target}: {exc}") from exc
         self._lock = Lock()
         self._ledger: BudgetLedger | None = None
-        with self._lock:
-            self._conn.executescript(_CREATE)
-            self._ensure_columns()
-            self._conn.commit()
+        try:
+            with self._lock:
+                self._conn.executescript(_CREATE)
+                self._ensure_columns()
+                self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.close()
+            raise KeysError(f"cannot initialise the key store {target}: {exc}") from exc
         if self._path is not None:
             # The table holds key material, if only as hashes; keep it private.
             try:

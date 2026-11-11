@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -333,29 +334,61 @@ def _listed(provider: Provider, models: list[DiscoveredModel]) -> list[Discovere
     return [found[model_id] for model_id in provider.models]
 
 
+def _discover_provider(
+    provider: Provider,
+    catalogue: ProviderCatalogue,
+    transport: httpx.BaseTransport | None,
+) -> list[DiscoveredModel]:
+    """One provider's ``/models`` answer, with its own credential.
+
+    Runs in a worker thread so one unreachable provider cannot serialise the
+    others' timeouts behind it.
+    """
+    return _listed(
+        provider,
+        fetch_models(
+            provider,
+            credential=catalogue.credential(provider.name),
+            transport=transport,
+        ),
+    )
+
+
 def discover(
     catalogue: ProviderCatalogue,
     *,
     cache_path: Path | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> DiscoveryReport:
-    """Discover every configured provider, falling back to the cache per provider."""
+    """Discover every configured provider, falling back to the cache per provider.
+
+    Providers are queried concurrently.  Discovery still blocks start-up (the
+    routing pool must exist before the first request), but the slowest provider
+    -- not the sum of all of them -- now bounds how late the port binds.
+    """
     cache_file = discovery_cache_path() if cache_path is None else cache_path
     cached = read_cache(cache_file)
     report = DiscoveryReport()
 
-    for provider in catalogue.all():
+    providers = list(catalogue.all())
+    configured = [provider for provider in providers if provider.configured]
+    for provider in providers:
         if not provider.configured:
             report.failed[provider.name] = "no credential"
-            continue
-        models = _listed(
-            provider,
-            fetch_models(
-                provider,
-                credential=catalogue.credential(provider.name),
-                transport=transport,
-            ),
-        )
+
+    if configured:
+        workers = min(8, len(configured))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            answers = list(
+                pool.map(
+                    lambda provider: _discover_provider(provider, catalogue, transport),
+                    configured,
+                )
+            )
+    else:
+        answers = []
+
+    for provider, models in zip(configured, answers, strict=True):
         if models:
             report.found[provider.name] = models
             continue

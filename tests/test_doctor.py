@@ -51,11 +51,64 @@ def test_doctor_reports_offline_checks_with_tmp_paths(tmp_path: Path, capsys, mo
     assert capsys.readouterr().out.splitlines() == [
         f"OK Python: {sys.version_info.major}.{sys.version_info.minor}",
         f"OK Price sheet: {prices} (0 days old)",
+        "WARN Price sheet cache: 1 of 1 lack cached_input/cache_write; "
+        "a cache-token report prices UNKNOWN",
         f"OK DB directory: {tmp_path} writable",
         f"OK DB: {tmp_path / 'requests.db'} not present yet (created on first request)",
         "OK Port: 0 free",
         "WARN OPENROUTER_API_KEY: missing",
     ]
+
+
+def test_doctor_names_a_sheet_that_can_price_cached_tokens(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A fully specified sheet must not carry a cache warning."""
+    prices = tmp_path / "prices.toml"
+    prices.write_text(
+        'date = "2026-10-06"\n'
+        "[example]\ninput = 1\noutput = 1\ncached_input = 0.1\ncache_write = 1.25\n"
+    )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    code = doctor(
+        prices=prices,
+        db=tmp_path / "requests.db",
+        port=0,
+        online=False,
+        upstream="https://example.invalid",
+        today=date(2026, 10, 6),
+        port_checker=lambda _: True,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "WARN Price sheet cache:" not in out
+    assert "WARN Price sheet models:" not in out
+
+
+def test_doctor_warns_when_a_model_has_no_complete_rate(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A model with only one side quoted can never produce a USD."""
+    prices = tmp_path / "prices.toml"
+    prices.write_text('date = "2026-10-06"\n[example]\ninput = 1\n')
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    code = doctor(
+        prices=prices,
+        db=tmp_path / "requests.db",
+        port=0,
+        online=False,
+        upstream="https://example.invalid",
+        today=date(2026, 10, 6),
+        port_checker=lambda _: True,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "WARN Price sheet models: 1 of 1" in out
+    assert "price UNKNOWN" in out
 
 
 def test_doctor_warns_for_stale_prices_and_checks_online_with_injected_opener(

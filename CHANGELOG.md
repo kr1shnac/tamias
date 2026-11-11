@@ -151,6 +151,32 @@ describing an arithmetic estimate as a realised saving.
   describe the same path.
 - `_opencode_serve_command` emitted `--cheap-model <free-model>` unquoted, where
   the shell would read `<free-model>` as a redirect.
+- **`tamias limits` shows and clears the cooldowns a gateway remembers.**
+  `tamias limits [--db PATH] [--limits PATH]` lists model, provider, refusing
+  status, remaining time, strikes and reason; `--clear MODEL` forgets every
+  provider's lockout for one model and `--clear-all` forgets the ledger. It
+  reads the same `limits.db` beside the log that `serve` writes, and does not
+  create either file when there is nothing to show.
+- **An unusable database path is one line, not a traceback.** `serve`, `prune`,
+  `demo` and `limits` now report a directory that cannot be created, a file
+  that is not SQLite, or a store that cannot be initialised as a clean
+  `tamias <command>: ...` error. `StoreError`, `KeysError` and `LimitsError`
+  wrap the failure at the boundary, so no raw `sqlite3` traceback reaches an
+  operator.
+- **A single-upstream gateway still remembers cooldowns.** The limit ledger used
+  to be created only when a provider catalogue existed, so `serve --upstream`
+  silently ignored both `--limits` and the default `limits.db`; a restart then
+  forgot every lockout. It is now always opened and persisted, and remains
+  in-memory only when the request log is `:memory:`.
+- **Start-up discovery is bounded by the slowest provider, not by their sum.**
+  Configured providers are queried concurrently (at most eight workers), so one
+  unreachable provider no longer adds its full timeout to every other provider
+  before the port can bind.
+- **`doctor` warns before a cache-token report prices UNKNOWN.** A model with
+  incomplete input/output rates gets `WARN Price sheet models`, and a model
+  missing `cached_input`/`cache_write` gets `WARN Price sheet cache`. Both stay
+  warnings: the sheet is still usable for requests that do not carry those
+  counts.
 
 ## [1.0.2] - 2026-11-08
 

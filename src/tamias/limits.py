@@ -84,6 +84,10 @@ QUOTA_RESET_HEADERS = (
 #: answered since the window started has told us nothing new.
 QUOTA_TTL_SECONDS = 600.0
 
+
+class LimitsError(ValueError):
+    """The cooldown ledger could not be opened or initialised."""
+
 #: The longest cooldown any one provider hint may impose.  A provider is free to
 #: ask for a day off; it is not free to park a model for a century because it
 #: sent a malformed or epoch-valued ``Retry-After``.  Without this clamp one
@@ -264,15 +268,24 @@ class LimitLedger:
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._path = Path(path)
         if str(path) != ":memory:":
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise LimitsError(
+                    f"cannot create the limits directory {self._path.parent}: {exc}"
+                ) from exc
         target = path if str(path) == ":memory:" else self._path
-        self._conn = sqlite3.connect(target, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        apply_ledger_pragmas(self._conn)
+        try:
+            self._conn = sqlite3.connect(target, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            apply_ledger_pragmas(self._conn)
+        except sqlite3.Error as exc:
+            raise LimitsError(f"cannot open the limits file {self._path}: {exc}") from exc
         self._lock = threading.Lock()
-        with self._lock:
-            self._conn.executescript(
-                f"""
+        try:
+            with self._lock:
+                self._conn.executescript(
+                    f"""
 CREATE TABLE IF NOT EXISTS {_TABLE} (
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -291,8 +304,13 @@ CREATE TABLE IF NOT EXISTS {_QUOTA_TABLE} (
     updated REAL NOT NULL
 );
 """
-            )
-            self._conn.commit()
+                )
+                self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.close()
+            raise LimitsError(
+                f"cannot initialise the limits file {self._path}: {exc}"
+            ) from exc
         if str(path) != ":memory:":
             try:
                 Path(path).chmod(0o600)

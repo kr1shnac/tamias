@@ -1,12 +1,13 @@
 # Architecture
 
-Tamias is a local, single-user, OpenAI-compatible HTTP proxy that can sit on
-top of several providers. An agent points its base URL at tamias; tamias
-decides which configured provider serves the named model, presents that
-provider's credential, logs what the request cost, and (optionally) rewrites
-the model selection before forwarding. The unit of intervention is **one HTTP
-request**: tamias sees only that request's messages, keeps no turn
-orchestration, and never asks the agent's harness to change.
+Tamias is an OpenAI-compatible HTTP proxy that can run locally for one user or
+as an authenticated shared gateway for a small team. It can sit on top of
+several providers. An agent points its base URL at tamias; tamias decides which
+configured provider serves the named model, presents that provider's
+credential, logs what the request cost, and (optionally) rewrites the model
+selection before forwarding. The unit of intervention is **one HTTP request**:
+tamias sees only that request's messages, keeps no turn orchestration, and never
+asks the agent's harness to change.
 
 Tamias is never a provider itself: it ships no model and issues no credential.
 
@@ -27,7 +28,7 @@ Agent / client  ──HTTP POST──▶  tamias :8000  ──same request──
 | `providers` | `load_providers(path)`, `ProviderCatalogue` | Maps a model to the provider that serves it, and applies that provider's credential. Secrets are read once at start-up from an env var or a command. |
 | `candidates` | `build_pool(...)`, `CandidatePool` | Runs the three routing gates and ranks what survives (cheapest first). |
 | `limits` | `LimitLedger` | Remembers provider lockouts (429/402/403/5xx/transport) in SQLite with an escalating cooldown. |
-| `discovery` | `discover(provider)` | Reads `/v1/models` per provider, caches it, and merges it under hand-written registry entries. |
+| `discovery` | `discover(catalogue)` | Reads `/v1/models` from every configured provider concurrently, caches each answer, and merges it under hand-written registry entries. |
 | `router` | `decide(body, state, config)` | Pure function: reads the body and session state, returns a `Decision(action, target_model, reason)`. Never mutates the body. |
 | `router_config` | `load_router_config(path)` | Parses the router TOML into a `RouterConfig`. Strict validation; a typo fails loudly. |
 | `proxy` | `create_app(upstream, store, sheet, mode)` | Builds the FastAPI app, registers the three adapter routes plus the catch-all, and applies the routing mode. |
@@ -94,8 +95,11 @@ provider entry (`api_key_env` / `api_key_command`), never from the client. See
    into the model to run, subject to the fail-closed guards (see
    [`ROUTING.md`](ROUTING.md)).
 4. **Forward** — the body goes to the provider; the SSE response is relayed
-   chunk-by-chunk without buffering; upstream status codes pass through;
-   `Authorization` (or `x-api-key`) is forwarded untouched.
+   chunk-by-chunk without buffering; upstream status codes pass through. A
+   client credential is forwarded only when tamias did not authenticate the
+   request itself: a shared token or company key is dropped before the upstream
+   call, and with a provider catalogue the configured provider credential is
+   applied instead.
 5. **Report** — `tamias report` prices the log cache-aware and
    can report a negative saving. This is arithmetic over logged counts, not a
    measurement of a bill.
@@ -113,10 +117,10 @@ table: requests
   output_tokens INTEGER        -- NULL = upstream did not report
   cached_input_tokens INTEGER  -- NULL = upstream did not report
   cache_write_tokens INTEGER   -- NULL = upstream did not report
-  cost_usd REAL                -- NULL = cost is UNKNOWN
+  cost_usd REAL                -- legacy; NULL on new rows
   price_sheet_date TEXT NOT NULL
-  latency_ms INTEGER
-  status TEXT NOT NULL         -- e.g. "200", "500"
+  latency_ms INTEGER           -- NULL = not measured
+  status TEXT NOT NULL         -- e.g. "200", "502"
   decision_action TEXT NOT NULL -- "STAY" or "SWITCH"
   decision_target_model TEXT   -- NULL for STAY, model id for SWITCH
   decision_reason TEXT NOT NULL
@@ -125,7 +129,21 @@ table: requests
   provider_cost_usd REAL        -- NULL when the provider reported no cost
   generation_id TEXT            -- provider generation, NULL when not reported
   project TEXT                  -- NULL when the run had no --project
+  effort_requested TEXT         -- NULL = not requested/unknown
+  effort_used TEXT              -- NULL = not applied/unknown
+  decision_target_effort TEXT   -- effort a SWITCH would apply
+  computed_list_cost_usd REAL   -- list arithmetic; NULL = UNKNOWN
+  cost_source TEXT              -- "computed" or "unknown"
+  failure_stage TEXT            -- "setup"/"stream"; NULL = no coded failure
+  failure_type TEXT             -- coded cause, never raw exception text
+  router_mode TEXT              -- "shadow"/"off"/"active" in force
+  route TEXT                    -- "chat"/"messages"/"responses"/"passthrough"
 ```
+
+`computed_list_cost_usd` is the sheet arithmetic and `cost_source` labels it;
+`provider_cost_usd` is the provider's own report, an independent measurement.
+The older `cost_usd` column is written only by versions before the split, so a
+new row leaves it NULL rather than inventing a source for it.
 
 `NULL` always means UNKNOWN, never zero. The only free-text column is
 `decision_reason`, which holds a tool name (`bash`, `glob`, `read`), a
@@ -134,8 +152,9 @@ header.
 
 ## Platforms
 
-Tamias is a local, single-user, loopback proxy, which is what makes the platform
-matrix small: it only needs to run on the machine that runs your agent.
+Tamias is a loopback proxy by default, which keeps the platform matrix small:
+it only needs to run on the machine that runs your agent. It can also bind a
+non-loopback address for a team, but only with authentication configured.
 
 - **Python 3.11 or newer.** The wheel is pure Python (`py3-none-any`), so there
   is nothing to compile.
